@@ -3,6 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function ok(data: any = {}, res?: NextResponse) {
   const r = res ?? NextResponse.json({ success: true, ...data });
   return r;
