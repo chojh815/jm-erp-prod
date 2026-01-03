@@ -1,18 +1,20 @@
 // src/app/api/proforma/[id]/pdf/route.ts
+import React from "react";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { renderToStream } from "@react-pdf/renderer";
+import type { DocumentProps } from "@react-pdf/renderer";
 import ProformaInvoicePDF from "@/pdf/ProformaInvoicePDF";
-import React from "react";
 
 export const runtime = "nodejs"; // react-pdf는 node 런타임 사용
+export const dynamic = "force-dynamic";
 
 export async function GET(
-  req: NextRequest,
+  _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const id = params.id;
+    const id = params?.id?.toString().trim();
 
     if (!id) {
       return NextResponse.json({ error: "Missing PI ID" }, { status: 400 });
@@ -50,12 +52,19 @@ export async function GET(
     // 3) 숫자 포맷 함수
     const formatUnitPrice = (value: number) => {
       const v = Number(value || 0);
+
+      // 일단 4자리까지 만들고, 뒤의 불필요한 0 제거
       let formatted = v.toFixed(4).replace(/\.?0+$/, "");
+
+      // 소수점이 아예 없으면 .00 붙임
       if (!formatted.includes(".")) formatted += ".00";
-      const decimals = formatted.split(".")[1];
+
+      // 소수점 최소 2자리 보장
+      const decimals = formatted.split(".")[1] ?? "";
       if (decimals.length < 2) {
         formatted += "0".repeat(2 - decimals.length);
       }
+
       return formatted;
     };
 
@@ -66,42 +75,37 @@ export async function GET(
       }).format(Number(v || 0));
 
     // 4) 라인 포맷 적용
-    const finalLines = safeLines.map((l) => ({
-      ...l,
-      unit_price_display: `$${formatUnitPrice(
-        l.unit_price ?? (l as any).unitPrice ?? 0
-      )}`,
-      amount_display: `$${formatAmount(
-        l.amount ??
-          Number(l.qty || 0) *
-            Number(l.unit_price ?? (l as any).unitPrice ?? 0)
-      )}`,
-    }));
+    const finalLines = safeLines.map((l) => {
+      const unitPrice = Number(l.unit_price ?? (l as any).unitPrice ?? 0);
+      const qty = Number(l.qty || 0);
+      const amount = Number(l.amount ?? qty * unitPrice);
+
+      return {
+        ...l,
+        unit_price_display: `$${formatUnitPrice(unitPrice)}`,
+        amount_display: `$${formatAmount(amount)}`,
+      };
+    });
 
     const headerTotal =
-      typeof header.total_amount === "number"
-        ? header.total_amount
-        : safeLines.reduce(
-            (sum, l) =>
-              sum +
-              Number(
-                l.amount ??
-                  Number(l.qty || 0) *
-                    Number(l.unit_price ?? (l as any).unitPrice ?? 0)
-              ),
-            0
-          );
+      typeof (header as any).total_amount === "number"
+        ? (header as any).total_amount
+        : safeLines.reduce((sum, l) => {
+            const unitPrice = Number(l.unit_price ?? (l as any).unitPrice ?? 0);
+            const qty = Number(l.qty || 0);
+            const amount = Number(l.amount ?? qty * unitPrice);
+            return sum + amount;
+          }, 0);
 
     const totalDisplay = `$${formatAmount(headerTotal)}`;
-
     const signatureUrl = (header as any).signature_url || null;
 
-    // 5) PDF 스트림 생성 (여기가 핵심 수정 부분)
-    const element = React.createElement(ProformaInvoicePDF, {
+    // 5) PDF 스트림 생성 (✅ 타입 에러 해결: DocumentProps로 캐스팅)
+    const element = React.createElement(ProformaInvoicePDF as any, {
       header: { ...header, total_display: totalDisplay },
       lines: finalLines,
       signatureUrl,
-    });
+    }) as unknown as React.ReactElement<DocumentProps>;
 
     const pdfStream = await renderToStream(element);
 
@@ -109,11 +113,10 @@ export async function GET(
     resHeaders.set("Content-Type", "application/pdf");
     resHeaders.set(
       "Content-Disposition",
-      `inline; filename="${header.invoice_no || "proforma"}.pdf"`
+      `inline; filename="${(header as any).invoice_no || "proforma"}.pdf"`
     );
 
-    // @ts-ignore - ReadableStream 타입 이슈 무시
-    return new Response(pdfStream, { headers: resHeaders });
+    return new Response(pdfStream as any, { headers: resHeaders });
   } catch (err) {
     console.error("PI PDF error", err);
     return NextResponse.json(

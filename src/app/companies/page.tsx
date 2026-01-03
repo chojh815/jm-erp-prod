@@ -1167,7 +1167,7 @@ export default function CompaniesPage() {
                           ))}
                         </div>
                         <Button
-                          size="xs"
+                          size="sm"
                           variant="outline"
                           type="button"
                           onClick={addBuyerBrand}
@@ -1207,7 +1207,7 @@ export default function CompaniesPage() {
                           ))}
                         </div>
                         <Button
-                          size="xs"
+                          size="sm"
                           variant="outline"
                           type="button"
                           onClick={addBuyerDept}

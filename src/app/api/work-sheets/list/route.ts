@@ -14,6 +14,8 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const dynamic = "force-dynamic";
+
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
 }

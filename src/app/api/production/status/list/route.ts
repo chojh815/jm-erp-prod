@@ -61,17 +61,23 @@ export async function GET(req: Request) {
     const isAdmin = role === "admin";
 
     // 1) Load PO lines
-    const lineQ = supabaseAdmin.from("po_lines").select("*").eq("is_deleted", false);
+    // ✅ 1) 여기서부터 query를 any로 끊는다 (핵심!)
+let lineQ: any = supabaseAdmin
+  .from("po_lines")
+  .select("*")
+  .eq("is_deleted", false);
 
-    // optional column filters (best-effort)
-    if (ship_mode && ship_mode !== "ALL") {
-      lineQ.eq("ship_mode" as any, ship_mode as any);
-    }
-    if (courier_carrier && courier_carrier !== "ALL") {
-      lineQ.eq("courier_carrier" as any, courier_carrier as any);
-    }
+// ✅ 2) 필터는 그냥 문자열로 사용 (as any 필요 없음)
+if (ship_mode && ship_mode !== "ALL") {
+  lineQ = lineQ.eq("ship_mode", ship_mode);
+}
 
-    let lineRes: any = await lineQ;
+if (courier_carrier && courier_carrier !== "ALL") {
+  lineQ = lineQ.eq("courier_carrier", courier_carrier);
+}
+
+// ✅ 3) 실행
+let lineRes: any = await lineQ;
 
     // retry without optional filters if column missing
     if (lineRes?.error) {

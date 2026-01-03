@@ -1,97 +1,106 @@
 // src/app/api/dev/styles/next-style-no/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
 }
-function bad(message: string, status = 400, extra: any = {}) {
-  return NextResponse.json({ success: false, error: message, ...extra }, { status });
+function bad(message: string, status = 400) {
+  return NextResponse.json({ success: false, error: message }, { status });
+}
+
+function safeTrim(v: any) {
+  return (v ?? "").toString().trim();
+}
+
+function resolveCategoryCode(raw: string) {
+  const v = safeTrim(raw).toUpperCase();
+
+  // 이미 N/E/B/H 같은 코드면 그대로
+  if (["N", "E", "B", "H", "A", "R"].includes(v)) return v;
+
+  // 텍스트면 매핑 (필요시 추가)
+  if (v.includes("NECK")) return "N";
+  if (v.includes("EARR")) return "E";
+  if (v.includes("BRAC")) return "B";
+  if (v.includes("HAIR")) return "H";
+  if (v.includes("ANK")) return "A";
+  if (v.includes("RING")) return "R";
+
+  // 기본값
+  return "N";
 }
 
 /**
- * category/prefix 입력을 최대한 관대하게 처리:
- * - "Keyring (JK)" -> "JK"
- * - "JK" -> "JK"
- * - "K" -> "JK" (단일 문자면 "J" + 문자)
- * - "Hair (JH)" -> "JH"
+ * Generates next JM style no:
+ *  - Format: J{CategoryCode}{YY}{SEQ4}
+ *  - Example: JN250001
+ *
+ * Query params accepted:
+ *  - category / category_code / code : "Necklace" | "N" | ...
  */
-function normalizePrefix(input?: string | null) {
-  const raw = String(input ?? "").trim();
-  if (!raw) return "";
-
-  // 괄호 안의 2글자 prefix 우선 추출: "Keyring (JK)" -> "JK"
-  const m = raw.match(/\(([A-Za-z]{2})\)/);
-  if (m?.[1]) return m[1].toUpperCase();
-
-  // 이미 2글자면 그대로
-  if (/^[A-Za-z]{2}$/.test(raw)) return raw.toUpperCase();
-
-  // 1글자면 "J" + 글자 (N -> JN, K -> JK)
-  if (/^[A-Za-z]{1}$/.test(raw)) return `J${raw}`.toUpperCase();
-
-  // 앞 2글자라도 추정
-  const guess = raw.replace(/[^A-Za-z]/g, "").slice(0, 2);
-  return guess.toUpperCase();
-}
-
-function yearSuffix2(d: Date) {
-  // 2025 -> "25"
-  return String(d.getFullYear()).slice(-2);
-}
-
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
-    const url = new URL(req.url);
+    const sp = req.nextUrl.searchParams;
 
-    // 프론트에서 category=... 또는 prefix=... 어느 쪽으로 보내도 받게 함
-    const category = url.searchParams.get("category");
-    const prefixParam = url.searchParams.get("prefix");
-    const prefix = normalizePrefix(prefixParam || category);
+    const categoryRaw =
+      sp.get("category") || sp.get("category_code") || sp.get("code") || "N";
+    const catCode = resolveCategoryCode(categoryRaw);
 
-    if (!prefix) {
-      return bad(`Missing prefix/category (expected like JK or 'Keyring (JK)')`, 400);
-    }
-    if (!/^[A-Z]{2}$/.test(prefix)) {
-      return bad(`Invalid prefix '${prefix}' (expected 2 letters like JK/JN/JH)`, 400);
-    }
+    const yy = new Date().getFullYear().toString().slice(-2);
+    const basePrefix = `J${catCode}${yy}`; // e.g. JN25
 
-    const now = new Date();
-    const yy = yearSuffix2(now); // "25"
-    const base = `${prefix}${yy}`; // "JK25"
+    // ✅ 여러 테이블/컬럼 fallback (환경마다 다를 수 있어서)
+    const candidateTables = [
+      { table: "product_development_products", col: "style_no" },
+      { table: "product_development_products", col: "jm_style_no" },
+      { table: "dev_products", col: "style_no" },
+      { table: "products", col: "style_no" },
+    ];
 
-    // ✅ 여기서부터가 핵심: dev_products의 실제 스타일 컬럼명 사용
-    // 대부분 dev_products에는 jm_style_no가 있습니다 (당신 스키마 화면 기준).
-    const styleCol = "jm_style_no";
+    let lastStyleNo: string | null = null;
 
-    const { data, error } = await supabaseAdmin
-      .from("dev_products")
-      .select(styleCol)
-      .ilike(styleCol, `${base}%`)
-      .order(styleCol, { ascending: false })
-      .limit(1);
+    for (const c of candidateTables) {
+      const { data, error } = await supabaseAdmin
+        .from(c.table)
+        .select(c.col)
+        .ilike(c.col, `${basePrefix}%`)
+        .order(c.col, { ascending: false })
+        .limit(1);
 
-    if (error) {
-      console.error("next-style-no DB error:", error);
-      return bad("DB error", 500, { detail: error.message });
-    }
+      if (error) {
+        // 테이블/컬럼이 없을 수 있으니 무시하고 다음 후보로
+        continue;
+      }
 
-    let nextSerial = 1;
-
-    const lastVal = data?.[0]?.[styleCol];
-    if (lastVal) {
-      const last = String(lastVal);
-      const numericPart = last.slice(base.length); // 뒤 4자리
-      const parsed = parseInt(numericPart, 10);
-      if (!Number.isNaN(parsed)) nextSerial = parsed + 1;
+      const row = data?.[0] as any;
+      const v = row?.[c.col];
+      if (v) {
+        lastStyleNo = v.toString();
+        break;
+      }
     }
 
-    const serialStr = String(nextSerial).padStart(4, "0"); // "0001"
-    const styleNo = `${base}${serialStr}`; // "JK250001"
+    // lastStyleNo 예: JN250123
+    let nextSeq = 1;
+    if (lastStyleNo && lastStyleNo.startsWith(basePrefix)) {
+      const tail = lastStyleNo.slice(basePrefix.length); // "0123"
+      const n = Number(tail);
+      if (!Number.isNaN(n) && n >= 0) nextSeq = n + 1;
+    }
 
-    return ok({ prefix, base, styleNo });
+    const nextStyleNo = `${basePrefix}${String(nextSeq).padStart(4, "0")}`;
+
+    return ok({
+      style_no: nextStyleNo,
+      prefix: basePrefix,
+      seq: nextSeq,
+      category_code: catCode,
+    });
   } catch (e: any) {
-    console.error(e);
-    return bad("Server error", 500, { detail: e?.message || String(e) });
+    return bad(e?.message || "Failed to generate next style no", 500);
   }
 }

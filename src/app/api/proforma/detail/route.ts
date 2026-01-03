@@ -3,6 +3,10 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function errorResponse(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
 }
@@ -169,7 +173,7 @@ export async function GET(req: Request) {
     // =======================================================
     // 4) Header 변환 + Consignee / Notify / Final Dest + Brand/Dept
     // =======================================================
-    const buyerInfo = headerRow.buyers || null;
+    const buyerInfo = headerRow.buyers?.[0] ?? null;
 
     const poBrandName: string | null =
       (poHeaderRow as any)?.brand_name ?? null;

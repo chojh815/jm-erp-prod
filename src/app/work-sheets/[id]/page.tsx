@@ -4,7 +4,6 @@ import * as React from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import AppShell from "@/components/layout/AppShell";
-import type { AppRole } from "@/config/menuConfig";
 
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -21,8 +20,6 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
-
-type DevRole = AppRole;
 
 type WorkSheetHeader = {
   id: string;
@@ -80,7 +77,6 @@ type CompanyOption = {
   code: string | null;
   company_type?: string | null;
 };
-
 
 type SourcePolicy = "MANDATORY" | "PREFERRED" | "FREE";
 
@@ -276,11 +272,15 @@ export default function WorkSheetDetailPage() {
     try {
       const res = await fetch(`/api/work-sheets/${id}`, { cache: "no-store" });
       const json: ApiGetResponse = await res.json().catch(() => ({} as any));
-      if (!res.ok || !json?.success) throw new Error(json?.error || "Load failed");
+      if (!res.ok || !json?.success)
+        throw new Error(json?.error || "Load failed");
 
       const h = (json.header ?? null) as WorkSheetHeader | null;
-      const l = (json.lines ?? []).filter((x) => !x.is_deleted) as WorkSheetLine[];
-      const m = (json.materialsByLineId ?? {}) as Record<string, WorkSheetMaterialSpec[]>;
+      const l = (json.lines ?? []).filter(
+        (x) => !x.is_deleted
+      ) as WorkSheetLine[];
+      const m = (json.materialsByLineId ??
+        {}) as Record<string, WorkSheetMaterialSpec[]>;
       const p = (json.po ?? null) as any;
 
       setHeader(h);
@@ -295,25 +295,20 @@ export default function WorkSheetDetailPage() {
       });
 
       // ✅ masterLineId: "고정" 유지가 핵심
-      // - 기존 masterLineId가 현재 lines에 존재하면 그대로 유지
-      // - 없다면(처음 로드/라인 변경) 첫 라인으로 세팅
       setMasterLineId((prev) => {
         if (prev && l.some((x) => x.id === prev)) return prev;
         return l?.[0]?.id ?? null;
       });
 
-      // lastSavedHash는 "다음 상태" 기준으로 저장해야 정확
       const nextActive =
-        (activeLineId && l.some((x) => x.id === activeLineId))
+        activeLineId && l.some((x) => x.id === activeLineId)
           ? activeLineId
-          : (l?.[0]?.id ?? null);
+          : l?.[0]?.id ?? null;
 
-      // master는 위에서 setMasterLineId로 비동기 반영되므로,
-      // hash는 "현재 prev 유지 시도"를 반영한 계산으로 안전하게:
       const nextMaster =
-        (masterLineId && l.some((x) => x.id === masterLineId))
+        masterLineId && l.some((x) => x.id === masterLineId)
           ? masterLineId
-          : (l?.[0]?.id ?? null);
+          : l?.[0]?.id ?? null;
 
       lastSavedHashRef.current = stableStringify({
         header: h,
@@ -341,7 +336,6 @@ export default function WorkSheetDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-
   function confirmIfDirty(actionLabel: string) {
     if (!isDirty) return true;
     return window.confirm(
@@ -351,7 +345,11 @@ export default function WorkSheetDetailPage() {
 
   function openPdf(mode: "vendor" | "internal") {
     if (!confirmIfDirty("PDF 열기")) return;
-    window.open(`/work-sheets/${id}/pdf?mode=${mode}`, "_blank", "noopener,noreferrer");
+    window.open(
+      `/work-sheets/${id}/pdf?mode=${mode}`,
+      "_blank",
+      "noopener,noreferrer"
+    );
   }
 
   async function onSave() {
@@ -433,15 +431,22 @@ export default function WorkSheetDetailPage() {
       });
 
       const json: ApiSaveResponse = await res.json().catch(() => ({} as any));
-      if (!res.ok || !json?.success) throw new Error(json?.error || "Save failed");
+      if (!res.ok || !json?.success)
+        throw new Error(json?.error || "Save failed");
 
-      const incomingHeader = (json.header ?? null) as WorkSheetHeader | null;
-      const incomingLines = (json.lines ?? []).filter((l: any) => !l.is_deleted) as WorkSheetLine[];
+      const incomingHeader = (json.header ??
+        null) as WorkSheetHeader | null;
+      const incomingLines = (json.lines ?? []).filter(
+        (l: any) => !l.is_deleted
+      ) as WorkSheetLine[];
       const incomingMaterials =
-        (json.materialsByLineId ?? {}) as Record<string, WorkSheetMaterialSpec[]>;
+        (json.materialsByLineId ??
+          {}) as Record<string, WorkSheetMaterialSpec[]>;
       const incomingPo = (json as any)?.po ?? null;
 
-      const nextHeader = incomingHeader ? { ...(header as any), ...(incomingHeader as any) } : header;
+      const nextHeader = incomingHeader
+        ? { ...(header as any), ...(incomingHeader as any) }
+        : header;
 
       // ✅ lines merge: 로컬 값을 "우선" 유지하면서 서버값 덮기
       const incomingMap = new Map(incomingLines.map((x) => [x.id, x]));
@@ -460,28 +465,25 @@ export default function WorkSheetDetailPage() {
       setLines(nextLines);
       setMaterialsByLineId(nextMaterials);
 
-      // ✅ activeLineId 유지
       setActiveLineId((prev) => {
         if (prev && nextLines.some((x) => x.id === prev)) return prev;
         return nextLines?.[0]?.id ?? null;
       });
 
-      // ✅ masterLineId "고정 유지" (핵심)
       setMasterLineId((prev) => {
         if (prev && nextLines.some((x) => x.id === prev)) return prev;
         return nextLines?.[0]?.id ?? null;
       });
 
-      // hash는 "저장 완료된 다음 상태" 기준으로
       const nextActive =
-        (activeLineId && nextLines.some((x) => x.id === activeLineId))
+        activeLineId && nextLines.some((x) => x.id === activeLineId)
           ? activeLineId
-          : (nextLines?.[0]?.id ?? null);
+          : nextLines?.[0]?.id ?? null;
 
       const nextMaster =
-        (masterLineId && nextLines.some((x) => x.id === masterLineId))
+        masterLineId && nextLines.some((x) => x.id === masterLineId)
           ? masterLineId
-          : (nextLines?.[0]?.id ?? null);
+          : nextLines?.[0]?.id ?? null;
 
       lastSavedHashRef.current = stableStringify({
         header: nextHeader,
@@ -505,7 +507,8 @@ export default function WorkSheetDetailPage() {
   const brandDept = [brand, dept].filter(Boolean).join(" / ");
 
   return (
-    <AppShell title="Work Sheets" requiredRoles={["DEV", "ADMIN"] as DevRole[]}>
+    // ✅ requiredRoles 제거 (AppShellProps에 없어서 빌드 에러)
+    <AppShell title="Work Sheets">
       <div className="mx-auto w-full max-w-[1200px] space-y-4 p-4">
         <Card>
           <CardHeader className="flex flex-row items-start justify-between gap-3">
@@ -513,31 +516,49 @@ export default function WorkSheetDetailPage() {
               <CardTitle>Work Sheet Detail</CardTitle>
 
               <div className="mt-1 text-sm text-muted-foreground">
-                PO: <span className="font-medium text-foreground">{header?.po_no ?? "-"}</span>
+                PO:{" "}
+                <span className="font-medium text-foreground">
+                  {header?.po_no ?? "-"}
+                </span>
                 {" · "}
-                Buyer: <span className="font-medium text-foreground">{header?.buyer_name ?? "-"}</span>
+                Buyer:{" "}
+                <span className="font-medium text-foreground">
+                  {header?.buyer_name ?? "-"}
+                </span>
                 {" · "}
-                Currency: <span className="font-medium text-foreground">{header?.currency ?? "USD"}</span>
+                Currency:{" "}
+                <span className="font-medium text-foreground">
+                  {header?.currency ?? "USD"}
+                </span>
               </div>
 
               <div className="mt-1 text-xs text-muted-foreground">
                 {brandDept ? (
                   <>
-                    Brand/Dept: <span className="text-foreground">{brandDept}</span>{" · "}
+                    Brand/Dept:{" "}
+                    <span className="text-foreground">{brandDept}</span>
+                    {" · "}
                   </>
                 ) : null}
                 {po?.ship_mode ? (
                   <>
-                    Ship Mode: <span className="text-foreground">{po.ship_mode}</span>{" · "}
+                    Ship Mode:{" "}
+                    <span className="text-foreground">{po.ship_mode}</span>
+                    {" · "}
                   </>
                 ) : null}
-                Req Ship Date: <span className="text-foreground">{reqShipDate || "-"}</span>
+                Req Ship Date:{" "}
+                <span className="text-foreground">{reqShipDate || "-"}</span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               {didInitRef.current ? (
-                isDirty ? <Badge variant="destructive">Draft</Badge> : <Badge variant="secondary">Saved</Badge>
+                isDirty ? (
+                  <Badge variant="destructive">Draft</Badge>
+                ) : (
+                  <Badge variant="secondary">Saved</Badge>
+                )
               ) : (
                 <Badge variant="outline">Loading...</Badge>
               )}
@@ -563,10 +584,18 @@ export default function WorkSheetDetailPage() {
                 {saving ? "Saving..." : "Save"}
               </Button>
 
-              <Button variant="outline" onClick={() => openPdf("vendor")} disabled={!header}>
+              <Button
+                variant="outline"
+                onClick={() => openPdf("vendor")}
+                disabled={!header}
+              >
                 PDF Vendor
               </Button>
-              <Button variant="outline" onClick={() => openPdf("internal")} disabled={!header}>
+              <Button
+                variant="outline"
+                onClick={() => openPdf("internal")}
+                disabled={!header}
+              >
                 PDF Internal
               </Button>
 
@@ -583,7 +612,9 @@ export default function WorkSheetDetailPage() {
                 <Label>Special Instructions (공통 주의사항)</Label>
                 <Textarea
                   value={header?.general_notes ?? ""}
-                  onChange={(e) => updateHeader({ general_notes: e.target.value })}
+                  onChange={(e) =>
+                    updateHeader({ general_notes: e.target.value })
+                  }
                   placeholder="Special instructions..."
                   rows={4}
                   disabled={!header}
@@ -607,7 +638,10 @@ export default function WorkSheetDetailPage() {
                 <Label>Work</Label>
                 <Textarea
                   value={masterLine?.work_notes ?? ""}
-                  onChange={(e) => masterLineId && updateLine(masterLineId, { work_notes: e.target.value })}
+                  onChange={(e) =>
+                    masterLineId &&
+                    updateLine(masterLineId, { work_notes: e.target.value })
+                  }
                   rows={5}
                   placeholder="Work instructions..."
                   disabled={!masterLineId}
@@ -617,7 +651,10 @@ export default function WorkSheetDetailPage() {
                 <Label>QC</Label>
                 <Textarea
                   value={masterLine?.qc_points ?? ""}
-                  onChange={(e) => masterLineId && updateLine(masterLineId, { qc_points: e.target.value })}
+                  onChange={(e) =>
+                    masterLineId &&
+                    updateLine(masterLineId, { qc_points: e.target.value })
+                  }
                   rows={5}
                   placeholder="QC points..."
                   disabled={!masterLineId}
@@ -627,7 +664,10 @@ export default function WorkSheetDetailPage() {
                 <Label>Packing</Label>
                 <Textarea
                   value={masterLine?.packing_notes ?? ""}
-                  onChange={(e) => masterLineId && updateLine(masterLineId, { packing_notes: e.target.value })}
+                  onChange={(e) =>
+                    masterLineId &&
+                    updateLine(masterLineId, { packing_notes: e.target.value })
+                  }
                   rows={5}
                   placeholder="Packing notes..."
                   disabled={!masterLineId}
@@ -656,7 +696,8 @@ export default function WorkSheetDetailPage() {
                 <div className="space-y-2">
                   {lines.map((l) => {
                     const active = l.id === activeLineId;
-                    const thumb = l.image_url_primary || safeArray(l.image_urls)[0] || null;
+                    const thumb =
+                      l.image_url_primary || safeArray(l.image_urls)[0] || null;
 
                     return (
                       <button
@@ -665,14 +706,20 @@ export default function WorkSheetDetailPage() {
                         onClick={() => setActiveLineId(l.id)}
                         className={[
                           "w-full rounded-md border p-2 text-left transition",
-                          active ? "border-primary/60 bg-primary/5" : "hover:bg-muted/50",
+                          active
+                            ? "border-primary/60 bg-primary/5"
+                            : "hover:bg-muted/50",
                         ].join(" ")}
                       >
                         <div className="flex gap-3">
                           <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-md border bg-muted">
                             {thumb ? (
                               // eslint-disable-next-line @next/next/no-img-element
-                              <img src={thumb} alt={l.jm_style_no} className="h-full w-full object-cover" />
+                              <img
+                                src={thumb}
+                                alt={l.jm_style_no}
+                                className="h-full w-full object-cover"
+                              />
                             ) : (
                               <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
                                 No Image
@@ -682,8 +729,12 @@ export default function WorkSheetDetailPage() {
 
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
-                              <div className="truncate font-medium">{l.jm_style_no}</div>
-                              <div className="text-xs text-muted-foreground">Qty {nnum(l.qty, 0)}</div>
+                              <div className="truncate font-medium">
+                                {l.jm_style_no}
+                              </div>
+                              <div className="text-xs text-muted-foreground">
+                                Qty {nnum(l.qty, 0)}
+                              </div>
                             </div>
                             <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
                               {l.plating_color ? (
@@ -692,7 +743,9 @@ export default function WorkSheetDetailPage() {
                                 </span>
                               ) : null}
                               {l.description ? (
-                                <span className="truncate">{String(l.description).slice(0, 50)}</span>
+                                <span className="truncate">
+                                  {String(l.description).slice(0, 50)}
+                                </span>
                               ) : null}
                             </div>
                           </div>
@@ -708,12 +761,16 @@ export default function WorkSheetDetailPage() {
           {/* Right: line detail */}
           <Card className="h-full md:col-span-2">
             <CardHeader>
-              <CardTitle className="text-base">{activeLine?.jm_style_no ?? "(select style)"}</CardTitle>
+              <CardTitle className="text-base">
+                {activeLine?.jm_style_no ?? "(select style)"}
+              </CardTitle>
             </CardHeader>
 
             <CardContent className="space-y-4">
               {!activeLine ? (
-                <div className="text-sm text-muted-foreground">Select a line.</div>
+                <div className="text-sm text-muted-foreground">
+                  Select a line.
+                </div>
               ) : (
                 <>
                   <Tabs defaultValue="spec" className="w-full">
@@ -733,7 +790,11 @@ export default function WorkSheetDetailPage() {
                           <Label>Buyer Style / SKU</Label>
                           <Input
                             value={activeLine.buyer_style ?? ""}
-                            onChange={(e) => updateLine(activeLine.id, { buyer_style: e.target.value })}
+                            onChange={(e) =>
+                              updateLine(activeLine.id, {
+                                buyer_style: e.target.value,
+                              })
+                            }
                             placeholder="Optional"
                           />
                         </div>
@@ -743,7 +804,11 @@ export default function WorkSheetDetailPage() {
                         <Label>Description</Label>
                         <Input
                           value={activeLine.description ?? ""}
-                          onChange={(e) => updateLine(activeLine.id, { description: e.target.value })}
+                          onChange={(e) =>
+                            updateLine(activeLine.id, {
+                              description: e.target.value,
+                            })
+                          }
                           placeholder="e.g. 5star bracelet"
                         />
                       </div>
@@ -753,7 +818,11 @@ export default function WorkSheetDetailPage() {
                           <Label>Qty</Label>
                           <Input
                             value={String(activeLine.qty ?? 0)}
-                            onChange={(e) => updateLine(activeLine.id, { qty: nnum(e.target.value, 0) })}
+                            onChange={(e) =>
+                              updateLine(activeLine.id, {
+                                qty: nnum(e.target.value, 0),
+                              })
+                            }
                             className="text-right"
                             inputMode="numeric"
                           />
@@ -762,7 +831,11 @@ export default function WorkSheetDetailPage() {
                           <Label>Plating Color</Label>
                           <Input
                             value={activeLine.plating_color ?? ""}
-                            onChange={(e) => updateLine(activeLine.id, { plating_color: e.target.value })}
+                            onChange={(e) =>
+                              updateLine(activeLine.id, {
+                                plating_color: e.target.value,
+                              })
+                            }
                           />
                         </div>
                       </div>
@@ -771,7 +844,11 @@ export default function WorkSheetDetailPage() {
                         <Label>Plating Spec</Label>
                         <Input
                           value={activeLine.plating_spec ?? ""}
-                          onChange={(e) => updateLine(activeLine.id, { plating_spec: e.target.value })}
+                          onChange={(e) =>
+                            updateLine(activeLine.id, {
+                              plating_spec: e.target.value,
+                            })
+                          }
                         />
                       </div>
 
@@ -779,31 +856,43 @@ export default function WorkSheetDetailPage() {
                         <Label>Spec Summary</Label>
                         <Textarea
                           value={activeLine.spec_summary ?? ""}
-                          onChange={(e) => updateLine(activeLine.id, { spec_summary: e.target.value })}
+                          onChange={(e) =>
+                            updateLine(activeLine.id, {
+                              spec_summary: e.target.value,
+                            })
+                          }
                           rows={3}
                         />
                       </div>
 
                       <Separator />
                       <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
-                        ✅ Work/QC/Packing은 공통 박스로 보이지만, DB 구조상 “고정된 1개 라인(masterLineId)”에 저장됩니다.
+                        ✅ Work/QC/Packing은 공통 박스로 보이지만, DB 구조상
+                        “고정된 1개 라인(masterLineId)”에 저장됩니다.
                         <br />
-                        (Save 후에도 masterLineId가 유지되므로 입력값이 사라지지 않습니다.)
+                        (Save 후에도 masterLineId가 유지되므로 입력값이 사라지지
+                        않습니다.)
                       </div>
                     </TabsContent>
 
                     <TabsContent value="materials" className="space-y-3">
                       <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
-                        Materials / Operations는 <span className="font-medium text-foreground">Product Development</span>에서
-                        자동으로 가져옵니다. (Work Sheet에서는 수정/추가하지 않습니다.)
+                        Materials / Operations는{" "}
+                        <span className="font-medium text-foreground">
+                          Product Development
+                        </span>
+                        에서 자동으로 가져옵니다. (Work Sheet에서는
+                        수정/추가하지 않습니다.)
                       </div>
 
                       <div className="space-y-2">
                         {(materialsByLineId[activeLine.id] ?? [])
                           .filter((s) => !s.is_deleted)
-                          .sort((a, b) => nnum(a.sort_order, 0) - nnum(b.sort_order, 0)).length === 0 ? (
+                          .sort((a, b) => nnum(a.sort_order, 0) - nnum(b.sort_order, 0))
+                          .length === 0 ? (
                           <div className="text-sm text-muted-foreground">
-                            No material specs found for this style. (Check Product Development)
+                            No material specs found for this style. (Check
+                            Product Development)
                           </div>
                         ) : (
                           <div className="overflow-x-auto rounded-md border">
@@ -820,12 +909,22 @@ export default function WorkSheetDetailPage() {
                               <tbody>
                                 {(materialsByLineId[activeLine.id] ?? [])
                                   .filter((s) => !s.is_deleted)
-                                  .sort((a, b) => nnum(a.sort_order, 0) - nnum(b.sort_order, 0))
+                                  .sort(
+                                    (a, b) =>
+                                      nnum(a.sort_order, 0) -
+                                      nnum(b.sort_order, 0)
+                                  )
                                   .map((s) => (
                                     <tr key={s.id} className="border-t">
-                                      <td className="p-2">{s.material_type ?? ""}</td>
-                                      <td className="p-2">{s.material_name ?? ""}</td>
-                                      <td className="p-2">{s.spec_text ?? ""}</td>
+                                      <td className="p-2">
+                                        {s.material_type ?? ""}
+                                      </td>
+                                      <td className="p-2">
+                                        {s.material_name ?? ""}
+                                      </td>
+                                      <td className="p-2">
+                                        {s.spec_text ?? ""}
+                                      </td>
                                       <td className="p-2">{s.color ?? ""}</td>
                                       <td className="p-2">{s.note ?? ""}</td>
                                     </tr>
@@ -839,62 +938,71 @@ export default function WorkSheetDetailPage() {
 
                     <TabsContent value="vendor" className="space-y-3">
                       <div className="grid gap-3 md:grid-cols-2">
+                        <div className="md:col-span-2 space-y-2">
+                          <Label>Vendor / Subcontractor</Label>
+                          <div className="flex flex-col md:flex-row gap-2">
+                            <Input
+                              placeholder="Search vendor..."
+                              value={vendorSearch}
+                              onChange={(e) => setVendorSearch(e.target.value)}
+                            />
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={loadVendors}
+                              disabled={vendorsLoading}
+                              className="md:w-[140px]"
+                            >
+                              {vendorsLoading ? "Loading..." : "Refresh"}
+                            </Button>
+                          </div>
 
-          <div className="md:col-span-2 space-y-2">
-            <Label>Vendor / Subcontractor</Label>
-            <div className="flex flex-col md:flex-row gap-2">
-              <Input
-                placeholder="Search vendor..."
-                value={vendorSearch}
-                onChange={(e) => setVendorSearch(e.target.value)}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={loadVendors}
-                disabled={vendorsLoading}
-                className="md:w-[140px]"
-              >
-                {vendorsLoading ? "Loading..." : "Refresh"}
-              </Button>
-            </div>
+                          <Select
+                            value={(activeLine.vendor_id ?? "NONE") as any}
+                            onValueChange={(v) => {
+                              const val = v === "NONE" ? null : v;
+                              updateLine(activeLine.id, { vendor_id: val });
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select vendor" />
+                            </SelectTrigger>
+                            <SelectContent className="max-h-[340px]">
+                              <SelectItem value="NONE">None</SelectItem>
+                              {filteredVendors.map((v) => (
+                                <SelectItem key={v.id} value={v.id}>
+                                  {vendorLabel(v)}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
 
-            <Select
-              value={(activeLine.vendor_id ?? "NONE") as any}
-              onValueChange={(v) => {
-                const val = v === "NONE" ? null : v;
-                updateLine(activeLine.id, { vendor_id: val });
-              }}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select vendor" />
-              </SelectTrigger>
-              <SelectContent className="max-h-[340px]">
-                <SelectItem value="NONE">None</SelectItem>
-                {filteredVendors.map((v) => (
-                  <SelectItem key={v.id} value={v.id}>
-                    {vendorLabel(v)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+                          {vendorLoadError ? (
+                            <div className="text-xs text-red-600">
+                              {vendorLoadError}
+                            </div>
+                          ) : null}
 
-            {vendorLoadError ? (
-              <div className="text-xs text-red-600">{vendorLoadError}</div>
-            ) : null}
-
-            {activeLine.vendor_id && vendorMap.get(activeLine.vendor_id) ? (
-              <div className="text-xs text-slate-500">
-                Selected: {vendorLabel(vendorMap.get(activeLine.vendor_id)!)}
-              </div>
-            ) : null}
-          </div>
+                          {activeLine.vendor_id &&
+                          vendorMap.get(activeLine.vendor_id) ? (
+                            <div className="text-xs text-slate-500">
+                              Selected:{" "}
+                              {vendorLabel(
+                                vendorMap.get(activeLine.vendor_id)!
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
 
                         <div className="space-y-2">
                           <Label>Vendor Currency</Label>
                           <Input
                             value={activeLine.vendor_currency ?? ""}
-                            onChange={(e) => updateLine(activeLine.id, { vendor_currency: e.target.value })}
+                            onChange={(e) =>
+                              updateLine(activeLine.id, {
+                                vendor_currency: e.target.value,
+                              })
+                            }
                             placeholder="CNY / VND / KRW"
                           />
                         </div>
@@ -903,7 +1011,9 @@ export default function WorkSheetDetailPage() {
                           <Input
                             value={activeLine.vendor_unit_cost_local ?? ""}
                             onChange={(e) =>
-                              updateLine(activeLine.id, { vendor_unit_cost_local: e.target.value as any })
+                              updateLine(activeLine.id, {
+                                vendor_unit_cost_local: e.target.value as any,
+                              })
                             }
                             placeholder="e.g. 12.5"
                             inputMode="decimal"
@@ -918,7 +1028,9 @@ export default function WorkSheetDetailPage() {
           </Card>
         </div>
 
-        {loading ? <div className="text-sm text-muted-foreground">Loading...</div> : null}
+        {loading ? (
+          <div className="text-sm text-muted-foreground">Loading...</div>
+        ) : null}
       </div>
     </AppShell>
   );

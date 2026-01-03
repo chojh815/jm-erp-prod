@@ -1,6 +1,9 @@
 // src/app/api/packing-lists/list/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function bad(message: string, status = 500) {
   return NextResponse.json({ success: false, error: message }, { status });
@@ -16,12 +19,21 @@ function ok(data: any = {}) {
   );
 }
 
-export async function GET(req: Request) {
+// ILIKE 안전 처리: % _ 가 들어와도 검색이 깨지지 않게
+function escapeIlike(v: string) {
+  return v.replace(/[%_]/g, (m) => `\\${m}`);
+}
+
+export async function GET(req: NextRequest) {
   try {
-    const url = new URL(req.url);
-    const keyword = (url.searchParams.get("keyword") ?? "").trim();
-    const buyer = (url.searchParams.get("buyer") ?? "").trim();
-    const status = (url.searchParams.get("status") ?? "").trim();
+    const sp = req.nextUrl.searchParams;
+
+    const keywordRaw = (sp.get("keyword") ?? "").trim();
+    const buyerRaw = (sp.get("buyer") ?? "").trim();
+    const status = (sp.get("status") ?? "").trim();
+
+    const keyword = escapeIlike(keywordRaw);
+    const buyer = escapeIlike(buyerRaw);
 
     let q = supabaseAdmin
       .from("packing_list_headers")
@@ -32,12 +44,13 @@ export async function GET(req: Request) {
       .order("created_at", { ascending: false })
       .limit(200);
 
-    if (keyword) {
+    if (keywordRaw) {
+      // escape 사용 시 ilike에는 %...% 유지 + escape 문자 적용
       q = q.or(
         `packing_list_no.ilike.%${keyword}%,invoice_no.ilike.%${keyword}%,buyer_name.ilike.%${keyword}%`
       );
     }
-    if (buyer) q = q.ilike("buyer_name", `%${buyer}%`);
+    if (buyerRaw) q = q.ilike("buyer_name", `%${buyer}%`);
     if (status) q = q.eq("status", status);
 
     const { data, error } = await q;

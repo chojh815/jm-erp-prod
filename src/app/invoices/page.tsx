@@ -343,12 +343,12 @@ export default function InvoicesPage() {
       let cursorY = 15;
 
       doc.setFontSize(20);
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("COMMERCIAL INVOICE", pageWidth / 2, cursorY, { align: "center" });
       cursorY += 12;
 
       doc.setFontSize(9);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
 
       doc.text(`Buyer: ${header.buyer_name || "-"}`, marginLeft, cursorY);
       doc.text(`Invoice No: ${header.invoice_no || "-"}`, pageWidth - marginLeft, cursorY, {
@@ -368,11 +368,11 @@ export default function InvoicesPage() {
       doc.rect(marginLeft, cursorY, halfWidth, cellH);
       doc.rect(marginLeft + halfWidth, cursorY, halfWidth, cellH);
 
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Consignee", marginLeft + 2, cursorY + 6);
       doc.text("Notify Party", marginLeft + halfWidth + 2, cursorY + 6);
 
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       doc.setFontSize(9);
       doc.text(doc.splitTextToSize(consignee, halfWidth - 4), marginLeft + 2, cursorY + 12);
       doc.text(
@@ -395,9 +395,9 @@ export default function InvoicesPage() {
 
       const cooH = 20;
       doc.rect(marginLeft, cursorY, contentWidth, cooH);
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("COO / Certification", marginLeft + 2, cursorY + 6);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       doc.text(`COO: ${originDisplay}`, marginLeft + 2, cursorY + 12);
       doc.text(
         "WE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.",
@@ -442,7 +442,7 @@ export default function InvoicesPage() {
         y = 20;
       }
 
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.setFontSize(10);
       doc.text("Subtotal", marginLeft, y);
       doc.text(`${currency} ${fmtMoney(subtotal)}`, pageWidth - marginLeft, y, { align: "right" });

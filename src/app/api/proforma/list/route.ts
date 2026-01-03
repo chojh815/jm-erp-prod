@@ -2,6 +2,9 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 // 공통 응답 헬퍼
 function errorResponse(message: string, status = 400) {
   return NextResponse.json({ success: false, error: message }, { status });

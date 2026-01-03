@@ -341,7 +341,7 @@ function pickPerValue(r: any, base: "gw" | "nw" | "cbm"): number | null {
 }
 
 export default function PackingListDetailPage() {
-  const role: DevRole = "dev";
+  const role: AppRole = "admin";
   const params = useParams<{ id: string }>();
   const id = params?.id as string;
   const router = useRouter();
@@ -480,14 +480,35 @@ export default function PackingListDetailPage() {
 
             // ✅ UI는 *_per_carton을 유지하지만,
             // ✅ 서버/DB는 *_per_ctn 을 기대하는 경우가 많아서 "둘 다" 보낸다.
-            gw_per_carton: gw === null || gw === undefined || gw === "" ? null : n(gw, 0),
-            nw_per_carton: nw === null || nw === undefined || nw === "" ? null : n(nw, 0),
-            cbm_per_carton: cbm === null || cbm === undefined || cbm === "" ? null : n(cbm, 0),
+            gw_per_carton:
+  gw === null || gw === undefined || String(gw).trim() === ""
+    ? null
+    : n(gw, 0),
+
+            nw_per_carton:
+  nw === null || nw === undefined || String(nw).trim() === ""
+    ? null
+    : n(nw, 0),
+            cbm_per_carton:
+  cbm === null || cbm === undefined || String(cbm).trim() === ""
+    ? null
+    : n(cbm, 0),
 
             // ✅ 서버용 alias
-            gw_per_ctn: gw === null || gw === undefined || gw === "" ? null : n(gw, 0),
-            nw_per_ctn: nw === null || nw === undefined || nw === "" ? null : n(nw, 0),
-            cbm_per_ctn: cbm === null || cbm === undefined || cbm === "" ? null : n(cbm, 0),
+gw_per_ctn:
+  gw === null || gw === undefined || String(gw).trim() === ""
+    ? null
+    : n(gw, 0),
+
+nw_per_ctn:
+  nw === null || nw === undefined || String(nw).trim() === ""
+    ? null
+    : n(nw, 0),
+
+cbm_per_ctn:
+  cbm === null || cbm === undefined || String(cbm).trim() === ""
+    ? null
+    : n(cbm, 0),
 
             total_gw: n(l.total_gw, 0),
             total_nw: n(l.total_nw, 0),

@@ -148,9 +148,6 @@ function normalizeLine(row: any) {
     carton_no_to: to,
 
     // aliases for UI / legacy
-    nw_per_carton: nwPer,
-    gw_per_carton: gwPer,
-    cbm_per_carton: cbmPer,
     ct_no_from: from,
     ct_no_to: to,
   };

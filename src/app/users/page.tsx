@@ -19,8 +19,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 
+/**
+ * Users 페이지에서는 "manager" 역할도 사용하지만,
+ * AppShell/menuConfig의 AppRole 타입에는 "manager"가 없을 수 있다.
+ * => 권한 체크는 RoleOption으로 하고,
+ * => AppShell에 넘길 때는 안전하게 manager -> admin으로 매핑한다.
+ */
 type RoleOption = "viewer" | "staff" | "manager" | "admin";
-type DevRole = AppRole;
 
 type UserRow = {
   id: string;
@@ -31,12 +36,26 @@ type UserRow = {
   created_at: string | null;
 };
 
+function normalizeRole(v: any): RoleOption {
+  const s = (v ?? "").toString().trim().toLowerCase();
+  if (s === "admin") return "admin";
+  if (s === "manager") return "manager";
+  if (s === "staff") return "staff";
+  return "viewer";
+}
+
+// AppShell(AppRole)로 안전하게 변환 (manager는 admin으로 취급)
+function toAppShellRole(r: RoleOption): AppRole {
+  const shell = r === "manager" ? "admin" : r;
+  return shell as AppRole;
+}
+
 export default function UsersPage() {
   const router = useRouter();
   const supabase = React.useMemo(() => createSupabaseBrowserClient(), []);
 
   const [loading, setLoading] = React.useState(true);
-  const [role, setRole] = React.useState<DevRole | null>(null);
+  const [role, setRole] = React.useState<RoleOption | null>(null);
 
   // 신규 유저 생성 폼
   const [newEmail, setNewEmail] = React.useState("");
@@ -68,17 +87,13 @@ export default function UsersPage() {
       }
 
       // 응답이 어떤 형태든 최대한 잡아낸다.
-      let raw: any;
+      let raw: any[] = [];
 
-      if (Array.isArray(data)) {
-        raw = data;
-      } else if (Array.isArray((data as any).users)) {
-        raw = (data as any).users;
-      } else if (Array.isArray((data as any).data)) {
-        raw = (data as any).data;
-      } else if (Array.isArray((data as any).items)) {
-        raw = (data as any).items;
-      } else {
+      if (Array.isArray(data)) raw = data;
+      else if (Array.isArray((data as any).users)) raw = (data as any).users;
+      else if (Array.isArray((data as any).data)) raw = (data as any).data;
+      else if (Array.isArray((data as any).items)) raw = (data as any).items;
+      else {
         console.warn("Unknown users payload shape:", data);
         raw = [];
       }
@@ -87,7 +102,7 @@ export default function UsersPage() {
         id: u.id,
         email: u.email,
         name: u.name ?? null,
-        role: (u.role || "viewer") as RoleOption,
+        role: normalizeRole(u.role),
         is_active: u.is_active ?? true,
         created_at: u.created_at ?? null,
       }));
@@ -113,15 +128,13 @@ export default function UsersPage() {
         return;
       }
 
-      const r =
-        ((session.user.user_metadata as any)?.role as AppRole | undefined) ||
-        "viewer";
-
-      setRole(r as DevRole);
+      const r = normalizeRole((session.user.user_metadata as any)?.role);
+      setRole(r);
       setLoading(false);
 
-      // admin / manager만 접근 허용 (필요하면 조정 가능)
-      if (r !== "admin" && r !== "manager") {
+      // admin / manager만 접근 허용
+      const allowed: RoleOption[] = ["admin", "manager"];
+      if (!allowed.includes(r)) {
         alert("You do not have permission to manage users.");
         router.replace("/");
         return;
@@ -279,9 +292,7 @@ export default function UsersPage() {
   // ===== 유저 삭제 =====
   const handleDeleteUser = async (user: UserRow) => {
     if (
-      !window.confirm(
-        `Delete user ${user.email}? This action cannot be undone.`
-      )
+      !window.confirm(`Delete user ${user.email}? This action cannot be undone.`)
     ) {
       return;
     }
@@ -319,9 +330,11 @@ export default function UsersPage() {
     );
   }
 
+  const shellRole = toAppShellRole(role);
+
   return (
     <AppShell
-      role={role}
+      role={shellRole}
       title="Users"
       description="Admin-managed ERP user accounts."
     >
@@ -355,7 +368,7 @@ export default function UsersPage() {
                 <Label>Role</Label>
                 <Select
                   value={newRole}
-                  onValueChange={(v) => setNewRole(v as RoleOption)}
+                  onValueChange={(v) => setNewRole(normalizeRole(v))}
                 >
                   <SelectTrigger>
                     <SelectValue />
@@ -426,18 +439,14 @@ export default function UsersPage() {
                 >
                   <div className="flex-1 grid grid-cols-1 md:grid-cols-[2fr,1.4fr,1fr,auto] gap-2 items-center">
                     <div>
-                      <Label className="text-[11px] text-slate-500">
-                        Email
-                      </Label>
+                      <Label className="text-[11px] text-slate-500">Email</Label>
                       <div className="text-xs md:text-sm truncate">
                         {u.email}
                       </div>
                     </div>
 
                     <div>
-                      <Label className="text-[11px] text-slate-500">
-                        Name
-                      </Label>
+                      <Label className="text-[11px] text-slate-500">Name</Label>
                       <Input
                         className="h-8 text-xs"
                         value={u.name ?? ""}
@@ -448,13 +457,11 @@ export default function UsersPage() {
                     </div>
 
                     <div>
-                      <Label className="text-[11px] text-slate-500">
-                        Role
-                      </Label>
+                      <Label className="text-[11px] text-slate-500">Role</Label>
                       <Select
                         value={u.role}
                         onValueChange={(v) =>
-                          updateLocalUser(u.id, "role", v as RoleOption)
+                          updateLocalUser(u.id, "role", normalizeRole(v))
                         }
                       >
                         <SelectTrigger className="h-8 text-xs">

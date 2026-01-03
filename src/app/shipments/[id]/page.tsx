@@ -204,7 +204,7 @@ export default function ShipmentDetailPage() {
   }, [linkedPackingList]);
 
   const S = summary;
-  const role: DevRole = "ADMIN";
+  const role: AppRole = "admin";
 
   const shipmentNo =
     shipment?.shipment_no ??

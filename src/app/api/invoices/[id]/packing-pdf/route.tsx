@@ -17,7 +17,7 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const supabase = SupabaseAdminClient();
+  const supabase = SupabaseAdminClient;
   const invoiceId = params.id;
 
   try {

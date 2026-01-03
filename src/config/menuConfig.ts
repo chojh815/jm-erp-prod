@@ -1,25 +1,22 @@
-export type AppRole = "admin" | "staff" | "viewer";
+export type AppRole = "admin" | "manager" | "staff" | "viewer";
 
 export interface MenuItem {
   label: string;
   href: string;
-  roles?: AppRole[]; // if omitted, visible for all roles
+  roles?: AppRole[]; // 없으면 모두에게 보임
 }
 
 export interface MenuSection {
-  label: string;  // ex: "Basic", "Trade"
+  label: string;
   items: MenuItem[];
 }
 
 export const menuSections: MenuSection[] = [
-  {
-    label: "Home",
-    items: [{ label: "Home", href: "/home" }],
-  },
+  { label: "Home", items: [{ label: "Home", href: "/home" }] },
   {
     label: "Basic",
     items: [
-      { label: "Users", href: "/users", roles: ["admin"] },
+      { label: "Users", href: "/users", roles: ["admin", "manager"] },
       { label: "Companies", href: "/companies" },
       { label: "Roles & Permissions", href: "/roles", roles: ["admin"] },
     ],
@@ -47,7 +44,7 @@ export const menuSections: MenuSection[] = [
   {
     label: "Production",
     items: [
-      { label: "Work Sheets", href: "/work-sheets" }, // ✅ 추가
+      { label: "Work Sheets", href: "/work-sheets" },
       { label: "Work Orders", href: "/production/work-orders" },
       { label: "Purchase Orders", href: "/production/purchase-orders" },
       { label: "Production Status", href: "/production/status" },
@@ -65,13 +62,7 @@ export const menuSections: MenuSection[] = [
   },
   {
     label: "Admin",
-    items: [
-      {
-        label: "ERP Users",
-        href: "/admin/users",
-        roles: ["admin"],
-      },
-    ],
+    items: [{ label: "ERP Users", href: "/admin/users", roles: ["admin"] }],
   },
 ];
 

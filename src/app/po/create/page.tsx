@@ -157,11 +157,13 @@ export default function POCreatePage() {
       setCurrentUserEmail(session.user.email ?? null);
       setLoading(false);
 
-      if (r !== "admin" && r !== "manager" && r !== "staff") {
-        alert("You do not have permission to create POs.");
-        router.replace("/");
-        return;
-      }
+      const canCreate = (r: any) => ["admin", "manager", "staff"].includes(r);
+
+if (!canCreate(r)) {
+  alert("You do not have permission to create POs.");
+  router.replace("/");
+  return;
+}
     };
 
     init();
@@ -2978,7 +2980,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
                         <td className="px-3 py-2 border-b text-right">
                           <Button
                             type="button"
-                            size="xs"
+                            size="sm"
                             variant="outline"
                             onClick={() => {
                               setPoSearchOpen(false);

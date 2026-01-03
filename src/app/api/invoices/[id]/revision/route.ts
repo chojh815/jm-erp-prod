@@ -233,11 +233,9 @@ export async function POST(
       const first = await supabaseAdmin.from("invoice_lines").insert(rows);
       if (first.error) {
         const stripped = rows.map((r) => {
-          const x = { ...r };
-          delete x.shipment_id;
-          delete x.is_deleted;
-          delete x.updated_at;
-          return x;
+          const { shipment_id, is_deleted, updated_at, ...x } = r as any;
+return x;
+
         });
         const second = await supabaseAdmin.from("invoice_lines").insert(stripped);
         if (second.error) throw new Error(second.error.message);

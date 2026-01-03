@@ -1,4 +1,5 @@
 // src/app/api/proforma/from-po/route.ts
+import React from "react";
 import { NextRequest, NextResponse } from "next/server";
 import { renderToStream } from "@react-pdf/renderer";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
@@ -6,6 +7,9 @@ import ProformaInvoicePDF, {
   ProformaHeader,
   ProformaLine,
 } from "@/pdf/ProformaInvoicePDF";
+
+// ✅ react-pdf는 Node 런타임 권장 (Edge에서 문제 날 수 있음)
+export const runtime = "nodejs";
 
 // =======================
 // 유틸
@@ -69,8 +73,7 @@ function buildAddressString(options: {
 
     const addr1 =
       site.address_line1 ?? site.address1 ?? site.addr1 ?? site.address ?? null;
-    const addr2 =
-      site.address_line2 ?? site.address2 ?? site.addr2 ?? null;
+    const addr2 = site.address_line2 ?? site.address2 ?? site.addr2 ?? null;
     const city = site.city ?? null;
     const state = site.state ?? site.province ?? null;
     const postal = site.postal_code ?? site.zip ?? null;
@@ -158,10 +161,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (!poNo) {
-      return NextResponse.json(
-        { error: "poNo is required." },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "poNo is required." }, { status: 400 });
     }
 
     // 1) HEADER & LINES
@@ -209,11 +209,8 @@ export async function POST(req: NextRequest) {
         .select("*")
         .eq("id", shipperSiteId)
         .maybeSingle();
-      if (sErr) {
-        console.error("PI from PO - shipper site error", sErr);
-      } else {
-        shipperSite = s;
-      }
+      if (sErr) console.error("PI from PO - shipper site error", sErr);
+      else shipperSite = s;
     }
 
     // 3) ★ 핵심: buyer_code 로 companies 찾기
@@ -226,18 +223,15 @@ export async function POST(req: NextRequest) {
         .eq("code", header.buyer_code)
         .maybeSingle();
 
-      if (compErr) {
-        console.error("PI from PO - companies by code error", compErr);
-      } else {
-        buyerCompany = comp;
-      }
+      if (compErr) console.error("PI from PO - companies by code error", compErr);
+      else buyerCompany = comp;
     }
 
     // (보조) buyer_company_id 같은게 있으면 한 번 더 시도
     if (!buyerCompany) {
       const candidateKeys = ["buyer_company_id", "buyer_companyid"];
       for (const key of candidateKeys) {
-        const idVal = header[key];
+        const idVal = (header as any)[key];
         if (idVal) {
           const { data: comp2, error: compErr2 } = await supabase
             .from("companies")
@@ -253,7 +247,6 @@ export async function POST(req: NextRequest) {
     }
 
     // 4) 주소들 만들기
-
     const shipperAddress = buildAddressString({
       site: shipperSite,
       nameFallbacks: [
@@ -298,10 +291,7 @@ export async function POST(req: NextRequest) {
         ],
         cityCandidates: [header.consignee_city],
         stateCandidates: [header.consignee_state],
-        postalCandidates: [
-          header.consignee_postal_code,
-          header.consignee_zip,
-        ],
+        postalCandidates: [header.consignee_postal_code, header.consignee_zip],
         countryCandidates: [header.consignee_country],
       });
 
@@ -327,10 +317,7 @@ export async function POST(req: NextRequest) {
         ],
         cityCandidates: [header.notify_party_city, header.notify_city],
         stateCandidates: [header.notify_party_state, header.notify_state],
-        postalCandidates: [
-          header.notify_party_postal_code,
-          header.notify_zip,
-        ],
+        postalCandidates: [header.notify_party_postal_code, header.notify_zip],
         countryCandidates: [header.notify_party_country, header.notify_country],
       });
 
@@ -350,40 +337,82 @@ export async function POST(req: NextRequest) {
     const today = new Date();
     const invoiceDate = today.toISOString().slice(0, 10); // YYYY-MM-DD
 
-    const proformaHeader: ProformaHeader & {
-      finalDestination?: string;
-    } = {
-      invoiceNo: buildInvoiceNo(poNo),
-      invoiceDate,
-      poNo,
-      buyerName:
-        buyerCompany?.company_name ??
-        header.buyer_name ??
-        header.buyer_display_name ??
-        "",
-      buyerCode: header.buyer_code ?? buyerCompany?.code ?? "",
-      shipperAddress,
-      consigneeAddress,
-      notifyAddress,
-      paymentTerm:
-        header.payment_term_name ??
-        header.payment_term_text ??
-        "-",
-      incoterm: header.incoterm ?? header.incoterm_text ?? "-",
-      origin:
-        header.shipping_origin_text ??
-        header.shipping_origin_code ??
-        header.origin ??
-        "",
-      destination:
-        header.destination_port_name ??
-        header.destination_port ??
-        header.ship_to_port ??
-        "",
-      currency: header.currency_code ?? header.currency ?? "USD",
-      remarks: header.pi_remarks ?? header.remarks ?? "",
-      finalDestination: finalDestinationText,
-    };
+    // ✅ ProformaInvoicePDF가 어떤 케이스(camel/snake)를 요구하든 값이 살아있게
+// ✅ object literal strict check를 피해서(= 빌드 깨짐 방지) ProformaHeader로 캐스팅
+const proformaHeader =
+  ({
+    // --- invoice no / date ---
+    invoice_no: buildInvoiceNo(poNo),
+    invoiceNo: buildInvoiceNo(poNo),
+
+    // ✅ invoice_date 다시 살림
+    invoice_date: invoiceDate,
+    invoiceDate,
+
+    // --- po no ---
+    po_no: poNo,
+    poNo,
+
+    // --- buyer ---
+    buyer_name:
+      buyerCompany?.company_name ??
+      header.buyer_name ??
+      header.buyer_display_name ??
+      "",
+    buyerName:
+      buyerCompany?.company_name ??
+      header.buyer_name ??
+      header.buyer_display_name ??
+      "",
+
+    buyer_code: header.buyer_code ?? buyerCompany?.code ?? "",
+    buyerCode: header.buyer_code ?? buyerCompany?.code ?? "",
+
+    // --- addresses ---
+    shipper_address: shipperAddress,
+    shipperAddress,
+
+    consignee_address: consigneeAddress,
+    consigneeAddress,
+
+    notify_address: notifyAddress,
+    notifyAddress,
+
+    // --- terms ---
+    payment_term: header.payment_term_name ?? header.payment_term_text ?? "-",
+    paymentTerm: header.payment_term_name ?? header.payment_term_text ?? "-",
+
+    incoterm: header.incoterm ?? header.incoterm_text ?? "-",
+
+    origin:
+      header.shipping_origin_text ??
+      header.shipping_origin_code ??
+      header.origin ??
+      "",
+
+    destination:
+      header.destination_port_name ??
+      header.destination_port ??
+      header.ship_to_port ??
+      "",
+
+    // --- currency / remarks ---
+    currency: header.currency_code ?? header.currency ?? "USD",
+    remarks: header.pi_remarks ?? header.remarks ?? "",
+
+    // --- final destination (둘 다 유지) ---
+    final_destination: finalDestinationText,
+    finalDestination: finalDestinationText,
+  } as any) as ProformaHeader & {
+    final_destination?: string;
+    finalDestination?: string;
+    origin?: string;
+  destination?: string;
+  incoterm?: string;
+  paymentTerm?: string;
+  currency?: string;
+  remarks?: string;
+  };
 
     const proformaLines: ProformaLine[] =
       (lines ?? []).map((row: any, idx: number) => {
@@ -409,10 +438,15 @@ export async function POST(req: NextRequest) {
         } as ProformaLine;
       }) ?? [];
 
-    // 6) PDF 생성
-    const pdfStream = await renderToStream(
-      <ProformaInvoicePDF header={proformaHeader} lines={proformaLines} />
-    );
+    // 6) PDF 생성 (✅ JSX 금지: createElement로 렌더)
+   // ...
+
+const element = React.createElement(ProformaInvoicePDF as any, {
+  header: proformaHeader,
+  lines: proformaLines,
+}) as unknown as React.ReactElement<import("@react-pdf/renderer").DocumentProps>;
+
+const pdfStream = await renderToStream(element);
 
     return new NextResponse(pdfStream as any, {
       status: 200,

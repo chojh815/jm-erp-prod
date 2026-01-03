@@ -178,7 +178,10 @@ const CommercialInvoicePDF: React.FC<Props> = ({ header, lines }) => {
           </View>
 
           {lines.map((line, idx) => (
-            <View key={line.id ?? idx} style={styles.tableRow}>
+            <View
+  key={`${line.po_no ?? ""}-${line.style_no ?? ""}-${line.line_no ?? idx}-${idx}`}
+  style={styles.tableRow}
+>
               <Text style={[styles.cell, { width: 22 }]}>{safe(line.line_no)}</Text>
               <Text style={[styles.cell, { width: 60 }]}>{safe(line.po_no)}</Text>
               <Text style={[styles.cell, { width: 70 }]}>{safe(line.style_no)}</Text>

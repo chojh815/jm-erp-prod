@@ -2,26 +2,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-/**
- * PO List + Line Details API (A안: 폴더 구조 유지)
- *
- * ✅ Fixes
- * - po_headers.req_ship_date ❌ (your DB doesn't have it) → use requested_ship_date ✅
- * - po_lines.images ❌ (your DB doesn't have it) → build images[] from po_line_images ✅
- *
- * ✅ Also adds
- * - Line details include delivery_date, ship_mode from po_lines ✅
- * - Line details include brand (from po_headers.buyer_brand_name) ✅
- * - Line details include shipment info (best-effort) ✅
- *
- * ✅ NEW (중요)
- * - Soft delete / DELETED 상태는 리스트/라인에서 확실히 제외:
- *   (is_deleted=false OR is_deleted IS NULL) AND (status != 'DELETED' OR status IS NULL)
- *
- * Query:
- * - list:   /api/orders/list?q=...&status=...&dateFrom=...&dateTo=...&page=1&pageSize=20
- * - detail: /api/orders/list?detailFor=<po_header_id>
- */
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
 }
@@ -45,6 +25,82 @@ const NOT_DELETED_OR_NULL = "is_deleted.is.null,is_deleted.eq.false";
 // ✅ (status != 'DELETED' OR status IS NULL)
 const NOT_STATUS_DELETED_OR_NULL = "status.is.null,status.neq.DELETED";
 
+/** ---- row types (캐스팅용) ---- */
+type PoHeaderRow = {
+  id: string;
+  buyer_brand_name: string | null;
+  requested_ship_date: string | null;
+  is_deleted: boolean | null;
+  status: string | null;
+
+  po_no?: string | null;
+  buyer_id?: string | null;
+  buyer_name?: string | null;
+  buyer_brand_id?: string | null;
+  buyer_dept_name?: string | null;
+  order_date?: string | null;
+  currency?: string | null;
+  subtotal?: number | null;
+  ship_mode?: string | null;
+  destination?: string | null;
+  origin_code?: string | null;
+  shipping_origin_code?: string | null;
+  payment_term?: string | null;
+  payment_term_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+type PoLineRow = {
+  id: string;
+  po_header_id: string;
+  line_no: number | null;
+  buyer_style_no: string | null;
+  jm_style_no: string | null;
+  description: string | null;
+  color: string | null;
+  size: string | null;
+  plating_color: string | null;
+  hs_code: string | null;
+  qty: number | null;
+  uom: string | null;
+  unit_price: number | null;
+  amount: number | null;
+  upc: string | null;
+  remark: string | null;
+  delivery_date: string | null;
+  ship_mode: string | null;
+  is_deleted: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type PoLineImageRow = {
+  po_line_id: string;
+  image_url: string | null;
+  sort_order: number | null;
+  created_at: string | null;
+  is_deleted: boolean | null;
+};
+
+type ShipmentLineRow = {
+  po_line_id: string | null;
+  shipment_id: string | null;
+  is_deleted: boolean | null;
+};
+
+type ShipmentRow = {
+  id: string;
+  shipment_no: string | null;
+  status: string | null;
+  is_deleted: boolean | null;
+};
+
+type BuyerBrandRow = {
+  id: string;
+  name: string | null;
+};
+
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -54,28 +110,25 @@ export async function GET(req: Request) {
     // ------------------------------------------------------------------
     const detailFor = (url.searchParams.get("detailFor") ?? "").trim();
     if (detailFor) {
-      // 0) header (for Brand + Requested Ship Date)
-      const { data: hdr, error: hdrErr } = await supabaseAdmin
+      // 0) header
+      const hdrRes = await supabaseAdmin
         .from("po_headers")
         .select(["id", "buyer_brand_name", "requested_ship_date", "is_deleted", "status"].join(","))
         .eq("id", detailFor)
-        // ✅ header도 soft delete/DELETED면 detail도 막는게 안전
         .or(NOT_DELETED_OR_NULL)
         .or(NOT_STATUS_DELETED_OR_NULL)
         .maybeSingle();
 
-      if (hdrErr) {
-        return bad(hdrErr.message || "Failed to load PO header", 500);
-      }
-      if (!hdr?.id) {
-        return bad("PO header not found (or deleted)", 404);
-      }
+      if (hdrRes.error) return bad(hdrRes.error.message || "Failed to load PO header", 500);
 
-      const headerBrand = asText(hdr?.buyer_brand_name);
-      const headerReqShip = hdr?.requested_ship_date ?? null;
+      const hdr = (hdrRes.data as PoHeaderRow | null);
+      if (!hdr?.id) return bad("PO header not found (or deleted)", 404);
 
-      // 1) lines (NO images column)
-      const { data: lines, error } = await supabaseAdmin
+      const headerBrand = asText(hdr.buyer_brand_name);
+      const headerReqShip = hdr.requested_ship_date ?? null;
+
+      // 1) lines
+      const linesRes = await supabaseAdmin
         .from("po_lines")
         .select(
           [
@@ -95,7 +148,6 @@ export async function GET(req: Request) {
             "amount",
             "upc",
             "remark",
-            // ✅ your DB line columns
             "delivery_date",
             "ship_mode",
             "is_deleted",
@@ -104,31 +156,33 @@ export async function GET(req: Request) {
           ].join(",")
         )
         .eq("po_header_id", detailFor)
-        // ✅ 라인도 is_deleted=false OR null
         .or(NOT_DELETED_OR_NULL)
         .order("line_no", { ascending: true, nullsFirst: true });
 
-      if (error) return bad(error.message || "Failed to load PO lines", 500);
+      if (linesRes.error) return bad(linesRes.error.message || "Failed to load PO lines", 500);
 
-      const lineRows = lines ?? [];
-      const lineIds = uniq(lineRows.map((r: any) => r.id).filter(Boolean));
+      const lineRows = ((linesRes.data ?? []) as unknown as PoLineRow[]);
+      const lineIds = uniq(lineRows.map((r) => r.id).filter(Boolean));
 
       // 2) images from po_line_images
       const imagesByLine: Record<string, string[]> = {};
       if (lineIds.length > 0) {
-        const { data: imgs, error: imgErr } = await supabaseAdmin
+        const imgRes = await supabaseAdmin
           .from("po_line_images")
           .select(["po_line_id", "image_url", "sort_order", "created_at", "is_deleted"].join(","))
           .in("po_line_id", lineIds)
           .or(NOT_DELETED_OR_NULL);
 
-        if (!imgErr) {
-          const grouped: Record<string, any[]> = {};
-          for (const r of imgs ?? []) {
+        if (!imgRes.error) {
+          const imgs = ((imgRes.data ?? []) as unknown as PoLineImageRow[]);
+          const grouped: Record<string, PoLineImageRow[]> = {};
+
+          for (const r of imgs) {
             const lid = r.po_line_id;
             if (!lid) continue;
             (grouped[lid] ||= []).push(r);
           }
+
           for (const lid of Object.keys(grouped)) {
             grouped[lid].sort((a, b) => {
               const ao = a.sort_order ?? 0;
@@ -138,7 +192,7 @@ export async function GET(req: Request) {
               const bt = b.created_at ? Date.parse(b.created_at) : 0;
               return at - bt;
             });
-            imagesByLine[lid] = grouped[lid].map((x) => x.image_url).filter(Boolean);
+            imagesByLine[lid] = grouped[lid].map((x) => x.image_url).filter(Boolean) as string[];
           }
         }
       }
@@ -146,29 +200,31 @@ export async function GET(req: Request) {
       // 3) shipment info (best-effort)
       const shipmentByLine: Record<string, { shipmentNo?: string | null; status?: string | null }> = {};
       if (lineIds.length > 0) {
-        const { data: sLines, error: sLineErr } = await supabaseAdmin
+        const sLineRes = await supabaseAdmin
           .from("shipment_lines")
           .select(["po_line_id", "shipment_id", "is_deleted"].join(","))
           .in("po_line_id", lineIds)
           .or(NOT_DELETED_OR_NULL);
 
-        if (!sLineErr && (sLines?.length ?? 0) > 0) {
-          const shipmentIds = uniq(sLines!.map((r: any) => r.shipment_id).filter(Boolean));
+        if (!sLineRes.error) {
+          const sLines = ((sLineRes.data ?? []) as unknown as ShipmentLineRow[]);
+          const shipmentIds = uniq(sLines.map((r) => r.shipment_id).filter(Boolean)) as string[];
 
-          let shipmentsMap: Record<string, any> = {};
+          let shipmentsMap: Record<string, ShipmentRow> = {};
           if (shipmentIds.length > 0) {
-            const { data: ships, error: shipErr } = await supabaseAdmin
+            const shipRes = await supabaseAdmin
               .from("shipments")
               .select(["id", "shipment_no", "status", "is_deleted"].join(","))
               .in("id", shipmentIds)
               .or(NOT_DELETED_OR_NULL);
 
-            if (!shipErr) {
-              for (const s of ships ?? []) shipmentsMap[s.id] = s;
+            if (!shipRes.error) {
+              const ships = ((shipRes.data ?? []) as unknown as ShipmentRow[]);
+              for (const s of ships) shipmentsMap[s.id] = s;
             }
           }
 
-          for (const sl of sLines ?? []) {
+          for (const sl of sLines) {
             const lid = sl.po_line_id;
             const sid = sl.shipment_id;
             if (!lid || !sid) continue;
@@ -181,7 +237,7 @@ export async function GET(req: Request) {
         }
       }
 
-      const mapped = lineRows.map((r: any) => ({
+      const mapped = lineRows.map((r) => ({
         id: r.id,
         poHeaderId: r.po_header_id,
         lineNo: r.line_no,
@@ -220,20 +276,13 @@ export async function GET(req: Request) {
     // ------------------------------------------------------------------
     // LIST: headers list
     // ------------------------------------------------------------------
-    const qRaw =
-      (url.searchParams.get("q") ??
-        url.searchParams.get("keyword") ??
-        "").trim();
-
+    const qRaw = (url.searchParams.get("q") ?? url.searchParams.get("keyword") ?? "").trim();
     const statusRaw = (url.searchParams.get("status") ?? "").trim();
     const dateFrom = (url.searchParams.get("dateFrom") ?? "").trim();
     const dateTo = (url.searchParams.get("dateTo") ?? "").trim();
 
     const page = Math.max(1, toInt(url.searchParams.get("page") ?? "1", 1));
-    const pageSize = Math.min(
-      200,
-      Math.max(1, toInt(url.searchParams.get("pageSize") ?? "20", 20))
-    );
+    const pageSize = Math.min(200, Math.max(1, toInt(url.searchParams.get("pageSize") ?? "20", 20)));
 
     let q = supabaseAdmin
       .from("po_headers")
@@ -261,16 +310,12 @@ export async function GET(req: Request) {
           "created_at",
           "updated_at",
         ].join(","),
-        { count: "exact" }
+        { count: "exact" } as any
       )
-      // ✅ 핵심: deleted/DELETED는 확실히 제외(= NULL도 정상 노출)
       .or(NOT_DELETED_OR_NULL)
       .or(NOT_STATUS_DELETED_OR_NULL);
 
-    if (
-      statusRaw &&
-      !["ALL", "ALL STATUS", "ALLSTATUSES"].includes(statusRaw.toUpperCase())
-    ) {
+    if (statusRaw && !["ALL", "ALL STATUS", "ALLSTATUSES"].includes(statusRaw.toUpperCase())) {
       q = q.eq("status", statusRaw);
     }
     if (dateFrom) q = q.gte("order_date", dateFrom);
@@ -292,50 +337,39 @@ export async function GET(req: Request) {
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
 
-    const { data: headers, error, count } = await q
-      .order("order_date", { ascending: false, nullsFirst: false })
-      .range(from, to);
+    const listRes = await q.order("order_date", { ascending: false, nullsFirst: false }).range(from, to);
+    if (listRes.error) return bad(listRes.error.message || "Failed to load PO list", 500);
 
-    if (error) return bad(error.message || "Failed to load PO list", 500);
+    const headerRows = ((listRes.data ?? []) as unknown as PoHeaderRow[]);
+    const count = (listRes as any).count ?? headerRows.length;
 
-    const headerRows = headers ?? [];
-    const headerIds = uniq(headerRows.map((h: any) => h.id).filter(Boolean));
+    const headerIds = uniq(headerRows.map((h) => h.id).filter(Boolean));
 
     // Optional: brand name fallback from buyer_brands
-    const brandIdList = uniq(
-      headerRows.map((h: any) => h.buyer_brand_id).filter((v: any) => !!v)
-    );
-
+    const brandIdList = uniq(headerRows.map((h) => h.buyer_brand_id).filter((v) => !!v)) as string[];
     const brandNameById: Record<string, string> = {};
     if (brandIdList.length > 0) {
-      const { data: brands, error: brandErr } = await supabaseAdmin
-        .from("buyer_brands")
-        .select(["id", "name"].join(","))
-        .in("id", brandIdList);
-
-      if (!brandErr) {
-        for (const b of brands ?? []) {
-          if (b?.id) brandNameById[b.id] = b?.name ?? "";
-        }
+      const brandRes = await supabaseAdmin.from("buyer_brands").select(["id", "name"].join(",")).in("id", brandIdList);
+      if (!brandRes.error) {
+        const brands = ((brandRes.data ?? []) as unknown as BuyerBrandRow[]);
+        for (const b of brands) if (b?.id) brandNameById[b.id] = b?.name ?? "";
       }
     }
 
     // First-line summary
     const lineSummaryByHeader: Record<string, { lineCount: number; firstLine: any | null }> = {};
     if (headerIds.length > 0) {
-      const { data: lines, error: lineErr } = await supabaseAdmin
+      const sumRes = await supabaseAdmin
         .from("po_lines")
-        .select(
-          ["id", "po_header_id", "line_no", "buyer_style_no", "jm_style_no", "qty", "unit_price", "amount", "is_deleted"].join(",")
-        )
+        .select(["id", "po_header_id", "line_no", "buyer_style_no", "jm_style_no", "qty", "unit_price", "amount", "is_deleted"].join(","))
         .in("po_header_id", headerIds)
-        // ✅ 라인도 soft delete 제외 (NULL 포함)
         .or(NOT_DELETED_OR_NULL)
         .order("po_header_id", { ascending: true })
         .order("line_no", { ascending: true, nullsFirst: true });
 
-      if (!lineErr) {
-        for (const r of lines ?? []) {
+      if (!sumRes.error) {
+        const lines = (sumRes.data as any[]) ?? [];
+        for (const r of lines) {
           const hid = r.po_header_id;
           if (!hid) continue;
           (lineSummaryByHeader[hid] ||= { lineCount: 0, firstLine: null });
@@ -345,7 +379,7 @@ export async function GET(req: Request) {
       }
     }
 
-    const items = headerRows.map((h: any) => {
+    const items = headerRows.map((h) => {
       const s = lineSummaryByHeader[h.id] ?? { lineCount: 0, firstLine: null };
       const fl = s.firstLine;
 
@@ -388,7 +422,7 @@ export async function GET(req: Request) {
       };
     });
 
-    return ok({ items, page, pageSize, total: count ?? items.length });
+    return ok({ items, page, pageSize, total: count });
   } catch (err: any) {
     return bad(err?.message || "Unknown error", 500);
   }

@@ -82,15 +82,13 @@ async function loadDevProductIdByStyle(styleNo: string): Promise<number | null> 
   const style_no = safeText(styleNo).trim();
   if (!style_no) return null;
 
-  const r = await firstWorking<any>(() =>
-    supabaseAdmin
-      .from("product_development_headers")
-      .select("id, style_no, deleted_at, is_deleted")
-      .eq("style_no", style_no)
-      .eq("is_deleted", false)
-      .is("deleted_at", null)
-      .maybeSingle()
-  );
+  const r = await firstWorking<any>(async () => {
+  return await supabaseAdmin
+    .from("product_development_headers")
+    .select("id, style_no, deleted_at, is_deleted")
+    .eq("style_no", style_no)
+    .maybeSingle();
+});
 
   if (r.error) return null;
   const id = (r.data as any)?.id;
