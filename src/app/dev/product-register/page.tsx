@@ -139,6 +139,8 @@ export default function ProductRegisterPage() {
   const [selectedHistory, setSelectedHistory] =
     React.useState<HistoryItem | null>(null);
 
+  const s = (v: any) => (v ?? "").toString();
+
   // ===== Session check =====
   React.useEffect(() => {
     const loadSession = async () => {
@@ -277,29 +279,42 @@ export default function ProductRegisterPage() {
 
   // ===== Auto style number generator (공식 JM 번호) =====
   const handleAutoStyleNo = async () => {
-    try {
-      setStyleError(null);
-      const category = (productCategory || "N") as ProductCategoryCode;
+  try {
+    setStyleError(null);
 
-      const res = await fetch(
-        `/api/dev/styles/next-style-no?category=${encodeURIComponent(
-          category
-        )}`
-      );
-      const json = await res.json();
+    const category = (productCategory || "N"); // E, N, B...
+    const res = await fetch(
+      `/api/dev/styles/next-style-no?category=${encodeURIComponent(category)}`
+    );
+    const json = await res.json();
 
-      if (!res.ok || json.error) {
-        console.error(json.error || "Failed to generate style number");
-        setStyleError(json.error || "스타일 넘버 자동 생성에 실패했습니다.");
-        return;
-      }
-
-      setStyleNo(json.styleNo as string); // 예: JN250001
-    } catch (err) {
-      console.error("handleAutoStyleNo error:", err);
-      setStyleError("스타일 넘버 자동 생성 중 오류가 발생했습니다.");
+    if (!res.ok || json?.success === false) {
+      console.error("Failed to generate style number:", json);
+      setStyleError(json?.error || "스타일 넘버 자동 생성에 실패했습니다.");
+      return;
     }
-  };
+
+    // ✅ 서버 응답 키가 styleNo 또는 style_no 어떤 것이든 다 받기
+    const nextNo =
+      (typeof json?.styleNo === "string" && json.styleNo) ||
+      (typeof json?.style_no === "string" && json.style_no) ||
+      (typeof json?.nextStyleNo === "string" && json.nextStyleNo) ||
+      (typeof json?.next_style_no === "string" && json.next_style_no) ||
+      "";
+
+    if (!nextNo.trim()) {
+      console.error("style number missing in response:", json);
+      setStyleError("스타일 넘버 자동 생성에 실패했습니다.");
+      return;
+    }
+
+    setStyleNo(nextNo.trim().toUpperCase());
+    setStyleError(null); // ✅ 기존 에러 문구 강제 제거
+  } catch (err) {
+    console.error("handleAutoStyleNo error:", err);
+    setStyleError("스타일 넘버 자동 생성 중 오류가 발생했습니다.");
+  }
+};
 
   // ===== Image handling (원본 5MB 제한 + 자동 리사이즈/압축) =====
   const MAX_ORIGINAL_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB (원본 제한)
@@ -503,7 +518,7 @@ export default function ProductRegisterPage() {
   // ===== Delete (DB에서 현재 스타일 삭제) =====
  
   const handleDelete = async () => {
-    const trimmed = styleNo.trim().toUpperCase();
+    const trimmed = s(styleNo).trim().toUpperCase();
 
     if (!trimmed) {
       alert("Style No. is required to delete.");
@@ -692,8 +707,8 @@ export default function ProductRegisterPage() {
     
     // 기본 헤더 필드
     if (header.style_no || header.styleNo) {
-      const s = (header.style_no ?? header.styleNo) as string;
-      setStyleNo(s.toUpperCase());
+      const sn = header.style_no ?? header.styleNo;
+      if (sn && typeof sn === "string") setStyleNo(sn.toUpperCase());
     }
 
     if (header.product_category) {
@@ -845,7 +860,7 @@ if (imageUrl && typeof imageUrl === "string") {
     // 1) 숫자 필드 검증
     if (!validateAllNumbers()) return;
 
-    const trimmed = styleNo.trim().toUpperCase();
+    const trimmed = s(styleNo).trim().toUpperCase();
 
     // 2) 스타일 번호 필수
     if (!trimmed) {
@@ -1216,7 +1231,7 @@ if (imageUrl && typeof imageUrl === "string") {
 
   // ===== History: load versions for current style =====
   const handleOpenHistory = async () => {
-    const trimmed = styleNo.trim().toUpperCase();
+    const trimmed = s(styleNo).trim().toUpperCase();
     if (!trimmed) {
       alert("History를 보려면 먼저 Style No.를 입력하세요.");
       return;
@@ -2165,7 +2180,7 @@ if (imageUrl && typeof imageUrl === "string") {
                     variant="outline"
                     className="h-10 px-4 text-sm border-red-500 text-red-600 hover:bg-red-50"
                     onClick={handleDelete}
-                    disabled={saving || !styleNo.trim()}
+                    disabled={saving || !s(styleNo).trim()}
                   >
                     Delete
                   </Button>
