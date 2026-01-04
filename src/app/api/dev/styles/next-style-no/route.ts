@@ -1,106 +1,123 @@
 // src/app/api/dev/styles/next-style-no/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
-
+/**
+ * Response helpers
+ */
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
 }
-function bad(message: string, status = 400) {
-  return NextResponse.json({ success: false, error: message }, { status });
-}
-
-function safeTrim(v: any) {
-  return (v ?? "").toString().trim();
-}
-
-function resolveCategoryCode(raw: string) {
-  const v = safeTrim(raw).toUpperCase();
-
-  // 이미 N/E/B/H 같은 코드면 그대로
-  if (["N", "E", "B", "H", "A", "R"].includes(v)) return v;
-
-  // 텍스트면 매핑 (필요시 추가)
-  if (v.includes("NECK")) return "N";
-  if (v.includes("EARR")) return "E";
-  if (v.includes("BRAC")) return "B";
-  if (v.includes("HAIR")) return "H";
-  if (v.includes("ANK")) return "A";
-  if (v.includes("RING")) return "R";
-
-  // 기본값
-  return "N";
+function bad(message: string, status = 400, extra: any = {}) {
+  return NextResponse.json(
+    { success: false, error: message, ...extra },
+    { status }
+  );
 }
 
 /**
- * Generates next JM style no:
- *  - Format: J{CategoryCode}{YY}{SEQ4}
- *  - Example: JN250001
- *
- * Query params accepted:
- *  - category / category_code / code : "Necklace" | "N" | ...
+ * Normalize category input
+ * - "E"  -> "E"
+ * - "JE" -> "E"
+ * - "JN" -> "N"
  */
-export async function GET(req: NextRequest) {
+function normalizeCategory(raw: string | null) {
+  const v = (raw ?? "").toString().trim().toUpperCase();
+  if (!v) return "N";
+  if (v.startsWith("J") && v.length >= 2) return v[1];
+  return v[0];
+}
+
+/**
+ * Current year (YY)
+ */
+function yyNow() {
+  return String(new Date().getFullYear()).slice(-2);
+}
+
+/**
+ * Pad sequence to 4 digits
+ */
+function pad4(n: number) {
+  return String(n).padStart(4, "0");
+}
+
+/**
+ * Parse style_no from DB
+ * Expected:
+ *   JN250001
+ *   JE260123A
+ */
+function parseSeq(styleNo: string) {
+  const s = styleNo.trim().toUpperCase();
+  const m = s.match(/^J([A-Z])(\d{2})(\d{4})/);
+  if (!m) return null;
+  return {
+    category: m[1],
+    yy: m[2],
+    seq: Number(m[3]),
+  };
+}
+
+export async function GET(req: Request) {
   try {
-    const sp = req.nextUrl.searchParams;
+    const url = new URL(req.url);
+    const rawCategory = url.searchParams.get("category");
 
-    const categoryRaw =
-      sp.get("category") || sp.get("category_code") || sp.get("code") || "N";
-    const catCode = resolveCategoryCode(categoryRaw);
+    const categoryCode = normalizeCategory(rawCategory); // E, N, B...
+    const yy = yyNow();
+    const prefix = `J${categoryCode}${yy}`; // ex) JE26
 
-    const yy = new Date().getFullYear().toString().slice(-2);
-    const basePrefix = `J${catCode}${yy}`; // e.g. JN25
+    /**
+     * ⚠️ DB 정보 (그대로 유지)
+     */
+    const TABLE = "product_development_products";
+    const COL = "style_no";
 
-    // ✅ 여러 테이블/컬럼 fallback (환경마다 다를 수 있어서)
-    const candidateTables = [
-      { table: "product_development_products", col: "style_no" },
-      { table: "product_development_products", col: "jm_style_no" },
-      { table: "dev_products", col: "style_no" },
-      { table: "products", col: "style_no" },
-    ];
+    /**
+     * Get last style_no with same prefix
+     */
+    const { data, error } = await supabaseAdmin
+      .from(TABLE)
+      .select(COL)
+      .ilike(COL, `${prefix}%`)
+      .order(COL, { ascending: false })
+      .limit(1);
 
-    let lastStyleNo: string | null = null;
-
-    for (const c of candidateTables) {
-      const { data, error } = await supabaseAdmin
-        .from(c.table)
-        .select(c.col)
-        .ilike(c.col, `${basePrefix}%`)
-        .order(c.col, { ascending: false })
-        .limit(1);
-
-      if (error) {
-        // 테이블/컬럼이 없을 수 있으니 무시하고 다음 후보로
-        continue;
-      }
-
-      const row = data?.[0] as any;
-      const v = row?.[c.col];
-      if (v) {
-        lastStyleNo = v.toString();
-        break;
-      }
+    if (error) {
+      return bad("DB query failed.", 500, { detail: error.message });
     }
 
-    // lastStyleNo 예: JN250123
     let nextSeq = 1;
-    if (lastStyleNo && lastStyleNo.startsWith(basePrefix)) {
-      const tail = lastStyleNo.slice(basePrefix.length); // "0123"
-      const n = Number(tail);
-      if (!Number.isNaN(n) && n >= 0) nextSeq = n + 1;
+
+    const lastStyleNo = data?.[0]?.[COL] as string | undefined;
+    if (lastStyleNo) {
+      const parsed = parseSeq(lastStyleNo);
+      if (
+        parsed &&
+        parsed.category === categoryCode &&
+        parsed.yy === yy &&
+        Number.isFinite(parsed.seq)
+      ) {
+        nextSeq = parsed.seq + 1;
+      }
     }
 
-    const nextStyleNo = `${basePrefix}${String(nextSeq).padStart(4, "0")}`;
+    const styleNo = `${prefix}${pad4(nextSeq)}`;
 
+    /**
+     * ✅ camelCase 응답으로 통일
+     * (프론트에서 json.styleNo 만 쓰면 됨)
+     */
     return ok({
-      style_no: nextStyleNo,
-      prefix: basePrefix,
+      styleNo,           // ⭐ 핵심
+      prefix,
       seq: nextSeq,
-      category_code: catCode,
+      categoryCode,
     });
   } catch (e: any) {
-    return bad(e?.message || "Failed to generate next style no", 500);
+    return bad("Unexpected error while generating style number.", 500, {
+      detail: e?.message ?? String(e),
+    });
   }
 }
