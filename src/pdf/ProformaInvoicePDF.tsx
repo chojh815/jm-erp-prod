@@ -1,82 +1,283 @@
 // src/pdf/ProformaInvoicePDF.tsx
 import React from "react";
-import {
-  Document,
-  Page,
-  Text,
-  View,
-  StyleSheet,
-  Image,
-} from "@react-pdf/renderer";
+import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 
-// ========= 타입 정의 =========
-
-export interface ProformaHeader {
-  invoice_no: string;
+// =====================
+// Types (필요 필드만)
+// =====================
+export type ProformaHeaderPDF = {
+  invoice_no?: string | null;
   issue_date?: string | null;
+
+  po_no?: string | null;
+
   buyer_name?: string | null;
-  currency?: string | null;
+  buyer_brand_name?: string | null;
+  buyer_dept_name?: string | null;
+
+  shipper_name?: string | null;
+  shipper_address?: string | null;
+
+  payment_term?: string | null;
+  remarks?: string | null;
+
+  consignee_text?: string | null;
+  notify_party_text?: string | null;
+
+  port_of_loading?: string | null;
+  final_destination?: string | null;
+
   incoterm?: string | null;
-  payment_terms?: string | null;
+  ship_mode?: string | null;
 
-  total_amount?: number | null;
-  // 서버에서 미리 포맷한 문자열이 있으면 우선 사용
-  total_display?: string | null;
-}
+  coo_text?: string | null;
+};
 
-export interface ProformaLine {
-  line_no?: number | null;
-
-  style_no?: string | null;
+export type ProformaLinePDF = {
+  po_no?: string | null;
   buyer_style_no?: string | null;
-  jm_style_no?: string | null;
-
   description?: string | null;
-  color?: string | null;
-  size?: string | null;
+  hs_code?: string | null;
   qty?: number | null;
+  uom?: string | null;
   unit_price?: number | null;
   amount?: number | null;
+};
+
+export default function ProformaInvoicePDF(props: {
+  header: ProformaHeaderPDF;
+  lines: ProformaLinePDF[];
+}) {
+  const header = props.header ?? {};
+  const lines = props.lines ?? [];
+
+  const money2 = (v: any) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "0.00";
+    return n.toFixed(2);
+  };
+  const intFmt = (v: any) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "0";
+    return Math.round(n).toLocaleString("en-US");
+  };
+
+  const safe = (v: any) => (v ?? "").toString().trim();
+
+  const formatDateLike = (v?: string | null) => {
+    const s = safe(v);
+    if (!s) return "";
+    // allow YYYY-MM-DD or ISO
+    const ymd = /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+    const d = new Date(ymd);
+    if (Number.isNaN(d.getTime())) return ymd;
+    // "2026. 1. 6."
+    const yy = d.getFullYear();
+    const mm = d.getMonth() + 1;
+    const dd = d.getDate();
+    return `${yy}. ${mm}. ${dd}.`;
+  };
+
+  const subtotal = lines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
+
+  // =====================
+  // ✅ Multiline renderer
+  // - \n 있으면 그대로
+  // - 없으면 콤마(,) 기준으로 줄바꿈해서 주소가 박스 안에 예쁘게 보이게
+  // =====================
+  const splitAddressLines = (text?: string | null) => {
+    const s = safe(text);
+    if (!s) return [];
+    if (s.includes("\n")) {
+      return s
+        .split(/\r?\n/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+    }
+    // 콤마 기준 줄바꿈 (주소/Intercom 포함 텍스트를 자연스럽게 분리)
+    const parts = s
+      .split(/\s*,\s*/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    // 너무 잘게 쪼개지면 2개씩 묶어서 줄로 만들기
+    const lines: string[] = [];
+    for (let i = 0; i < parts.length; i += 2) {
+      const a = parts[i];
+      const b = parts[i + 1];
+      lines.push(b ? `${a}, ${b}` : a);
+    }
+    return lines.length ? lines : [s];
+  };
+
+  const Multiline = ({ text }: { text?: string | null }) => {
+    const lines = splitAddressLines(text);
+    if (!lines.length) return null;
+    return (
+      <>
+        {lines.map((line, i) => (
+          <Text key={i} style={styles.boxText}>
+            {line}
+          </Text>
+        ))}
+      </>
+    );
+  };
+
+  // Fallbacks
+  const buyerName = safe(header.buyer_name) || "-";
+  const consigneeText = safe(header.consignee_text) || buyerName;
+  const notifyText = safe(header.notify_party_text) || buyerName;
+
+  const brandDept = [safe(header.buyer_brand_name), safe(header.buyer_dept_name)]
+    .filter(Boolean)
+    .join(" / ");
+
+  return (
+    <Document>
+      <Page size="A4" style={styles.page}>
+        {/* Title */}
+        <Text style={styles.title}>Proforma Invoice</Text>
+
+        {/* Top row */}
+        <View style={styles.topRow}>
+          <View style={styles.topLeft}>
+            <Text style={styles.topLine}>
+              <Text style={styles.topLabel}>Buyer: </Text>
+              {buyerName}
+            </Text>
+            <Text style={styles.topLine}>
+              <Text style={styles.topLabel}>Brand / Dept: </Text>
+              {brandDept || "-"}
+            </Text>
+          </View>
+
+          <View style={styles.topRight}>
+            <Text style={styles.topLine}>
+              <Text style={styles.topLabel}>Invoice No: </Text>
+              {safe(header.invoice_no) || "-"}
+            </Text>
+            <Text style={styles.topLine}>
+              <Text style={styles.topLabel}>Date: </Text>
+              {formatDateLike(header.issue_date) || "-"}
+            </Text>
+          </View>
+        </View>
+
+        {/* Box: Shipper/Exporter & Invoice/Terms */}
+        <View style={styles.row2}>
+          <View style={styles.box}>
+            <Text style={styles.boxTitle}>Shipper / Exporter</Text>
+            <Text style={styles.boxText}>{safe(header.shipper_name) || "JM INTERNATIONAL CO.,LTD"}</Text>
+            {safe(header.shipper_address) ? (
+              <Multiline text={header.shipper_address} />
+            ) : (
+              <>
+                <Text style={styles.boxText}>Lot16, CN4 Series, Khuc Xuyen Service Village Industrial cluster</Text>
+                <Text style={styles.boxText}>Khuc Xuyen ward, Bac Ninh City</Text>
+                <Text style={styles.boxText}>VIETNAM</Text>
+              </>
+            )}
+          </View>
+
+          <View style={styles.box}>
+            <Text style={styles.boxTitle}>Invoice & Terms</Text>
+            <Text style={styles.boxText}>
+              <Text style={styles.bold}>Terms: </Text>
+              {safe(header.payment_term) || "-"}
+            </Text>
+
+            <Text style={[styles.boxText, { marginTop: 10 }]}>
+              <Text style={styles.bold}>Remarks: </Text>
+            </Text>
+            <Multiline text={header.remarks || ""} />
+          </View>
+        </View>
+
+        {/* Box: Consignee / Notify */}
+        <View style={styles.row2}>
+          <View style={styles.box}>
+            <Text style={styles.boxTitle}>Consignee</Text>
+            {/* ✅ 여기서 주소(Intercom 포함) 멀티라인 출력 */}
+            <Multiline text={consigneeText} />
+          </View>
+          <View style={styles.box}>
+            <Text style={styles.boxTitle}>Notify Party</Text>
+            {/* ✅ 여기서 주소(Intercom 포함) 멀티라인 출력 */}
+            <Multiline text={notifyText} />
+          </View>
+        </View>
+
+        {/* Box: Port / Final Destination */}
+        <View style={styles.row2}>
+          <View style={styles.box}>
+            <Text style={styles.boxTitle}>Port of Loading</Text>
+            <Text style={styles.boxText}>{safe(header.port_of_loading) || "-"}</Text>
+          </View>
+          <View style={styles.box}>
+            <Text style={styles.boxTitle}>Final Destination</Text>
+            <Text style={styles.boxText}>{safe(header.final_destination) || "-"}</Text>
+          </View>
+        </View>
+
+        {/* COO / Certification */}
+        <View style={styles.fullBox}>
+          <Text style={styles.boxTitle}>COO / Certification</Text>
+          <Text style={styles.boxText}>{safe(header.coo_text) || "COO: -"}</Text>
+          <Text style={styles.boxText}>WE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.</Text>
+          <Text style={styles.boxText}>
+            Incoterm: {safe(header.incoterm) || "-"} &nbsp;&nbsp;|&nbsp;&nbsp; Ship Mode:{" "}
+            {safe(header.ship_mode) || "-"}
+          </Text>
+        </View>
+
+        {/* Table */}
+        <View style={styles.table}>
+          <View style={styles.trHead}>
+            {[
+              "PO #",
+              "Buyer Style",
+              "Description",
+              "HS Code",
+              "Qty",
+              "UOM",
+              "Unit Price",
+              "Amount",
+            ].map((h, i) => (
+              <Text key={i} style={[styles.th, colStyle(i)]}>
+                {h}
+              </Text>
+            ))}
+          </View>
+
+          {lines.map((l, idx) => (
+            <View key={idx} style={styles.tr}>
+              <Text style={[styles.td, colStyle(0)]}>{safe(l.po_no) || safe(header.po_no) || "-"}</Text>
+              <Text style={[styles.td, colStyle(1)]}>{safe(l.buyer_style_no) || "-"}</Text>
+              <Text style={[styles.td, colStyle(2)]}>{safe(l.description) || "-"}</Text>
+              <Text style={[styles.td, colStyle(3)]}>{safe(l.hs_code) || "-"}</Text>
+              <Text style={[styles.td, colStyle(4), styles.tdRight]}>{intFmt(l.qty)}</Text>
+              <Text style={[styles.td, colStyle(5)]}>{safe(l.uom) || "-"}</Text>
+              <Text style={[styles.td, colStyle(6), styles.tdRight]}>{money2(l.unit_price)}</Text>
+              <Text style={[styles.td, colStyle(7), styles.tdRight]}>{money2(l.amount)}</Text>
+            </View>
+          ))}
+        </View>
+
+        {/* Subtotal */}
+        <View style={styles.subtotalRow}>
+          <Text style={styles.subtotalLabel}>Subtotal</Text>
+          <Text style={styles.subtotalValue}>USD {money2(subtotal)}</Text>
+        </View>
+      </Page>
+    </Document>
+  );
 }
 
-export interface ProformaInvoicePDFProps {
-  header: ProformaHeader;
-  lines: ProformaLine[];
-  signatureUrl?: string | null;
-}
-
-// ========= 숫자 포맷 헬퍼 =========
-
-function formatQty(v?: number | null): string {
-  const n = typeof v === "number" ? v : 0;
-  return n.toLocaleString("en-US", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-  });
-}
-
-// Unit price: 소수점 4자리, 마지막 두자리가 00이면 2자리만 표기
-function formatUnitPrice(v?: number | null): string {
-  const n = typeof v === "number" ? v : 0;
-  const fixed = n.toFixed(2); // "1.9200"
-  const [i, d] = fixed.split(".");
-  const intWithComma = i.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-
-  if (d.endsWith("00")) {
-    return `${intWithComma}.${d.slice(0, 2)}`;
-  }
-  return `${intWithComma}.${d}`;
-}
-
-function formatAmount(v?: number | null): string {
-  const n = typeof v === "number" ? v : 0;
-  const fixed = n.toFixed(2); // "1920.00"
-  const [i, d] = fixed.split(".");
-  const intWithComma = i.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${intWithComma}.${d}`;
-}
-
-// ========= 스타일 =========
+// =====================
+// Styles
+// =====================
+const BORDER = 1;
 
 const styles = StyleSheet.create({
   page: {
@@ -87,311 +288,106 @@ const styles = StyleSheet.create({
     fontFamily: "Helvetica",
   },
   title: {
-    fontSize: 20,
+    fontSize: 22,
     textAlign: "center",
-    marginBottom: 24,
-    fontWeight: "bold",
+    marginBottom: 20,
+    fontWeight: 700 as any,
   },
-  headerRow: {
+  topRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 20,
+    marginBottom: 16,
   },
-  headerBlock: {
-    width: "48%",
-  },
-  headerLabel: {
-    fontSize: 10,
-    fontWeight: "bold",
-    marginBottom: 4,
-  },
-  headerText: {
-    fontSize: 10,
-  },
-  headerLine: {
-    fontSize: 10,
-    marginBottom: 2,
-  },
-  sectionLabel: {
-    fontSize: 10,
-    fontWeight: "bold",
-    marginTop: 4,
-    marginBottom: 4,
-  },
-  sectionBox: {
-    borderWidth: 1,
-    borderColor: "#000000",
-    padding: 6,
-    minHeight: 24,
-    justifyContent: "center",
-  },
-  table: {
-    marginTop: 16,
-    borderWidth: 1,
-    borderColor: "#000000",
-  },
-  tableHeaderRow: {
+  topLeft: { width: "60%" },
+  topRight: { width: "40%", alignItems: "flex-end" },
+  topLine: { marginBottom: 6, fontSize: 11 },
+  topLabel: { fontWeight: 700 as any },
+
+  row2: {
     flexDirection: "row",
-    backgroundColor: "#eaeaea",
-    borderBottomWidth: 1,
-    borderColor: "#000000",
+    gap: 10,
+    marginBottom: 10,
   },
-  tableHeaderCell: {
-    paddingVertical: 4,
-    paddingHorizontal: 3,
-    fontSize: 9,
-    fontWeight: "bold",
-    borderRightWidth: 1,
-    borderColor: "#000000",
+  box: {
+    flex: 1,
+    borderWidth: BORDER,
+    borderColor: "#000",
+    padding: 10,
+    minHeight: 80,
   },
-  tableRow: {
-    flexDirection: "row",
-    borderBottomWidth: 1,
-    borderColor: "#000000",
+  fullBox: {
+    borderWidth: BORDER,
+    borderColor: "#000",
+    padding: 10,
+    marginBottom: 14,
+    minHeight: 70,
   },
-  tableCell: {
-    paddingVertical: 3,
-    paddingHorizontal: 3,
-    fontSize: 9,
-    borderRightWidth: 1,
-    borderColor: "#000000",
-  },
-  textRight: {
-    textAlign: "right",
-  },
-  textCenter: {
-    textAlign: "center",
-  },
-  totalRow: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    marginTop: 8,
-  },
-  totalLabel: {
-    fontSize: 10,
-    fontWeight: "bold",
-    marginRight: 6,
-  },
-  totalValue: {
-    fontSize: 10,
-    fontWeight: "bold",
-  },
-  signatureBlock: {
-    marginTop: 40,
-    alignItems: "flex-end",
-  },
-  signatureLabel: {
-    fontSize: 10,
-    marginBottom: 12,
-  },
-  signatureImage: {
-    width: 120,
-    height: 40,
+  boxTitle: {
+    fontSize: 12,
+    fontWeight: 700 as any,
     marginBottom: 6,
   },
-  signatureLine: {
-    fontSize: 9,
-    marginBottom: 2,
+  boxText: {
+    fontSize: 10,
+    lineHeight: 1.35,
   },
-  // 스탬프 스타일
-  stampImage: {
-    width: 70,
-    height: 70,
-    marginBottom: 8,
+  bold: { fontWeight: 700 as any },
+
+  table: {
+    borderWidth: BORDER,
+    borderColor: "#999",
+  },
+  trHead: {
+    flexDirection: "row",
+    borderBottomWidth: BORDER,
+    borderColor: "#999",
+    backgroundColor: "#eee",
+  },
+  tr: {
+    flexDirection: "row",
+    borderBottomWidth: BORDER,
+    borderColor: "#ddd",
+  },
+  th: {
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    fontSize: 10,
+    fontWeight: 700 as any,
+    textAlign: "center",
+    borderRightWidth: BORDER,
+    borderColor: "#999",
+  },
+  td: {
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    fontSize: 10,
+    borderRightWidth: BORDER,
+    borderColor: "#ddd",
+  },
+  tdRight: {
+    textAlign: "right",
+  },
+
+  subtotalRow: {
+    marginTop: 14,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  subtotalLabel: {
+    fontSize: 12,
+    fontWeight: 700 as any,
+  },
+  subtotalValue: {
+    fontSize: 12,
+    fontWeight: 700 as any,
   },
 });
 
-// ========= 메인 컴포넌트 =========
-
-const ProformaInvoicePDF: React.FC<ProformaInvoicePDFProps> = ({
-  header,
-  lines,
-  signatureUrl,
-}) => {
-  const issueDate = header.issue_date
-    ? String(header.issue_date).slice(0, 10)
-    : "";
-
-  const currency = header.currency || "USD";
-  const totalDisplay =
-    header.total_display && header.total_display.trim().length > 0
-      ? header.total_display
-      : formatAmount(header.total_amount ?? 0);
-
-  // 🔴 스탬프 이미지용 절대 경로 만들기
-  // 로컬 개발: http://localhost:3000/images/...
-  // 배포 시에는 window.location.origin 기준으로 자동 맞춰짐
-  let stampUrl = "/images/jm_stamp_vn.jpg";
-  if (typeof window !== "undefined") {
-    stampUrl = `${window.location.origin}/images/jm_stamp_vn.jpg`;
-  }
-
-  return (
-    <Document>
-      <Page size="A4" style={styles.page}>
-        {/* 타이틀 */}
-              <Text style={styles.title}>PROFORMA INVOICE (TEST)</Text>
-
-
-        {/* 상단: 좌/우 블록 */}
-        <View style={styles.headerRow}>
-          {/* Shipper / Exporter */}
-          <View style={styles.headerBlock}>
-            <Text style={styles.headerLabel}>SHIPPER / EXPORTER:</Text>
-            <Text style={styles.headerLine}>JM INTERNATIONAL</Text>
-            <Text style={styles.headerLine}>KOREA</Text>
-          </View>
-
-          {/* Invoice Details */}
-          <View style={styles.headerBlock}>
-            <Text style={styles.headerLabel}>INVOICE DETAILS:</Text>
-            <Text style={styles.headerLine}>
-              Invoice No: {header.invoice_no || "-"}
-            </Text>
-            <Text style={styles.headerLine}>Date: {issueDate || "-"}</Text>
-            <Text style={styles.headerLine}>
-              Incoterm: {header.incoterm || "-"}
-            </Text>
-            <Text style={styles.headerLine}>
-              Payment: {header.payment_terms || "-"}
-            </Text>
-          </View>
-        </View>
-
-        {/* Consignee */}
-        <Text style={styles.sectionLabel}>CONSIGNEE:</Text>
-        <View style={styles.sectionBox}>
-          <Text style={styles.headerText}>{header.buyer_name || "-"}</Text>
-        </View>
-
-        {/* 테이블 헤더 */}
-        <View style={styles.table}>
-          <View style={styles.tableHeaderRow}>
-            <Text style={[styles.tableHeaderCell, { width: "7%" }]}>
-              STYLE NO
-            </Text>
-            <Text style={[styles.tableHeaderCell, { width: "32%" }]}>
-              DESCRIPTION
-            </Text>
-            <Text style={[styles.tableHeaderCell, { width: "11%" }]}>
-              COLOR
-            </Text>
-            <Text style={[styles.tableHeaderCell, { width: "11%" }]}>
-              SIZE
-            </Text>
-            <Text
-              style={[
-                styles.tableHeaderCell,
-                styles.textCenter,
-                { width: "11%" },
-              ]}
-            >
-              QTY
-            </Text>
-            <Text
-              style={[
-                styles.tableHeaderCell,
-                styles.textRight,
-                { width: "14%" },
-              ]}
-            >
-              UNIT PRICE
-            </Text>
-            <Text
-              style={[
-                styles.tableHeaderCell,
-                styles.textRight,
-                { width: "14%", borderRightWidth: 0 },
-              ]}
-            >
-              AMOUNT
-            </Text>
-          </View>
-
-          {/* 테이블 라인들 */}
-          {lines.map((line, index) => {
-            const styleNo =
-              line.style_no ||
-              line.buyer_style_no ||
-              line.jm_style_no ||
-              "";
-
-            return (
-              <View key={index} style={styles.tableRow}>
-                <Text style={[styles.tableCell, { width: "7%" }]}>
-                  {styleNo}
-                </Text>
-                <Text style={[styles.tableCell, { width: "32%" }]}>
-                  {line.description || ""}
-                </Text>
-                <Text style={[styles.tableCell, { width: "11%" }]}>
-                  {line.color || ""}
-                </Text>
-                <Text style={[styles.tableCell, { width: "11%" }]}>
-                  {line.size || ""}
-                </Text>
-                <Text
-                  style={[
-                    styles.tableCell,
-                    styles.textCenter,
-                    { width: "11%" },
-                  ]}
-                >
-                  {formatQty(line.qty)}
-                </Text>
-                <Text
-                  style={[
-                    styles.tableCell,
-                    styles.textRight,
-                    { width: "14%" },
-                  ]}
-                >
-                  {formatUnitPrice(line.unit_price)}
-                </Text>
-                <Text
-                  style={[
-                    styles.tableCell,
-                    styles.textRight,
-                    { width: "14%", borderRightWidth: 0 },
-                  ]}
-                >
-                  {formatAmount(line.amount)}
-                </Text>
-              </View>
-            );
-          })}
-        </View>
-
-        {/* 총액 */}
-        <View style={styles.totalRow}>
-          <Text style={styles.totalLabel}>TOTAL:</Text>
-          <Text style={styles.totalValue}>
-            ${totalDisplay} {currency}
-          </Text>
-        </View>
-
-        {/* 서명 블록 */}
-        <View style={styles.signatureBlock}>
-          <Text style={styles.signatureLabel}>Authorized Signature:</Text>
-
-          {/* 🔴 스탬프 이미지 */}
-          <Image style={styles.stampImage} src="/images/jm_stamp_vn.jpg" />
-
-          {/* (있다면) 사인 이미지 */}
-          {signatureUrl ? (
-            <Image style={styles.signatureImage} src={signatureUrl} />
-          ) : null}
-
-          <Text style={styles.signatureLine}>
-            ____________________________________________
-          </Text>
-          <Text style={styles.signatureLine}>Name: ______________________</Text>
-          <Text style={styles.signatureLine}>Title: _______________________</Text>
-          <Text style={styles.signatureLine}>Date: _______________________</Text>
-        </View>
-      </Page>
-    </Document>
-  );
-};
-
-export default ProformaInvoicePDF;
+// Table column widths (비율)
+function colStyle(i: number) {
+  // PO, BuyerStyle, Desc, HS, Qty, UOM, Unit, Amount
+  const widths = [14, 14, 30, 10, 8, 8, 10, 10];
+  const w = widths[i] ?? 10;
+  return { width: `${w}%` as any };
+}

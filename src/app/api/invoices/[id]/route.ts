@@ -1,351 +1,568 @@
-// src/app/api/invoices/[id]/route.ts
+// src/app/api/packing-lists/[id]/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-function bad(message: string, status = 400, extra: any = {}) {
-  return NextResponse.json({ success: false, error: message, ...extra }, { status });
-}
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
 }
+function bad(message: string, status = 400, extra?: any) {
+  return NextResponse.json(
+    { success: false, error: message, ...(extra ?? {}) },
+    { status }
+  );
+}
 
-function isLockedStatus(status: any) {
-  return String(status || "").toUpperCase() === "CONFIRMED";
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function isUuid(v: string) {
+  return UUID_RE.test(v);
+}
+
+function num(v: any, fallback = 0): number {
+  if (v === null || v === undefined || v === "") return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function isEmptyNumber(v: any) {
+  // 프로젝트에서는 0도 “미입력”으로 취급하는 케이스가 많음
+  return v === null || v === undefined || v === "" || Number(v) === 0;
+}
+function pickIfEmpty(cur: any, fallback: any) {
+  return isEmptyNumber(cur) ? fallback : cur;
+}
+
+function isBlankText(v: any) {
+  return v === null || v === undefined || String(v).trim() === "";
+}
+function pickTextIfEmpty(cur: any, fallback: any) {
+  return isBlankText(cur) ? fallback : cur;
+}
+
+function calcPerCtn(total: any, cartons: any): number | null {
+  const c = num(cartons, 0);
+  const t = num(total, 0);
+  if (c <= 0) return null;
+  const v = t / c;
+  return Number.isFinite(v) ? v : null;
 }
 
 /**
- * shipping_origin_code -> company_sites에서 shipper(법인명/주소) 찾아오기
- * - 1번 규칙: 선적지 site의 법인명 + 주소가 Shipper/Exporter
- * - company_sites 컬럼명은 프로젝트마다 다를 수 있어 방어적으로 처리
+ * shipment_lines에서 gw/nw/cbm per-ctn 값 찾아오기
+ * - 변형 흡수
+ * - 없으면 total_* / * 를 cartons로 나눠 계산
  */
-async function resolveShipperByOrigin(shippingOriginCode: string | null) {
-  const code = (shippingOriginCode || "").trim();
-  if (!code) return { shipper_name: null as string | null, shipper_address: null as string | null };
+function readShipmentPerCtn(sl: any, cartons: number) {
+  const slNwPer =
+    sl?.nw_per_ctn ?? sl?.nw_per_carton ?? sl?.nw_per_cartons ?? null;
+  const slGwPer =
+    sl?.gw_per_ctn ?? sl?.gw_per_carton ?? sl?.gw_per_cartons ?? null;
+  const slCbmPer = sl?.cbm_per_carton ?? sl?.cbm_per_carton ?? null;
 
-  // 1) company_sites에 shipping_origin_code 컬럼이 있는 케이스를 우선 지원
-  //    (없으면 supabase가 error를 내므로 try/catch로 안전하게)
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("company_sites")
-      .select("*")
-      .eq("shipping_origin_code", code)
-      .maybeSingle();
+  const nwPer =
+    slNwPer != null
+      ? num(slNwPer, 0)
+      : sl?.total_nw != null
+      ? calcPerCtn(sl.total_nw, cartons)
+      : sl?.nw != null
+      ? calcPerCtn(sl.nw, cartons)
+      : null;
 
-    if (!error && data) {
-      const shipperName =
-        (data.site_legal_name ??
-          data.legal_name ??
-          data.shipper_name ??
-          data.name ??
-          null) as string | null;
+  const gwPer =
+    slGwPer != null
+      ? num(slGwPer, 0)
+      : sl?.total_gw != null
+      ? calcPerCtn(sl.total_gw, cartons)
+      : sl?.gw != null
+      ? calcPerCtn(sl.gw, cartons)
+      : null;
 
-      const shipperAddress =
-        (data.site_address ??
-          data.address ??
-          data.shipper_address ??
-          null) as string | null;
+  const cbmPer =
+    slCbmPer != null
+      ? num(slCbmPer, 0)
+      : sl?.total_cbm != null
+      ? calcPerCtn(sl.total_cbm, cartons)
+      : null;
 
-      return {
-        shipper_name: shipperName ? String(shipperName) : null,
-        shipper_address: shipperAddress ? String(shipperAddress) : null,
-      };
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2) 혹시 company_sites에 "code" 같은 컬럼으로 site를 구분하는 경우 (예: KR_SEOUL / VN_BACNINH)
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("company_sites")
-      .select("*")
-      .eq("code", code)
-      .maybeSingle();
-
-    if (!error && data) {
-      const shipperName =
-        (data.site_legal_name ??
-          data.legal_name ??
-          data.shipper_name ??
-          data.name ??
-          null) as string | null;
-
-      const shipperAddress =
-        (data.site_address ??
-          data.address ??
-          data.shipper_address ??
-          null) as string | null;
-
-      return {
-        shipper_name: shipperName ? String(shipperName) : null,
-        shipper_address: shipperAddress ? String(shipperAddress) : null,
-      };
-    }
-  } catch {
-    // ignore
-  }
-
-  // 3) 그래도 못 찾으면 null (UI/PDF에서 default를 보여주도록)
-  return { shipper_name: null, shipper_address: null };
+  return { nwPer, gwPer, cbmPer };
 }
 
-async function getInvoiceHeaderOr404(id: string) {
-  const { data, error } = await supabaseAdmin
-    .from("invoice_headers")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+/**
+ * DB row -> API 응답 정규화
+ * - qty fallback
+ * - per_ctn normalize
+ * - UI 호환 alias 제공: *_per_carton / ct_no_* (동일값)
+ */
+function normalizeLine(row: any) {
+  const cartons = num(row?.cartons, 0);
 
-  if (error) throw new Error(error.message);
-  return data ?? null;
-}
+  const qty =
+    row?.qty !== undefined && row?.qty !== null
+      ? num(row.qty, 0)
+      : row?.shipped_qty !== undefined && row?.shipped_qty !== null
+      ? num(row.shipped_qty, 0)
+      : row?.order_qty !== undefined && row?.order_qty !== null
+      ? num(row.order_qty, 0)
+      : 0;
 
-async function getInvoiceLines(invoiceId: string) {
-  // invoice_lines는 프로젝트가 invoice_id 또는 invoice_header_id 둘 중 하나로 연결되어 있을 수 있음
-  // 둘 다 OR로 가져오고 is_deleted=false만 기본 필터
-  const { data, error } = await supabaseAdmin
-    .from("invoice_lines")
-    .select("*")
-    .or(`invoice_id.eq.${invoiceId},invoice_header_id.eq.${invoiceId}`)
-    .eq("is_deleted", false)
-    .order("line_no", { ascending: true });
+  const nwPer =
+    row?.nw_per_ctn !== undefined && row?.nw_per_ctn !== null
+      ? num(row.nw_per_ctn, 0)
+      : row?.nw_per_carton !== undefined && row?.nw_per_carton !== null
+      ? num(row.nw_per_carton, 0)
+      : null;
 
-  if (error) throw new Error(error.message);
-  return data ?? [];
-}
+  const gwPer =
+    row?.gw_per_ctn !== undefined && row?.gw_per_ctn !== null
+      ? num(row.gw_per_ctn, 0)
+      : row?.gw_per_carton !== undefined && row?.gw_per_carton !== null
+      ? num(row.gw_per_carton, 0)
+      : null;
 
-async function ensureShipperFields(header: any) {
-  // DB에 shipper_name/address가 NULL이면 shipping_origin_code로 찾아서 채움
-  const needName = !header?.shipper_name || String(header.shipper_name).trim() === "";
-  const needAddr = !header?.shipper_address || String(header.shipper_address).trim() === "";
+  const cbmPer =
+    row?.cbm_per_carton !== undefined && row?.cbm_per_carton !== null
+      ? num(row.cbm_per_carton, 0)
+      : row?.cbm_per_carton !== undefined && row?.cbm_per_carton !== null
+      ? num(row.cbm_per_carton, 0)
+      : null;
 
-  if (!needName && !needAddr) return header;
+  // ✅ DB는 carton_no_from/to 사용 (ct_no_*는 alias로만 내려줌)
+  const from =
+    row?.carton_no_from !== undefined && row?.carton_no_from !== null
+      ? num(row.carton_no_from, 0)
+      : row?.ct_no_from !== undefined && row?.ct_no_from !== null
+      ? num(row.ct_no_from, 0)
+      : null;
 
-  const origin = header?.shipping_origin_code ?? null;
-  const resolved = await resolveShipperByOrigin(origin);
+  const to =
+    row?.carton_no_to !== undefined && row?.carton_no_to !== null
+      ? num(row.carton_no_to, 0)
+      : row?.ct_no_to !== undefined && row?.ct_no_to !== null
+      ? num(row.ct_no_to, 0)
+      : null;
 
   return {
-    ...header,
-    shipper_name: needName ? resolved.shipper_name : header.shipper_name,
-    shipper_address: needAddr ? resolved.shipper_address : header.shipper_address,
+    ...row,
+    cartons,
+    qty,
+
+    // canonical (db)
+    nw_per_carton: nwPer,
+    gw_per_carton: gwPer,
+    cbm_per_carton: cbmPer,
+
+    carton_no_from: from,
+    carton_no_to: to,
+
+    // aliases for UI / legacy
+    ct_no_from: from,
+    ct_no_to: to,
   };
 }
 
 /**
- * GET /api/invoices/[id]
- * - header + lines 반환
- * - shipper_name/address가 비어있으면 origin 기반으로 "응답에서는" 채워서 내려줌
- *   (※ GET에서 DB 업데이트는 하지 않음. PUT 때 저장되게 함)
+ * ✅ 보강: packing_list_lines가 “있어도”
+ * qty/nw/gw/cbm이 비어(0/NULL)이면 shipment_lines 값으로 채움
  */
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  try {
-    const id = params?.id;
-    if (!id) return bad("Invoice ID is required", 400);
+function enrichFromShipment(lines: any[], shipmentLines: any[]) {
+  const keyFull = (po: any, st: any, desc: any) =>
+    `${String(po ?? "").trim()}||${String(st ?? "").trim()}||${String(
+      desc ?? ""
+    ).trim()}`;
+  const keyLite = (po: any, st: any) =>
+    `${String(po ?? "").trim()}||${String(st ?? "").trim()}`;
 
-    const header = await getInvoiceHeaderOr404(id);
-    if (!header || header.is_deleted) return bad("Invoice not found", 404);
-
-    const lines = await getInvoiceLines(id);
-    const patchedHeader = await ensureShipperFields(header);
-
-    return ok({ header: patchedHeader, lines });
-  } catch (e: any) {
-    console.error(e);
-    return bad(e?.message || "Failed to load invoice", 500);
+  const mapFull = new Map<string, any>();
+  const mapLite = new Map<string, any>();
+  for (const sl of shipmentLines) {
+    mapFull.set(keyFull(sl.po_no, sl.style_no, sl.description), sl);
+    mapLite.set(keyLite(sl.po_no, sl.style_no), sl);
   }
-}
 
-/**
- * PUT /api/invoices/[id]
- * body: { header: {...}, lines: [...] }
- * - CONFIRMED 잠금(409)
- * - shipper_name/address가 비어있으면 origin 기준으로 DB에 자동 세팅(1번 규칙)
- * - lines는 id 기준 update, id 없으면 insert(가능하면)
- */
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
-  try {
-    const id = params?.id;
-    if (!id) return bad("Invoice ID is required", 400);
+  return lines.map((l) => {
+    const sl =
+      mapFull.get(keyFull(l.po_no, l.style_no, l.description)) ??
+      mapLite.get(keyLite(l.po_no, l.style_no));
 
-    const existing = await getInvoiceHeaderOr404(id);
-    if (!existing || existing.is_deleted) return bad("Invoice not found", 404);
+    if (!sl) return l;
 
-    if (isLockedStatus(existing.status)) {
-      return bad("Invoice is locked (CONFIRMED). Use Revision.", 409, {
-        meta: { locked: true, lock_reason: "CONFIRMED" },
-      });
-    }
+    const cartons = num(l.cartons, 0) || num(sl.cartons, 0) || 0;
+    const { nwPer, gwPer, cbmPer } = readShipmentPerCtn(sl, cartons);
 
-    const body = await req.json().catch(() => null);
-    if (!body) return bad("Invalid JSON body", 400);
+    return {
+      ...l,
+      shipped_qty: l.shipped_qty ?? sl.shipped_qty ?? null,
+      order_qty: l.order_qty ?? sl.order_qty ?? null,
+      qty: pickIfEmpty(l.qty, sl.shipped_qty ?? sl.order_qty ?? l.qty),
 
-    const incomingHeader = body.header ?? {};
-    const incomingLines: any[] = Array.isArray(body.lines) ? body.lines : [];
+      nw_per_carton: pickIfEmpty(l.nw_per_carton, nwPer),
+      gw_per_carton: pickIfEmpty(l.gw_per_carton, gwPer),
+      cbm_per_carton: pickIfEmpty(l.cbm_per_carton, cbmPer),
 
-    // shipper 자동 세팅(1번 규칙)
-    // - 사용자가 shipper_name/address를 비워서 저장해도, origin 기준으로 채워서 저장
-    const mergedHeader = {
-      ...incomingHeader,
-      // invoice_headers에 존재하는 컬럼만 업데이트하도록(안전)
-      invoice_no: incomingHeader.invoice_no ?? null,
-      invoice_date: incomingHeader.invoice_date ?? null,
-
-      currency: incomingHeader.currency ?? null,
-      incoterm: incomingHeader.incoterm ?? null,
-      payment_term: incomingHeader.payment_term ?? null,
-
-      destination: incomingHeader.destination ?? null,
-
-      shipping_origin_code: incomingHeader.shipping_origin_code ?? existing.shipping_origin_code ?? null,
-      port_of_loading: incomingHeader.port_of_loading ?? null,
-      final_destination: incomingHeader.final_destination ?? null,
-      etd: incomingHeader.etd ?? null,
-      eta: incomingHeader.eta ?? null,
-
-      remarks: incomingHeader.remarks ?? null,
-      consignee_text: incomingHeader.consignee_text ?? null,
-      notify_party_text: incomingHeader.notify_party_text ?? null,
-
-      shipper_name: incomingHeader.shipper_name ?? null,
-      shipper_address: incomingHeader.shipper_address ?? null,
-
-      coo_text: incomingHeader.coo_text ?? null,
-
-      status: incomingHeader.status ?? existing.status ?? null,
-      total_amount: incomingHeader.total_amount ?? null,
+      cartons: pickIfEmpty(l.cartons, cartons),
     };
-
-    // shipper_name/address가 비어있으면 origin으로 채움
-    const fixedHeader = await ensureShipperFields(mergedHeader);
-
-    // 1) header update
-    {
-      const { error } = await supabaseAdmin
-        .from("invoice_headers")
-        .update({
-          invoice_no: fixedHeader.invoice_no,
-          invoice_date: fixedHeader.invoice_date,
-
-          currency: fixedHeader.currency,
-          incoterm: fixedHeader.incoterm,
-          payment_term: fixedHeader.payment_term,
-
-          destination: fixedHeader.destination,
-
-          shipping_origin_code: fixedHeader.shipping_origin_code,
-          port_of_loading: fixedHeader.port_of_loading,
-          final_destination: fixedHeader.final_destination,
-          etd: fixedHeader.etd,
-          eta: fixedHeader.eta,
-
-          remarks: fixedHeader.remarks,
-          consignee_text: fixedHeader.consignee_text,
-          notify_party_text: fixedHeader.notify_party_text,
-
-          shipper_name: fixedHeader.shipper_name,
-          shipper_address: fixedHeader.shipper_address,
-
-          coo_text: fixedHeader.coo_text,
-
-          status: fixedHeader.status,
-          total_amount: fixedHeader.total_amount,
-        })
-        .eq("id", id);
-
-      if (error) return bad(error.message, 500);
-    }
-
-    // 2) lines upsert (id 있으면 update, 없으면 insert)
-    for (const l of incomingLines) {
-      const lineId = l?.id ? String(l.id) : null;
-
-      const payload = {
-        // 연결키는 프로젝트 상황에 따라 둘 다 세팅(안전)
-        invoice_id: id,
-        invoice_header_id: id,
-
-        po_no: l.po_no ?? null,
-        line_no: l.line_no ?? null,
-
-        style_no: l.style_no ?? null,
-        description: l.description ?? null,
-
-        color: l.color ?? null,
-        size: l.size ?? null,
-
-        qty: l.qty ?? null,
-        unit_price: l.unit_price ?? null,
-        amount: l.amount ?? null,
-
-        cartons: l.cartons ?? null,
-        gw: l.gw ?? null,
-        nw: l.nw ?? null,
-
-        material_content: l.material_content ?? null,
-        hs_code: l.hs_code ?? null,
-
-        is_deleted: !!l.is_deleted,
-      };
-
-      if (lineId) {
-        const { error } = await supabaseAdmin.from("invoice_lines").update(payload).eq("id", lineId);
-        if (error) return bad(error.message, 500);
-      } else {
-        const { error } = await supabaseAdmin.from("invoice_lines").insert(payload);
-        if (error) return bad(error.message, 500);
-      }
-    }
-
-    // 3) return fresh
-    const header = await getInvoiceHeaderOr404(id);
-    const lines = await getInvoiceLines(id);
-    const patchedHeader = await ensureShipperFields(header);
-
-    return ok({ header: patchedHeader, lines });
-  } catch (e: any) {
-    console.error(e);
-    return bad(e?.message || "Save failed", 500);
-  }
+  });
 }
 
-/**
- * DELETE /api/invoices/[id]
- * - CONFIRMED 잠금(409)
- * - soft delete: invoice_headers.is_deleted = true, invoice_lines.is_deleted = true
- */
-export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
+function computeTotals(lines: any[]) {
+  let total_cartons = 0;
+  let total_qty = 0;
+  let total_nw = 0;
+  let total_gw = 0;
+  let total_cbm = 0;
+
+  for (const r of lines) {
+    const cartons = num(r.cartons, 0);
+    total_cartons += cartons;
+    total_qty += num(r.qty, 0);
+    total_nw += cartons * num(r.nw_per_carton, 0);
+    total_gw += cartons * num(r.gw_per_carton, 0);
+    total_cbm += cartons * num(r.cbm_per_carton, 0);
+  }
+
+  return { total_cartons, total_qty, total_nw, total_gw, total_cbm };
+}
+
+export async function GET(
+  _req: Request,
+  ctx: { params: Promise<{ id: string }> }
+) {
   try {
-    const id = params?.id;
-    if (!id) return bad("Invoice ID is required", 400);
+    const { id } = await ctx.params;
+    if (!id || !isUuid(id)) return bad("Invalid id", 400);
 
-    const existing = await getInvoiceHeaderOr404(id);
-    if (!existing || existing.is_deleted) return bad("Invoice not found", 404);
+    const { data: header, error: hErr } = await supabaseAdmin
+      .from("packing_list_headers")
+      .select("*")
+      .eq("id", id)
+      .eq("is_deleted", false)
+      .maybeSingle();
 
-    if (isLockedStatus(existing.status)) {
-      return bad("Invoice is locked (CONFIRMED). Use Revision.", 409, {
-        meta: { locked: true, lock_reason: "CONFIRMED" },
+    if (hErr) return bad(hErr.message, 500);
+    if (!header) return bad("Packing list not found", 404);
+
+    const H = header as any;
+
+    // ------------------------------------------------------------
+    // ✅ Invoice처럼 주소/문구가 나오도록 보강:
+    // packing_list_headers의 shipper/consignee/notify가 비어있으면
+    // invoice_headers(또는 관련 invoice)에서 "빈 값만" 채워서 내려줌.
+    // (실제 운영에서 PL PDF는 이 값들을 출력하므로, 여기서 정규화)
+    // ------------------------------------------------------------
+    try {
+      let inv: any = null;
+
+      // 1) 우선 invoice_id로 찾기
+      const invId = H.invoice_id ?? null;
+      if (invId && isUuid(String(invId))) {
+        const { data: invRow } = await supabaseAdmin
+          .from("invoice_headers")
+          .select(
+            "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+          )
+          .eq("id", invId)
+          .maybeSingle();
+        inv = invRow ?? null;
+      }
+
+      // 2) invoice_no(text)로 찾기 (invoice_id가 없거나 실패한 경우)
+      if (!inv) {
+        const invNo =
+          H.invoice_no ??
+          H.invoice_no_text ??
+          H.invoice_number ??
+          H.invoice ??
+          null;
+        const invNoText = (invNo ?? "").toString().trim();
+        if (invNoText) {
+          const { data: invRow } = await supabaseAdmin
+            .from("invoice_headers")
+            .select(
+              "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+            )
+            .eq("invoice_no", invNoText)
+            .maybeSingle();
+          inv = invRow ?? null;
+        }
+      }
+
+      // 3) invoice_id도 invoice_no도 없으면, shipment_id → invoice_id 힌트로 찾기 (가능한 경우만)
+      if (!inv && H.shipment_id && isUuid(String(H.shipment_id))) {
+        const { data: sh } = await supabaseAdmin
+          .from("shipments")
+          .select("invoice_id, invoice_no")
+          .eq("id", H.shipment_id)
+          .maybeSingle();
+
+        const shInvId = sh?.invoice_id ?? null;
+        const shInvNo = (sh?.invoice_no ?? "").toString().trim();
+
+        if (shInvId && isUuid(String(shInvId))) {
+          const { data: invRow } = await supabaseAdmin
+            .from("invoice_headers")
+            .select(
+              "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+            )
+            .eq("id", shInvId)
+            .maybeSingle();
+          inv = invRow ?? null;
+        } else if (shInvNo) {
+          const { data: invRow } = await supabaseAdmin
+            .from("invoice_headers")
+            .select(
+              "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+            )
+            .eq("invoice_no", shInvNo)
+            .maybeSingle();
+          inv = invRow ?? null;
+        }
+      }
+
+      if (inv) {
+        const patch: any = {};
+
+        // shipper / consignee / notify는 "빈 값만" 채움
+        patch.shipper_name = pickTextIfEmpty(H.shipper_name, inv.shipper_name);
+        patch.shipper_address = pickTextIfEmpty(
+          H.shipper_address,
+          inv.shipper_address
+        );
+        patch.consignee_text = pickTextIfEmpty(
+          H.consignee_text,
+          inv.consignee_text
+        );
+        patch.notify_party_text = pickTextIfEmpty(
+          H.notify_party_text,
+          inv.notify_party_text
+        );
+
+        // 필요하면 coo_text도 invoice 기반으로 (PL에 이미 값이 있으면 유지)
+        if ("coo_text" in H || "coo_text" in inv) {
+          patch.coo_text = pickTextIfEmpty(H.coo_text, inv.coo_text);
+        }
+
+        // patch가 실제로 변경을 만든 경우만 적용
+        const changed: any = {};
+        for (const k of Object.keys(patch)) {
+          if (patch[k] !== undefined && patch[k] !== (H as any)[k]) changed[k] = patch[k];
+        }
+
+        if (Object.keys(changed).length > 0) {
+          // 응답 header에도 반영
+          Object.assign(H, changed);
+
+          // DB에도 backfill (빈 값만 채우는 구조)
+          await supabaseAdmin
+            .from("packing_list_headers")
+            .update({ ...changed, updated_at: new Date().toISOString() })
+            .eq("id", id);
+        }
+      }
+    } catch (e) {
+      // 보강 실패해도 PL 조회는 계속 진행 (PDF 최소 기능 유지)
+      console.warn("PackingList header hydrate from invoice failed:", e);
+    }
+
+
+    // 1) packing_list_lines (DB 컬럼: carton_no_from/to)
+    const { data: plLines, error: plErr } = await supabaseAdmin
+      .from("packing_list_lines")
+      .select("*")
+      .eq("packing_list_id", id)
+      .eq("is_deleted", false)
+      .order("carton_no_from", { ascending: true })
+      .order("po_no", { ascending: true })
+      .order("style_no", { ascending: true });
+
+    if (plErr) return bad(plErr.message, 500);
+
+    let rawLines: any[] = plLines ?? [];
+
+    // 2) shipment_lines (보강/폴백)
+    let shLines: any[] = [];
+    if (H.shipment_id && isUuid(String(H.shipment_id))) {
+      const { data: sData, error: sErr } = await supabaseAdmin
+        .from("shipment_lines")
+        .select("*")
+        .eq("shipment_id", H.shipment_id)
+        .eq("is_deleted", false)
+        .order("po_no", { ascending: true });
+
+      if (sErr) return bad(sErr.message, 500);
+      shLines = sData ?? [];
+    }
+
+    // 3) 폴백: PL lines가 비면 shipment_lines로 생성
+    if ((!rawLines || rawLines.length === 0) && shLines.length > 0) {
+      rawLines = shLines.map((sl) => {
+        const cartons = num(sl.cartons, 0);
+        const { nwPer, gwPer, cbmPer } = readShipmentPerCtn(sl, cartons);
+
+        return {
+          po_no: sl.po_no ?? null,
+          style_no: sl.style_no ?? null,
+          description: sl.description ?? null,
+          cartons,
+
+          shipped_qty: sl.shipped_qty ?? null,
+          order_qty: sl.order_qty ?? null,
+          qty: sl.shipped_qty ?? sl.order_qty ?? 0,
+
+          nw_per_carton: nwPer,
+          gw_per_carton: gwPer,
+          cbm_per_carton: cbmPer,
+
+          carton_no_from: null,
+          carton_no_to: null,
+        };
       });
     }
 
-    // lines soft delete
-    {
-      const { error } = await supabaseAdmin
-        .from("invoice_lines")
-        .update({ is_deleted: true })
-        .or(`invoice_id.eq.${id},invoice_header_id.eq.${id}`);
-
-      if (error) return bad(error.message, 500);
+    // 4) ✅ 보강: rawLines가 있어도 shipment로 채워 넣기
+    if (rawLines.length > 0 && shLines.length > 0) {
+      rawLines = enrichFromShipment(rawLines, shLines);
     }
 
-    // header soft delete
-    {
-      const { error } = await supabaseAdmin.from("invoice_headers").update({ is_deleted: true }).eq("id", id);
-      if (error) return bad(error.message, 500);
-    }
+    const lines = rawLines.map(normalizeLine);
+    const totals = computeTotals(lines);
 
-    return ok({});
+    return ok({ header: H, lines, totals });
   } catch (e: any) {
-    console.error(e);
-    return bad(e?.message || "Delete failed", 500);
+    return bad(e?.message || "Server error", 500);
+  }
+}
+
+export async function PUT(
+  req: Request,
+  ctx: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await ctx.params;
+    if (!id || !isUuid(id)) return bad("Invalid id", 400);
+
+    const { data: header, error: hErr } = await supabaseAdmin
+      .from("packing_list_headers")
+      .select("*")
+      .eq("id", id)
+      .eq("is_deleted", false)
+      .maybeSingle();
+
+    if (hErr) return bad(hErr.message, 500);
+    if (!header) return bad("Packing list not found", 404);
+
+    const body = await req.json().catch(() => ({}));
+    const headerIn = body?.header || {};
+    const linesIn: any[] = Array.isArray(body?.lines) ? body.lines : [];
+
+    // header update
+    const { error: upErr } = await supabaseAdmin
+      .from("packing_list_headers")
+      .update({
+        packing_date: headerIn.packing_date ?? header.packing_date ?? null,
+        memo: headerIn.memo ?? header.memo ?? null,
+        consignee_text: headerIn.consignee_text ?? header.consignee_text ?? null,
+        notify_party_text:
+          headerIn.notify_party_text ?? header.notify_party_text ?? null,
+        shipper_name: headerIn.shipper_name ?? header.shipper_name ?? null,
+        shipper_address:
+          headerIn.shipper_address ?? header.shipper_address ?? null,
+        port_of_loading:
+          headerIn.port_of_loading ?? header.port_of_loading ?? null,
+        final_destination:
+          headerIn.final_destination ?? header.final_destination ?? null,
+        coo_text: headerIn.coo_text ?? header.coo_text ?? null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id);
+
+    if (upErr) return bad(upErr.message, 500);
+
+    // 기존 lines soft delete
+    const { error: delErr } = await supabaseAdmin
+      .from("packing_list_lines")
+      .update({ is_deleted: true, updated_at: new Date().toISOString() })
+      .eq("packing_list_id", id)
+      .eq("is_deleted", false);
+
+    if (delErr) return bad(delErr.message, 500);
+
+    // ✅ 입력키 흡수: *_per_ctn / *_per_carton 둘 다 OK
+    // ✅ CT range는 DB 컬럼 carton_no_from/to 로 저장
+    const toInsert = linesIn
+      .filter((x) => x && x.is_deleted !== true)
+      .map((x) => {
+        const cartons = num(x.cartons, 0);
+        const qty = num(x.qty ?? x.shipped_qty ?? x.order_qty, 0);
+
+        const nwRaw = x.nw_per_carton ?? x.nw_per_carton ?? null;
+        const gwRaw = x.gw_per_carton ?? x.gw_per_carton ?? null;
+        const cbmRaw = x.cbm_per_carton ?? x.cbm_per_carton ?? null;
+
+        const fromRaw = x.carton_no_from ?? x.ct_no_from ?? null;
+        const toRaw = x.carton_no_to ?? x.ct_no_to ?? null;
+
+        return {
+          packing_list_id: id,
+
+          po_no: x.po_no ?? null,
+          style_no: x.style_no ?? null,
+          description: x.description ?? null,
+
+          cartons,
+          qty,
+
+          // 비워둔 값은 NULL 저장(그래야 GET에서 shipment로 보강됨)
+          nw_per_carton: isEmptyNumber(nwRaw) ? null : num(nwRaw, 0),
+          gw_per_carton: isEmptyNumber(gwRaw) ? null : num(gwRaw, 0),
+          cbm_per_carton: isEmptyNumber(cbmRaw) ? null : num(cbmRaw, 0),
+
+          carton_no_from:
+            fromRaw !== undefined && fromRaw !== null && fromRaw !== ""
+              ? num(fromRaw, 0)
+              : null,
+          carton_no_to:
+            toRaw !== undefined && toRaw !== null && toRaw !== ""
+              ? num(toRaw, 0)
+              : null,
+
+          is_deleted: false,
+        };
+      });
+
+    if (toInsert.length > 0) {
+      const { error: insErr } = await supabaseAdmin
+        .from("packing_list_lines")
+        .insert(toInsert);
+
+      if (insErr) return bad(insErr.message, 500);
+    }
+
+    // 최신 header 재조회
+    const { data: newHeader, error: nhErr } = await supabaseAdmin
+      .from("packing_list_headers")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (nhErr) return bad(nhErr.message, 500);
+
+    // 최신 lines 재조회
+    const { data: outLines, error: outErr } = await supabaseAdmin
+      .from("packing_list_lines")
+      .select("*")
+      .eq("packing_list_id", id)
+      .eq("is_deleted", false)
+      .order("carton_no_from", { ascending: true })
+      .order("po_no", { ascending: true })
+      .order("style_no", { ascending: true });
+
+    if (outErr) return bad(outErr.message, 500);
+
+    const lines = (outLines ?? []).map(normalizeLine);
+    const totals = computeTotals(lines);
+
+    return ok({ header: newHeader, lines, totals });
+  } catch (e: any) {
+    return bad(e?.message || "Server error", 500);
   }
 }

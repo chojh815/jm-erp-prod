@@ -2,11 +2,31 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+/**
+ * IMPORTANT
+ * - This endpoint must NEVER be cached.
+ * - Otherwise "deleted" POs can still appear in Search modal,
+ *   while detail API correctly returns 404 (not found).
+ */
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+function jsonNoStore(body: any, status = 200) {
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+    },
+  });
+}
+
 function ok(data: any = {}) {
-  return NextResponse.json({ success: true, ...data });
+  return jsonNoStore({ success: true, ...data }, 200);
 }
 function bad(message: string, status = 400) {
-  return NextResponse.json({ success: false, error: message }, { status });
+  return jsonNoStore({ success: false, error: message }, status);
 }
 function toInt(v: any, fallback: number) {
   const n = Number(v);
@@ -19,34 +39,39 @@ function asText(v: any) {
 function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
+function n(v: any, fallback = 0) {
+  const num = Number(v);
+  return Number.isFinite(num) ? num : fallback;
+}
 
-// ✅ (is_deleted=false OR is_deleted IS NULL)
-const NOT_DELETED_OR_NULL = "is_deleted.is.null,is_deleted.eq.false";
-// ✅ (status != 'DELETED' OR status IS NULL)
-const NOT_STATUS_DELETED_OR_NULL = "status.is.null,status.neq.DELETED";
-
-/** ---- row types (캐스팅용) ---- */
+/** ---- row types (casting only) ---- */
 type PoHeaderRow = {
   id: string;
-  buyer_brand_name: string | null;
-  requested_ship_date: string | null;
-  is_deleted: boolean | null;
-  status: string | null;
 
   po_no?: string | null;
   buyer_id?: string | null;
   buyer_name?: string | null;
+
+  buyer_brand_name?: string | null;
   buyer_brand_id?: string | null;
   buyer_dept_name?: string | null;
+
   order_date?: string | null;
+  requested_ship_date?: string | null;
+
   currency?: string | null;
-  subtotal?: number | null;
+  subtotal?: number | null; // header subtotal (legacy/optional)
+  status?: string | null;
+
   ship_mode?: string | null;
   destination?: string | null;
   origin_code?: string | null;
   shipping_origin_code?: string | null;
+
   payment_term?: string | null;
   payment_term_id?: string | null;
+
+  is_deleted?: boolean | null;
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -110,24 +135,24 @@ export async function GET(req: Request) {
     // ------------------------------------------------------------------
     const detailFor = (url.searchParams.get("detailFor") ?? "").trim();
     if (detailFor) {
-      // 0) header
+      // 0) header (STRICT: must exist and not deleted)
       const hdrRes = await supabaseAdmin
         .from("po_headers")
         .select(["id", "buyer_brand_name", "requested_ship_date", "is_deleted", "status"].join(","))
         .eq("id", detailFor)
-        .or(NOT_DELETED_OR_NULL)
-        .or(NOT_STATUS_DELETED_OR_NULL)
+        .eq("is_deleted", false)
+        .neq("status", "DELETED")
         .maybeSingle();
 
       if (hdrRes.error) return bad(hdrRes.error.message || "Failed to load PO header", 500);
 
-      const hdr = (hdrRes.data as PoHeaderRow | null);
+      const hdr = hdrRes.data as PoHeaderRow | null;
       if (!hdr?.id) return bad("PO header not found (or deleted)", 404);
 
       const headerBrand = asText(hdr.buyer_brand_name);
       const headerReqShip = hdr.requested_ship_date ?? null;
 
-      // 1) lines
+      // 1) lines (STRICT: not deleted)
       const linesRes = await supabaseAdmin
         .from("po_lines")
         .select(
@@ -156,25 +181,25 @@ export async function GET(req: Request) {
           ].join(",")
         )
         .eq("po_header_id", detailFor)
-        .or(NOT_DELETED_OR_NULL)
+        .eq("is_deleted", false)
         .order("line_no", { ascending: true, nullsFirst: true });
 
       if (linesRes.error) return bad(linesRes.error.message || "Failed to load PO lines", 500);
 
-      const lineRows = ((linesRes.data ?? []) as unknown as PoLineRow[]);
+      const lineRows = ((linesRes.data ?? []) as unknown as PoLineRow[]) || [];
       const lineIds = uniq(lineRows.map((r) => r.id).filter(Boolean));
 
-      // 2) images from po_line_images
+      // 2) images from po_line_images (best-effort)
       const imagesByLine: Record<string, string[]> = {};
       if (lineIds.length > 0) {
         const imgRes = await supabaseAdmin
           .from("po_line_images")
           .select(["po_line_id", "image_url", "sort_order", "created_at", "is_deleted"].join(","))
           .in("po_line_id", lineIds)
-          .or(NOT_DELETED_OR_NULL);
+          .eq("is_deleted", false);
 
         if (!imgRes.error) {
-          const imgs = ((imgRes.data ?? []) as unknown as PoLineImageRow[]);
+          const imgs = ((imgRes.data ?? []) as unknown as PoLineImageRow[]) || [];
           const grouped: Record<string, PoLineImageRow[]> = {};
 
           for (const r of imgs) {
@@ -198,16 +223,18 @@ export async function GET(req: Request) {
       }
 
       // 3) shipment info (best-effort)
-      const shipmentByLine: Record<string, { shipmentNo?: string | null; status?: string | null }> = {};
+      const shipmentByLine: Record<string, { shipmentNo?: string | null; status?: string | null }> =
+        {};
+
       if (lineIds.length > 0) {
         const sLineRes = await supabaseAdmin
           .from("shipment_lines")
           .select(["po_line_id", "shipment_id", "is_deleted"].join(","))
           .in("po_line_id", lineIds)
-          .or(NOT_DELETED_OR_NULL);
+          .eq("is_deleted", false);
 
         if (!sLineRes.error) {
-          const sLines = ((sLineRes.data ?? []) as unknown as ShipmentLineRow[]);
+          const sLines = ((sLineRes.data ?? []) as unknown as ShipmentLineRow[]) || [];
           const shipmentIds = uniq(sLines.map((r) => r.shipment_id).filter(Boolean)) as string[];
 
           let shipmentsMap: Record<string, ShipmentRow> = {};
@@ -216,10 +243,10 @@ export async function GET(req: Request) {
               .from("shipments")
               .select(["id", "shipment_no", "status", "is_deleted"].join(","))
               .in("id", shipmentIds)
-              .or(NOT_DELETED_OR_NULL);
+              .eq("is_deleted", false);
 
             if (!shipRes.error) {
-              const ships = ((shipRes.data ?? []) as unknown as ShipmentRow[]);
+              const ships = ((shipRes.data ?? []) as unknown as ShipmentRow[]) || [];
               for (const s of ships) shipmentsMap[s.id] = s;
             }
           }
@@ -268,13 +295,18 @@ export async function GET(req: Request) {
       }));
 
       return ok({
-        header: { id: detailFor, brand: headerBrand || null, requestedShipDate: headerReqShip },
+        header: {
+          id: detailFor,
+          brand: headerBrand || null,
+          requestedShipDate: headerReqShip,
+        },
         lines: mapped,
       });
     }
 
     // ------------------------------------------------------------------
-    // LIST: headers list
+    // LIST: headers list (STRICT: only alive rows)
+    // Subtotal = SUM(po_lines.amount) by header (fallback qty*unit_price)
     // ------------------------------------------------------------------
     const qRaw = (url.searchParams.get("q") ?? url.searchParams.get("keyword") ?? "").trim();
     const statusRaw = (url.searchParams.get("status") ?? "").trim();
@@ -312,8 +344,8 @@ export async function GET(req: Request) {
         ].join(","),
         { count: "exact" } as any
       )
-      .or(NOT_DELETED_OR_NULL)
-      .or(NOT_STATUS_DELETED_OR_NULL);
+      .eq("is_deleted", false)
+      .neq("status", "DELETED");
 
     if (statusRaw && !["ALL", "ALL STATUS", "ALLSTATUSES"].includes(statusRaw.toUpperCase())) {
       q = q.eq("status", statusRaw);
@@ -338,32 +370,38 @@ export async function GET(req: Request) {
     const to = from + pageSize - 1;
 
     const listRes = await q.order("order_date", { ascending: false, nullsFirst: false }).range(from, to);
+
     if (listRes.error) return bad(listRes.error.message || "Failed to load PO list", 500);
 
-    const headerRows = ((listRes.data ?? []) as unknown as PoHeaderRow[]);
+    const headerRows = ((listRes.data ?? []) as unknown as PoHeaderRow[]) || [];
     const count = (listRes as any).count ?? headerRows.length;
 
     const headerIds = uniq(headerRows.map((h) => h.id).filter(Boolean));
 
-    // Optional: brand name fallback from buyer_brands
+    // Optional: brand name fallback from buyer_brands (best-effort)
     const brandIdList = uniq(headerRows.map((h) => h.buyer_brand_id).filter((v) => !!v)) as string[];
     const brandNameById: Record<string, string> = {};
     if (brandIdList.length > 0) {
-      const brandRes = await supabaseAdmin.from("buyer_brands").select(["id", "name"].join(",")).in("id", brandIdList);
+      const brandRes = await supabaseAdmin
+        .from("buyer_brands")
+        .select(["id", "name"].join(","))
+        .in("id", brandIdList);
+
       if (!brandRes.error) {
-        const brands = ((brandRes.data ?? []) as unknown as BuyerBrandRow[]);
+        const brands = ((brandRes.data ?? []) as unknown as BuyerBrandRow[]) || [];
         for (const b of brands) if (b?.id) brandNameById[b.id] = b?.name ?? "";
       }
     }
 
-    // First-line summary
-    const lineSummaryByHeader: Record<string, { lineCount: number; firstLine: any | null }> = {};
+    // Line summary + TOTAL AMOUNT per header (best-effort)
+    const lineSummaryByHeader: Record<string, { lineCount: number; firstLine: any | null; totalAmount: number }> = {};
+
     if (headerIds.length > 0) {
       const sumRes = await supabaseAdmin
         .from("po_lines")
         .select(["id", "po_header_id", "line_no", "buyer_style_no", "jm_style_no", "qty", "unit_price", "amount", "is_deleted"].join(","))
         .in("po_header_id", headerIds)
-        .or(NOT_DELETED_OR_NULL)
+        .eq("is_deleted", false)
         .order("po_header_id", { ascending: true })
         .order("line_no", { ascending: true, nullsFirst: true });
 
@@ -372,21 +410,37 @@ export async function GET(req: Request) {
         for (const r of lines) {
           const hid = r.po_header_id;
           if (!hid) continue;
-          (lineSummaryByHeader[hid] ||= { lineCount: 0, firstLine: null });
-          lineSummaryByHeader[hid].lineCount += 1;
-          if (!lineSummaryByHeader[hid].firstLine) lineSummaryByHeader[hid].firstLine = r;
+
+          const bucket =
+            (lineSummaryByHeader[hid] ||= { lineCount: 0, firstLine: null, totalAmount: 0 });
+
+          bucket.lineCount += 1;
+          if (!bucket.firstLine) bucket.firstLine = r;
+
+          // amount 합계: amount 우선, 없으면 qty*unit_price
+          const lineAmount =
+            r.amount !== null && r.amount !== undefined
+              ? n(r.amount, 0)
+              : n(r.qty, 0) * n(r.unit_price, 0);
+
+          bucket.totalAmount += lineAmount;
         }
       }
     }
 
     const items = headerRows.map((h) => {
-      const s = lineSummaryByHeader[h.id] ?? { lineCount: 0, firstLine: null };
+      const s = lineSummaryByHeader[h.id] ?? { lineCount: 0, firstLine: null, totalAmount: 0 };
       const fl = s.firstLine;
 
       const brandName =
         asText(h.buyer_brand_name) ||
         (h.buyer_brand_id ? asText(brandNameById[h.buyer_brand_id]) : "") ||
         "";
+
+      // ✅ 핵심: subtotal은 라인 합계(SUM)로 내려줌
+      // 라인이 1개라도 있으면 totalAmount를 신뢰 (합계가 0이어도 정상)
+      const headerSubtotal = h.subtotal !== null && h.subtotal !== undefined ? n(h.subtotal, 0) : 0;
+      const computedSubtotal = s.lineCount > 0 ? n(s.totalAmount, 0) : headerSubtotal;
 
       return {
         id: h.id,
@@ -400,8 +454,15 @@ export async function GET(req: Request) {
         buyerDeptName: h.buyer_dept_name,
         orderDate: h.order_date,
         requestedShipDate: h.requested_ship_date ?? null,
+
         currency: h.currency,
-        subtotal: h.subtotal,
+
+        // ✅ PO List 화면의 "Subtotal" 컬럼은 이 값을 쓰면 됨
+        subtotal: computedSubtotal,
+
+        // ✅ Search modal/기타에서도 혼선 방지 위해 동일 값
+        amount: computedSubtotal,
+
         status: h.status,
 
         shipMode: h.ship_mode,

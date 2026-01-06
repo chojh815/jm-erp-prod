@@ -131,6 +131,16 @@ export default function POCreatePage() {
   const [currentUserEmail, setCurrentUserEmail] =
     React.useState<string | null>(null);
 
+
+// ----------------------
+// Minimal permissions fetch (no provider / no hook)
+// - Does NOT block page rendering
+// - Used only to enable/disable data-changing actions
+// ----------------------
+const [permissions, setPermissions] = React.useState<string[]>([]);
+const [permLoaded, setPermLoaded] = React.useState(false);
+
+
   // URL ?poNo= 로부터 자동 로딩이 한 번이라도 실행됐는지 여부
   const [initializedFromQuery, setInitializedFromQuery] =
     React.useState(false);
@@ -145,7 +155,7 @@ export default function POCreatePage() {
       } = await supabase.auth.getSession();
 
       if (!session) {
-        router.replace("/login?redirectTo=/trade/orders");
+        router.replace("/login?redirectTo=/po/create");
         return;
       }
 
@@ -156,18 +166,51 @@ export default function POCreatePage() {
       setCurrentUserId(session.user.id);
       setCurrentUserEmail(session.user.email ?? null);
       setLoading(false);
-
-      const canCreate = (r: any) => ["admin", "manager", "staff"].includes(r);
-
-if (!canCreate(r)) {
-  alert("You do not have permission to create POs.");
-  router.replace("/");
-  return;
-}
     };
 
     init();
   }, [router, supabase]);
+
+
+// ----------------------
+// Permissions: fetch once (fast) for manage gating
+// ----------------------
+React.useEffect(() => {
+  if (!currentUserId) return;
+
+  let cancelled = false;
+
+  const run = async () => {
+    try {
+      const res = await fetch("/api/me/permissions", {
+        method: "GET",
+        cache: "no-store",
+        credentials: "include",
+      });
+
+      const json = await res.json().catch(() => null);
+
+      const permsRaw =
+        (json && (json.permissions || json.data?.permissions || json.perms)) ?? [];
+
+      const perms = Array.isArray(permsRaw)
+        ? permsRaw.map((p) => String(p))
+        : [];
+
+      if (!cancelled) setPermissions(perms);
+    } catch (e) {
+      // ignore (manage actions will stay disabled)
+    } finally {
+      if (!cancelled) setPermLoaded(true);
+    }
+  };
+
+  run();
+
+  return () => {
+    cancelled = true;
+  };
+}, [currentUserId]);
 
   // ----------------------
   // Header state
@@ -189,6 +232,83 @@ if (!canCreate(r)) {
   const [paymentTermId, setPaymentTermId] = React.useState<string | null>(null);
   const [paymentTermName, setPaymentTermName] =
     React.useState<string>("");
+
+  // ✅ Load PO 시 payment_term(text)만 있고 payment_term_id가 없는 경우가 있어서,
+  //    payment_terms 옵션을 기준으로 id를 자동 매칭해 Select에 표시되게 합니다.
+  const normalizePT = (v: any) =>
+    String(v ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
+  const findPaymentTermByText = React.useCallback(
+    (textValue: string) => {
+      const t = normalizePT(textValue);
+      if (!t) return null;
+      const hit = paymentTerms.find((opt) => {
+        const a = normalizePT(opt.label);
+        const b = normalizePT(opt.name);
+        const c = normalizePT(opt.code);
+        // exact match 우선, 그 다음 포함(DA 45DAYS 같은 케이스 대응)
+        return a === t || b === t || c === t || a.includes(t) || b.includes(t);
+      });
+      return hit || null;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [paymentTerms]
+  );
+
+
+  // ✅ Payment Term 보정:
+  // - 과거 데이터는 po_headers.payment_term(text)만 있고 payment_term_id가 없을 수 있음
+  // - payment_terms 옵션이 "나중에" 로딩되는 경우가 있어, 옵션 로딩 후 한 번 더 매핑해준다
+  React.useEffect(() => {
+    if (paymentTermId) return;
+    const txt = (paymentTermName ?? "").trim();
+    if (!txt) return;
+    if (!paymentTerms || paymentTerms.length === 0) return;
+
+    const found = findPaymentTermByText(txt);
+    if (found) {
+      setPaymentTermId(found.id);
+      setPaymentTermName(found.label || found.name || txt);
+      return;
+    }
+
+    // 옵션에 없으면 임시 옵션을 추가해 화면에서라도 표시되게 함
+    setPaymentTerms((prev) => {
+      const existing = prev.find((t) => t.name === txt || t.label === txt);
+      if (existing) {
+        setPaymentTermId(existing.id);
+        setPaymentTermName(existing.label || existing.name || txt);
+        return prev;
+      }
+      const opt: PaymentTermOption = {
+        id: `TEMP-${txt}`,
+        code: null,
+        name: txt,
+        label: txt,
+      };
+      setPaymentTermId(opt.id);
+      setPaymentTermName(opt.label);
+      return [opt, ...prev];
+    });
+  }, [paymentTerms, paymentTermId, paymentTermName, findPaymentTermByText]);
+
+
+  React.useEffect(() => {
+    // id가 이미 있으면 그대로
+    if (paymentTermId) return;
+    if (!paymentTermName) return;
+    if (!paymentTerms || paymentTerms.length === 0) return;
+
+    const found = findPaymentTermByText(paymentTermName);
+    if (!found) return;
+
+    // id/라벨 모두 맞춰주면 Select가 정상 표시됨
+    setPaymentTermId(found.id);
+    setPaymentTermName(found.label);
+  }, [paymentTermId, paymentTermName, paymentTerms, findPaymentTermByText]);
 
   const [shipMode, setShipMode] = React.useState("SEA");
   // COURIER일 때만 사용 (DHL/FEDEX/UPS)
@@ -812,7 +932,12 @@ try {
   };
 
   const handleDeleteImage = async (lineId: string, url: string) => {
-    const line = lines.find((l) => l.id === lineId);
+    
+    if (!canManage) {
+      alert("You do not have permission to delete images.");
+      return;
+    }
+const line = lines.find((l) => l.id === lineId);
     const jmStyleNo = line?.jmStyleNo || "";
 
     if (
@@ -942,14 +1067,21 @@ const fetchPoList = React.useCallback(
         order_date: row.order_date ?? row.orderDate ?? null,
         requested_ship_date:
           row.requested_ship_date ??
+          row.requestedShipDate ??
           row.reqShipDate ??
           row.req_ship_date ??
+          row.req_ship_date ??
+          row.delivery_date ?? // 일부 데이터는 delivery_date로 저장됨
+          row.deliveryDate ??
           null,
         currency: row.currency ?? null,
         subtotal:
           row.subtotal ??
           row.amount ??
           row.total_amount ??
+          row.total ??
+          row.grand_total ??
+          row.grandTotal ??
           null,
         status: (row.status ?? "DRAFT") as POStatus,
         destination: row.destination ?? null,
@@ -1047,8 +1179,31 @@ const fetchPoList = React.useCallback(
 
         setCurrency(header.currency || "USD");
 
-        setPaymentTermId(header.payment_term_id || null);
-        setPaymentTermName(header.payment_term || "");
+        const headerPTText =
+      header.payment_term ||
+      header.payment_term_name ||
+      header.payment_term_text ||
+      header.paymentTerm ||
+      "";
+        const headerPTId =
+      header.payment_term_id ||
+      header.buyer_payment_term_id ||
+      header.paymentTermId ||
+      null;
+
+        // 기본 세팅
+        setPaymentTermId(headerPTId);
+        setPaymentTermName(headerPTText);
+
+        // ✅ 과거 데이터/입력 방식 때문에 payment_term(text)만 있고 id가 없는 경우
+        //    → 옵션에서 id를 찾아 바로 매핑(없으면 effect가 나중에 한 번 더 시도)
+        if (!headerPTId && headerPTText) {
+          const found = findPaymentTermByText(headerPTText);
+          if (found) {
+            setPaymentTermId(found.id);
+            setPaymentTermName(found.label);
+          }
+        }
 
         setShipMode(header.ship_mode || "SEA");
         setCourierCarrier(header.courier_carrier || "FEDEX");
@@ -1326,7 +1481,12 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
   // 🗑️ PO 삭제
   // ----------------------
   const handleDeletePO = async () => {
-    if (!poNo) {
+    
+    if (!canManage) {
+      alert("You do not have permission to delete POs.");
+      return;
+    }
+if (!poNo) {
       alert("There is no PO No. to delete.");
       return;
     }
@@ -1556,7 +1716,10 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
   const [creatingPI, setCreatingPI] = React.useState(false);
 
   const handleCreateProforma = async () => {
-    if (!buyerId) {
+    // NOTE: Do NOT block PI creation purely on client-side permission flags.
+    // Server API will enforce permission; client flags can lag/mismatch for manager/staff.
+
+if (!buyerId) {
       alert("Please select a buyer before creating a proforma invoice.");
       return;
     }
@@ -1791,7 +1954,40 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
       ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
       : "border border-amber-200 bg-amber-50 text-amber-700";
 
-  if (loading || !role) {
+
+const resolvedRoleRaw = role ?? ("viewer" as DevRole);
+const resolvedRole = (typeof resolvedRoleRaw === "string"
+  ? resolvedRoleRaw.toLowerCase()
+  : String(resolvedRoleRaw).toLowerCase()) as DevRole;
+
+const hasPerm = React.useCallback(
+  (key: string) => permissions.includes(key),
+  [permissions]
+);
+
+// "Manage" here is used to gate data-changing actions on this page (Save/Delete/etc.)
+const canManage =
+  ["admin", "manager", "staff"].includes(resolvedRole) ||
+  hasPerm("orders.manage") ||
+  hasPerm("po.manage") ||
+  hasPerm("trade.orders.manage");
+
+// PI 생성은 별도 권한 키가 있을 수 있어 넓게 허용 (권한은 API에서도 최종 검증 권장)
+const canCreateProforma =
+  canManage ||
+  ["admin", "manager", "staff"].includes(resolvedRole) ||
+  hasPerm("proforma_invoices.create") ||
+  hasPerm("proforma.create") ||
+  hasPerm("proforma_invoices.manage") ||
+  hasPerm("proforma.manage") ||
+  hasPerm("trade.proforma.create") ||
+  hasPerm("invoices.create") ||
+  hasPerm("invoices.manage") ||
+  hasPerm("trade.invoices.create") ||
+  hasPerm("trade.invoices.manage");
+
+
+  if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-100">
         <div className="text-sm text-slate-500">Loading...</div>
@@ -1801,7 +1997,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
 
   return (
     <AppShell
-      role={role}
+      role={resolvedRole}
       title="PO / Orders – Create"
       description="Create and manage purchase orders."
     >
@@ -2852,8 +3048,10 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
                           type="button"
                           variant="outline"
                           className="w-full"
+                          title={!canCreateProforma ? "Permission will be verified by server." : ""}
                           onClick={handleCreateProforma}
-                          disabled={creatingPI}
+                          // NOTE: permission is enforced inside handleCreateProforma()
+                          disabled={creatingPI || !poNo}
                         >
                           {creatingPI
                             ? "Creating Proforma..."

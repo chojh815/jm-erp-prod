@@ -1,6 +1,5 @@
 // src/app/po/list/page.tsx
 "use client";
-<div className="text-xs text-red-500">PO_LIST_PAGE_ACTIVE</div>;
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -21,19 +20,21 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 
+// ✅ jsPDF (Client only)
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+
 interface PoHeaderItem {
   id: string;
   poNo: string;
   buyerName: string | null;
 
-  // 화면 표시용(기존 키 유지)
   mainBuyerStyleNo: string | null;
   mainBuyerBrand: string | null;
 
   lineCount: number;
   orderDate: string | null;
 
-  // ✅ 헤더 요청선적일/선적방법
   reqShipDate: string | null;
   shipMode: string | null;
 
@@ -44,8 +45,6 @@ interface PoHeaderItem {
   mainQty: number | null;
   mainUnitPrice: number | null;
 
-  // ---- (API 호환용 raw 키) ----
-  // api가 brand / requestedShipDate / shipMode로 내려오는 경우 흡수
   brand?: string | null;
   requestedShipDate?: string | null;
 }
@@ -57,7 +56,6 @@ interface PoLineItem {
   jmStyleNo: string | null;
   buyerStyleNo: string | null;
 
-  // 화면 표시용
   buyerBrand: string | null;
   qty: number | null;
   unit: string | null;
@@ -67,21 +65,17 @@ interface PoLineItem {
   deliveryDate: string | null;
   shipmentMode: string | null;
 
-  // ✅ API가 alias로 내려줄 수 있는 추가 키(호환)
   unitPrice?: number | null;
   uom?: string | null;
 
-  // api가 shipMode로 내려오는 경우 흡수
   shipMode?: string | null;
   brand?: string | null;
 
-  // snake_case fallback
   shipment_mode?: string | null;
   delivery_date?: string | null;
 
   imageUrl: string | null;
 
-  // (프로젝트에 따라 있을 수도 있고 없을 수도 있음)
   work_sheet_id?: string | null;
 }
 
@@ -112,7 +106,6 @@ function pickWsId(json: any): string | null {
   return isUuid(wsId) ? wsId : null;
 }
 
-// ✅ API -> 화면용 키로 흡수(헤더)
 function normalizeHeader(raw: any): PoHeaderItem {
   const mainBuyerBrand =
     raw?.mainBuyerBrand ??
@@ -149,33 +142,35 @@ function normalizeHeader(raw: any): PoHeaderItem {
     subtotal:
       typeof raw?.subtotal === "number"
         ? raw.subtotal
-        : (raw?.subtotal !== null && raw?.subtotal !== undefined ? Number(raw.subtotal) : null),
+        : raw?.subtotal !== null && raw?.subtotal !== undefined
+          ? Number(raw.subtotal)
+          : null,
     status: raw?.status ?? null,
     mainQty:
       typeof raw?.mainQty === "number"
         ? raw.mainQty
-        : (raw?.main_qty !== null && raw?.main_qty !== undefined ? Number(raw.main_qty) : null),
+        : raw?.main_qty !== null && raw?.main_qty !== undefined
+          ? Number(raw.main_qty)
+          : null,
     mainUnitPrice:
       typeof raw?.mainUnitPrice === "number"
         ? raw.mainUnitPrice
-        : (raw?.main_unit_price !== null && raw?.main_unit_price !== undefined
-            ? Number(raw.main_unit_price)
-            : null),
+        : raw?.main_unit_price !== null && raw?.main_unit_price !== undefined
+          ? Number(raw.main_unit_price)
+          : null,
 
-    // raw 보관(선택)
     brand: raw?.brand ?? null,
     requestedShipDate: raw?.requestedShipDate ?? null,
   };
 }
 
-// ✅ API -> 화면용 키로 흡수(라인)
 function normalizeLine(raw: any): PoLineItem {
   return {
     id: raw?.id,
     headerId: raw?.headerId ?? raw?.poHeaderId ?? raw?.po_header_id ?? "",
     lineNo: raw?.lineNo ?? raw?.line_no ?? null,
     jmStyleNo: raw?.jmStyleNo ?? raw?.jm_style_no ?? null,
-    buyerStyleNo: raw?.buyerStyleNo ?? raw?.buyerStyleNo ?? raw?.buyer_style_no ?? null,
+    buyerStyleNo: raw?.buyerStyleNo ?? raw?.buyer_style_no ?? null,
 
     buyerBrand:
       raw?.buyerBrand ??
@@ -211,6 +206,102 @@ function normalizeLine(raw: any): PoLineItem {
   };
 }
 
+/** ------------------ ✅ Multi-sort ------------------ */
+type SortField =
+  | "NONE"
+  | "REQ_SHIP_DATE"
+  | "BRAND"
+  | "ORDER_DATE"
+  | "PO_NO"
+  | "BUYER"
+  | "SHIP_MODE"
+  | "SUBTOTAL";
+
+type SortDir = "ASC" | "DESC";
+
+function normStr(v: any) {
+  return (v ?? "").toString().trim().toUpperCase();
+}
+function normDate(v: any, dir: SortDir) {
+  const s = (v ?? "").toString().trim();
+  if (!s) return dir === "ASC" ? "9999-12-31" : "0000-01-01";
+  return s; // YYYY-MM-DD string compare OK
+}
+function normNum(v: any) {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+function cmp(a: any, b: any) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+function cmpWithDir<T>(a: T, b: T, dir: SortDir) {
+  const c = cmp(a, b);
+  return dir === "ASC" ? c : -c;
+}
+
+function getSortValue(it: PoHeaderItem, field: SortField, dir: SortDir) {
+  switch (field) {
+    case "REQ_SHIP_DATE":
+      return normDate(it.reqShipDate, dir);
+    case "ORDER_DATE":
+      return normDate(it.orderDate, dir);
+    case "BRAND":
+      return normStr(it.mainBuyerBrand);
+    case "BUYER":
+      return normStr(it.buyerName);
+    case "PO_NO":
+      return normStr(it.poNo);
+    case "SHIP_MODE":
+      return normStr(it.shipMode);
+    case "SUBTOTAL":
+      return normNum(it.subtotal);
+    case "NONE":
+    default:
+      return null;
+  }
+}
+
+function multiSortItems(
+  items: PoHeaderItem[],
+  s1f: SortField, s1d: SortDir,
+  s2f: SortField, s2d: SortDir,
+  s3f: SortField, s3d: SortDir
+) {
+  const arr = [...items];
+  arr.sort((A, B) => {
+    const fields: Array<[SortField, SortDir]> = [
+      [s1f, s1d],
+      [s2f, s2d],
+      [s3f, s3d],
+      // 항상 마지막 tie-breaker로 PO_NO 고정(안정성)
+      ["PO_NO", "ASC"],
+    ];
+
+    for (const [f, d] of fields) {
+      if (f === "NONE") continue;
+      const av = getSortValue(A, f, d);
+      const bv = getSortValue(B, f, d);
+
+      if (f === "SUBTOTAL") {
+        const c = cmpWithDir(Number(av ?? 0), Number(bv ?? 0), d);
+        if (c !== 0) return c;
+      } else {
+        const c = cmpWithDir(String(av ?? ""), String(bv ?? ""), d);
+        if (c !== 0) return c;
+      }
+    }
+    return 0;
+  });
+  return arr;
+}
+
+/** ------------------ ✅ Formatting helpers ------------------ */
+function fmtMoney2(v: any) {
+  const n = Number(v ?? 0);
+  const ok = Number.isFinite(n) ? n : 0;
+  return ok.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 export default function PurchaseOrderListPage() {
   const router = useRouter();
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
@@ -223,6 +314,16 @@ export default function PurchaseOrderListPage() {
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
+
+  // ✅ Multi Sort (기본: Ship Date -> Brand -> Order Date)
+  const [s1Field, setS1Field] = useState<SortField>("REQ_SHIP_DATE");
+  const [s1Dir, setS1Dir] = useState<SortDir>("ASC");
+
+  const [s2Field, setS2Field] = useState<SortField>("BRAND");
+  const [s2Dir, setS2Dir] = useState<SortDir>("ASC");
+
+  const [s3Field, setS3Field] = useState<SortField>("ORDER_DATE");
+  const [s3Dir, setS3Dir] = useState<SortDir>("ASC");
 
   // list
   const [items, setItems] = useState<PoHeaderItem[]>([]);
@@ -239,7 +340,7 @@ export default function PurchaseOrderListPage() {
   // Work Sheet creation loading (per line)
   const [creatingLineId, setCreatingLineId] = useState<string | null>(null);
 
-  // ✅ po_line_id -> work_sheet_id (이미 생성된 라인 Open WS 처리)
+  // po_line_id -> work_sheet_id
   const [wsMap, setWsMap] = useState<Record<string, string>>({});
 
   // ---------- Auth ----------
@@ -341,7 +442,6 @@ export default function PurchaseOrderListPage() {
 
       setLines(loadedLines);
 
-      // ✅ 이미 생성된 WS 여부를 DB에서 po_line_id로 조회해서 매핑
       const lineIds = loadedLines.map((l) => l.id).filter(isUuid);
       if (lineIds.length > 0) {
         const { data, error } = await supabase
@@ -373,9 +473,14 @@ export default function PurchaseOrderListPage() {
   const handlePrev = () => page > 1 && fetchList(page - 1);
   const handleNext = () => page < totalPages && fetchList(page + 1);
 
+  // ✅ Multi Sorted view
+  const sortedItems = useMemo(() => {
+    return multiSortItems(items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
+  }, [items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir]);
+
   // ---------- export excel ----------
   const handleExportExcel = () => {
-    if (items.length === 0) return alert("No data to export.");
+    if (sortedItems.length === 0) return alert("No data to export.");
 
     const header = [
       "PO No",
@@ -392,7 +497,7 @@ export default function PurchaseOrderListPage() {
       "Status",
     ];
 
-    const rows = items.map((it) => {
+    const rows = sortedItems.map((it) => {
       const styleLabel = it.mainBuyerStyleNo
         ? it.lineCount > 1
           ? `${it.mainBuyerStyleNo} 외 ${it.lineCount - 1}건`
@@ -442,100 +547,96 @@ export default function PurchaseOrderListPage() {
     URL.revokeObjectURL(url);
   };
 
-  // ---------- export pdf ----------
+  // ---------- export pdf (jsPDF + autoTable + print) ----------
   const handleExportPdf = () => {
-    if (items.length === 0) return alert("No data to export.");
+    if (sortedItems.length === 0) return alert("No data to export.");
 
-    const fmtAmount = (v: number | null) =>
-      typeof v === "number"
-        ? v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-        : "-";
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
 
-    const popup = window.open("", "_blank");
-    if (!popup) return;
+    doc.setFontSize(14);
+    doc.text("Purchase Order List", 40, 40);
 
-    popup.document.write("<html><head><title>Purchase Order List</title>");
-    popup.document.write(
-      `<style>
-        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; padding: 16px; }
-        h1 { font-size: 18px; margin-bottom: 12px; }
-        table { border-collapse: collapse; width: 100%; font-size: 12px; }
-        th, td { border: 1px solid #ddd; padding: 4px 6px; text-align: left; }
-        th { background: #f3f4f6; }
-      </style>`
-    );
-    popup.document.write("</head><body>");
-    popup.document.write("<h1>Purchase Order List</h1>");
-    popup.document.write("<table><thead><tr>");
+    const sortLabel = `1) ${s1Field} ${s1Dir}  2) ${s2Field} ${s2Dir}  3) ${s3Field} ${s3Dir}`;
+    doc.setFontSize(9);
+    doc.text(`Sort: ${sortLabel} | Total: ${sortedItems.length} POs`, 40, 58);
 
-    const headers = [
-      "PO No",
-      "Buyer",
-      "Brand",
-      "Buyer Style No",
-      "Order Date",
-      "Req. Ship Date",
-      "Ship Mode",
-      "Cur.",
-      "Qty",
-      "Unit Price",
-      "Subtotal",
-      "Status",
+    autoTable(doc, {
+  startY: 70,
+  head: [[
+    "PO No",
+    "Buyer",
+    "Brand",
+    "Buyer Style No",
+    "Order Date",
+    "Req. Ship Date",
+    "Ship Mode",
+    "Cur.",
+    "Qty",
+    "Unit Price",
+    "Subtotal",
+    "Status",
+  ]],
+  body: sortedItems.map((it) => {
+    const styleLabel = it.mainBuyerStyleNo
+      ? it.lineCount > 1
+        ? `${it.mainBuyerStyleNo} (+${it.lineCount - 1})`
+        : it.mainBuyerStyleNo
+      : "-";
+
+    return [
+      it.poNo ?? "",
+      it.buyerName ?? "",
+      it.mainBuyerBrand ?? "",
+      styleLabel,
+      it.orderDate ?? "",
+      it.reqShipDate ?? "",
+      it.shipMode ?? "",
+      it.currency ?? "",
+      typeof it.mainQty === "number" ? String(it.mainQty) : "",
+      typeof it.mainUnitPrice === "number" ? Number(it.mainUnitPrice).toFixed(2) : "",
+      typeof it.subtotal === "number" ? Number(it.subtotal).toFixed(2) : "0.00",
+      it.status ?? "",
     ];
+  }),
+  styles: { fontSize: 9, cellPadding: 4, overflow: "linebreak" },
+  columnStyles: {
+    8: { halign: "right" },
+    9: { halign: "right" },
+    10: { halign: "right" },
+  },
+  margin: { left: 40, right: 40, top: 70, bottom: 50 }, // ✅ bottom 여유(페이지번호 자리)
+  didDrawPage: function () {
+    // ✅ 하단 중앙 페이지 번호
+    const pageCount = (doc as any).internal.getNumberOfPages?.() || 1;
+    const pageNum = (doc as any).internal.getCurrentPageInfo?.().pageNumber || 1;
 
-    headers.forEach((h) => popup.document.write(`<th>${h}</th>`));
-    popup.document.write("</tr></thead><tbody>");
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
 
-    items.forEach((it) => {
-      const styleLabel = it.mainBuyerStyleNo
-        ? it.lineCount > 1
-          ? `${it.mainBuyerStyleNo} 외 ${it.lineCount - 1}건`
-          : it.mainBuyerStyleNo
-        : "-";
+    doc.setFontSize(9);
+    const text = `Page ${pageNum} / ${pageCount}`;
+    doc.text(text, pageW / 2, pageH - 20, { align: "center" }); // ✅ 하단 중앙
+  },
+});
 
-      const qtyLabel = typeof it.mainQty === "number" ? String(it.mainQty) : "-";
-      const unitPriceLabel =
-        typeof it.mainUnitPrice === "number" ? it.mainUnitPrice.toFixed(2) : "-";
-
-      popup.document.write("<tr>");
-      popup.document.write(`<td>${it.poNo}</td>`);
-      popup.document.write(`<td>${it.buyerName ?? "-"}</td>`);
-      popup.document.write(`<td>${it.mainBuyerBrand ?? "-"}</td>`);
-      popup.document.write(`<td>${styleLabel}</td>`);
-      popup.document.write(`<td>${it.orderDate ?? "-"}</td>`);
-      popup.document.write(`<td>${it.reqShipDate ?? "-"}</td>`);
-      popup.document.write(`<td>${it.shipMode ?? "-"}</td>`);
-      popup.document.write(`<td>${it.currency ?? "-"}</td>`);
-      popup.document.write(`<td>${qtyLabel}</td>`);
-      popup.document.write(`<td>${unitPriceLabel}</td>`);
-      popup.document.write(`<td>${fmtAmount(it.subtotal)}</td>`);
-      popup.document.write(`<td>${it.status ?? "-"}</td>`);
-      popup.document.write("</tr>");
-    });
-
-    popup.document.write("</tbody></table></body></html>");
-    popup.document.close();
-    popup.focus();
+       const blobUrl = doc.output("bloburl");
+    window.open(blobUrl, "_blank");
   };
 
-  // ---------- view ----------
   const handleView = (po: PoHeaderItem) => {
     if (!po.poNo) return alert("PO No is missing.");
     router.push(`/po/create?poNo=${encodeURIComponent(po.poNo)}`);
   };
 
-  // ✅ Create/Open Work Sheet (per PO LINE)
   const onClickWorkSheet = async (po: PoHeaderItem, line: PoLineItem) => {
     try {
       const existing = wsMap[line.id] || line.work_sheet_id || null;
 
-      // ✅ 이미 생성된 라인 → Open WS
       if (existing && isUuid(existing)) {
         router.push(`/work-sheets/${existing}`);
         return;
       }
 
-      // ✅ 생성
       setCreatingLineId(line.id);
 
       const res = await fetch("/api/work-sheets/create-from-po", {
@@ -543,12 +644,11 @@ export default function PurchaseOrderListPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           po_header_id: po.id,
-          po_no: po.poNo, // fallback
-          po_line_id: line.id, // ✅ 핵심: 라인 기준
+          po_no: po.poNo,
+          po_line_id: line.id,
         }),
       });
 
-      // ✅ 405 방지(원인 표시)
       if (res.status === 405) {
         throw new Error(
           "405 Method Not Allowed: /api/work-sheets/create-from-po 에 POST route.ts가 없거나 method가 GET만 열려 있습니다."
@@ -562,11 +662,9 @@ export default function PurchaseOrderListPage() {
         throw new Error(msg);
       }
 
-      // ✅ work_sheet_id missing 방지(응답 키 통일 흡수)
       const wsId = pickWsId(json);
-      if (!wsId) throw new Error("work_sheet_id missing (API 응답 키를 통일해 주세요: work_sheet_id)");
+      if (!wsId) throw new Error("work_sheet_id missing (API 응답 키: work_sheet_id)");
 
-      // ✅ 맵 업데이트 + 이동
       setWsMap((prev) => ({ ...prev, [line.id]: wsId }));
       router.push(`/work-sheets/${wsId}`);
     } catch (e: any) {
@@ -585,13 +683,68 @@ export default function PurchaseOrderListPage() {
     );
   }
 
+  const SortFieldSelect = ({
+    label,
+    value,
+    onChange,
+  }: {
+    label: string;
+    value: SortField;
+    onChange: (v: SortField) => void;
+  }) => (
+    <div className="space-y-1">
+      <Label>{label}</Label>
+      <Select value={value} onValueChange={(v) => onChange(v as SortField)}>
+        <SelectTrigger>
+          <SelectValue placeholder="Sort field" />
+        </SelectTrigger>
+        <SelectContent className="z-50">
+          <SelectItem value="NONE">None</SelectItem>
+          <SelectItem value="REQ_SHIP_DATE">Ship Date</SelectItem>
+          <SelectItem value="BRAND">Brand</SelectItem>
+          <SelectItem value="ORDER_DATE">Order Date</SelectItem>
+          <SelectItem value="PO_NO">PO No</SelectItem>
+          <SelectItem value="BUYER">Buyer</SelectItem>
+          <SelectItem value="SHIP_MODE">Ship Mode</SelectItem>
+          <SelectItem value="SUBTOTAL">Subtotal</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+
+  const SortDirSelect = ({
+    value,
+    onChange,
+  }: {
+    value: SortDir;
+    onChange: (v: SortDir) => void;
+  }) => (
+    <div className="space-y-1">
+      <Label>Dir</Label>
+      <Select value={value} onValueChange={(v) => onChange(v as SortDir)}>
+        <SelectTrigger>
+          <SelectValue placeholder="ASC/DESC" />
+        </SelectTrigger>
+        <SelectContent className="z-50">
+          <SelectItem value="ASC">ASC</SelectItem>
+          <SelectItem value="DESC">DESC</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+
   return (
-    <AppShell role={role} title="PO / Orders – List" description="Search, filter and manage purchase orders.">
+    <AppShell
+      role={role}
+      title="PO / Orders – List"
+      description="Search, filter and manage purchase orders."
+    >
       <div className="p-4 space-y-4">
         <Card className="shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between gap-3">
             <div>
               <CardTitle className="text-2xl">Purchase Order List</CardTitle>
+              <div className="text-xs text-red-500 mt-1">PO_LIST_PAGE_ACTIVE</div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -605,8 +758,8 @@ export default function PurchaseOrderListPage() {
           </CardHeader>
 
           <CardContent className="space-y-4">
-            {/* Filters */}
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 items-end">
+            {/* Filters + Sort */}
+            <div className="grid grid-cols-1 lg:grid-cols-6 gap-4 items-end">
               <div className="space-y-1 lg:col-span-2">
                 <Label>Search</Label>
                 <Input
@@ -645,18 +798,68 @@ export default function PurchaseOrderListPage() {
                 <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
               </div>
 
-              <div className="flex gap-2 justify-end lg:col-span-1">
-                <Button type="button" variant="outline" onClick={handleClearFilters} className="min-w-[80px]">
+              <div className="flex gap-2 justify-end lg:col-span-6">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleClearFilters}
+                  className="min-w-[80px]"
+                >
                   Clear
                 </Button>
-                <Button type="button" onClick={handleApply} className="min-w-[80px]" disabled={loading}>
+                <Button
+                  type="button"
+                  onClick={handleApply}
+                  className="min-w-[80px]"
+                  disabled={loading}
+                >
                   Apply
                 </Button>
               </div>
             </div>
 
+            {/* ✅ Multi Sort controls */}
+            <div className="grid grid-cols-1 lg:grid-cols-6 gap-4 items-end border rounded-xl p-4 bg-slate-50">
+              <div className="lg:col-span-2 grid grid-cols-3 gap-3">
+                <SortFieldSelect label="Sort #1" value={s1Field} onChange={setS1Field} />
+                <SortDirSelect value={s1Dir} onChange={setS1Dir} />
+                <div className="hidden lg:block" />
+              </div>
+
+              <div className="lg:col-span-2 grid grid-cols-3 gap-3">
+                <SortFieldSelect label="Sort #2" value={s2Field} onChange={setS2Field} />
+                <SortDirSelect value={s2Dir} onChange={setS2Dir} />
+                <div className="hidden lg:block" />
+              </div>
+
+              <div className="lg:col-span-2 grid grid-cols-3 gap-3">
+                <SortFieldSelect label="Sort #3" value={s3Field} onChange={setS3Field} />
+                <SortDirSelect value={s3Dir} onChange={setS3Dir} />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setS1Field("REQ_SHIP_DATE");
+                    setS1Dir("ASC");
+                    setS2Field("BRAND");
+                    setS2Dir("ASC");
+                    setS3Field("ORDER_DATE");
+                    setS3Dir("ASC");
+                  }}
+                >
+                  Reset Sort
+                </Button>
+              </div>
+
+              <div className="lg:col-span-6 text-xs text-slate-600">
+                Current: <span className="font-semibold">
+                  1) {s1Field} {s1Dir} / 2) {s2Field} {s2Dir} / 3) {s3Field} {s3Dir}
+                </span>
+              </div>
+            </div>
+
             {/* List table */}
-            <div className="mt-4 border rounded-xl overflow-hidden">
+            <div className="mt-2 border rounded-xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm">
                   <thead className="bg-slate-50">
@@ -676,7 +879,7 @@ export default function PurchaseOrderListPage() {
                   </thead>
 
                   <tbody>
-                    {items.length === 0 && !loading && (
+                    {sortedItems.length === 0 && !loading && (
                       <tr>
                         <td colSpan={11} className="px-4 py-6 text-center text-slate-400">
                           No purchase orders found.
@@ -692,7 +895,7 @@ export default function PurchaseOrderListPage() {
                       </tr>
                     )}
 
-                    {items.map((it) => {
+                    {sortedItems.map((it) => {
                       const isSelected = selectedPo?.id === it.id;
 
                       const styleLabel = it.mainBuyerStyleNo
@@ -716,12 +919,7 @@ export default function PurchaseOrderListPage() {
                           <td className="px-4 py-2">{it.shipMode ?? "-"}</td>
                           <td className="px-4 py-2">{it.currency ?? "-"}</td>
                           <td className="px-4 py-2 text-right">
-                            {typeof it.subtotal === "number"
-                              ? it.subtotal.toLocaleString(undefined, {
-                                  minimumFractionDigits: 2,
-                                  maximumFractionDigits: 2,
-                                })
-                              : "0.00"}
+                            {typeof it.subtotal === "number" ? fmtMoney2(it.subtotal) : "0.00"}
                           </td>
                           <td className="px-4 py-2">{it.status ?? "-"}</td>
 
@@ -760,7 +958,7 @@ export default function PurchaseOrderListPage() {
                     Export Excel
                   </Button>
                   <Button variant="outline" size="sm" onClick={handleExportPdf}>
-                    Export PDF
+                    Export PDF (jsPDF)
                   </Button>
                 </div>
 
@@ -833,10 +1031,25 @@ export default function PurchaseOrderListPage() {
                               const existing = wsMap[ln.id] || ln.work_sheet_id || null;
                               const hasWs = existing && isUuid(existing);
 
-                              // ✅ 라인 값이 NULL이면 헤더값으로 fallback(실무용)
                               const brandLabel = ln.buyerBrand ?? selectedPo?.mainBuyerBrand ?? "-";
                               const deliveryLabel = ln.deliveryDate ?? selectedPo?.reqShipDate ?? "-";
                               const shipModeLabel = ln.shipmentMode ?? selectedPo?.shipMode ?? "-";
+
+                              const priceVal =
+                                typeof ln.price === "number"
+                                  ? ln.price
+                                  : typeof (ln as any).unitPrice === "number"
+                                    ? (ln as any).unitPrice
+                                    : typeof (ln as any).unit_price === "number"
+                                      ? (ln as any).unit_price
+                                      : null;
+
+                              const amountVal =
+                                typeof ln.amount === "number"
+                                  ? ln.amount
+                                  : typeof ln.qty === "number" && typeof priceVal === "number"
+                                    ? (ln.qty || 0) * priceVal
+                                    : null;
 
                               return (
                                 <tr key={ln.id} className="border-t">
@@ -848,29 +1061,10 @@ export default function PurchaseOrderListPage() {
                                     {ln.qty ?? "-"} {ln.unit ?? ""}
                                   </td>
                                   <td className="px-3 py-2 text-right">
-                                    {typeof ln.price === "number"
-                                      ? ln.price.toFixed(2)
-                                      : typeof (ln as any).unitPrice === "number"
-                                        ? (ln as any).unitPrice.toFixed(2)
-                                        : typeof (ln as any).unit_price === "number"
-                                          ? (ln as any).unit_price.toFixed(2)
-                                          : "-"}
+                                    {typeof priceVal === "number" ? priceVal.toFixed(2) : "-"}
                                   </td>
                                   <td className="px-3 py-2 text-right">
-                                    {typeof ln.amount === "number"
-                                      ? ln.amount.toFixed(2)
-                                      : typeof ln.qty === "number"
-                                        ? (
-                                            (ln.qty || 0) *
-                                            (typeof ln.price === "number"
-                                              ? ln.price
-                                              : typeof (ln as any).unitPrice === "number"
-                                                ? (ln as any).unitPrice
-                                                : typeof (ln as any).unit_price === "number"
-                                                  ? (ln as any).unit_price
-                                                  : 0)
-                                          ).toFixed(2)
-                                        : "-"}
+                                    {typeof amountVal === "number" ? amountVal.toFixed(2) : "-"}
                                   </td>
                                   <td className="px-3 py-2">{deliveryLabel}</td>
                                   <td className="px-3 py-2">{shipModeLabel}</td>

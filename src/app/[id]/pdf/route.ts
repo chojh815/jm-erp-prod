@@ -6,25 +6,14 @@ import ProformaInvoicePDF from "@/pdf/ProformaInvoicePDF";
 import React from "react";
 
 export const runtime = "nodejs"; // react-pdf는 node 런타임 사용
-export const dynamic = "force-dynamic";
-
-function safe(v: any) {
-  return (v ?? "").toString().trim();
-}
-function pickFirst(obj: any, keys: string[]) {
-  for (const k of keys) {
-    const val = obj?.[k];
-    if (val !== null && val !== undefined && safe(val) !== "") return val;
-  }
-  return null;
-}
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const id = params?.id?.toString().trim();
+    const id = params.id;
+
     if (!id) {
       return NextResponse.json({ error: "Missing PI ID" }, { status: 400 });
     }
@@ -64,7 +53,9 @@ export async function GET(
       let formatted = v.toFixed(4).replace(/\.?0+$/, "");
       if (!formatted.includes(".")) formatted += ".00";
       const decimals = formatted.split(".")[1];
-      if (decimals.length < 2) formatted += "0".repeat(2 - decimals.length);
+      if (decimals.length < 2) {
+        formatted += "0".repeat(2 - decimals.length);
+      }
       return formatted;
     };
 
@@ -74,7 +65,7 @@ export async function GET(
         maximumFractionDigits: 2,
       }).format(Number(v || 0));
 
-    // 4) 라인 포맷 적용 (PDF 표에 쓰는 값이 아니라면 harmless)
+    // 4) 라인 포맷 적용
     const finalLines = safeLines.map((l) => ({
       ...l,
       unit_price_display: `$${formatUnitPrice(
@@ -88,8 +79,8 @@ export async function GET(
     }));
 
     const headerTotal =
-      typeof (header as any).total_amount === "number"
-        ? (header as any).total_amount
+      typeof header.total_amount === "number"
+        ? header.total_amount
         : safeLines.reduce(
             (sum, l) =>
               sum +
@@ -103,60 +94,11 @@ export async function GET(
 
     const totalDisplay = `$${formatAmount(headerTotal)}`;
 
-    // ✅ 5) PDF header 키 정규화 (Consignee/Notify/Incoterm 포함)
-    // - DB 컬럼명이 흔들려도 여기서 흡수해서 PDF는 절대 안 깨지게 함
-    const normalizedHeader: any = {
-      ...header,
-
-      // buyer
-      buyer_name: pickFirst(header, ["buyer_name", "buyer_company_name", "buyer"]),
-      buyer_brand_name: pickFirst(header, ["buyer_brand_name", "brand_name", "brand"]),
-      buyer_dept_name: pickFirst(header, ["buyer_dept_name", "dept_name", "department"]),
-
-      // shipper
-      shipper_name: pickFirst(header, ["shipper_name", "exporter_name"]),
-      shipper_address: pickFirst(header, ["shipper_address", "exporter_address"]),
-
-      // terms / remarks
-      payment_term: pickFirst(header, ["payment_term", "payment_terms", "payment_term_text", "terms"]),
-      remarks: pickFirst(header, ["remarks", "remark", "note", "notes"]),
-
-      // ✅ consignee / notify (요청 핵심)
-      consignee_text: pickFirst(header, [
-        "consignee_text",
-        "consignee",
-        "consignee_address",
-        "consignee_addr",
-      ]),
-      notify_party_text: pickFirst(header, [
-        "notify_party_text",
-        "notify_party",
-        "notify",
-        "notify_address",
-        "notify_addr",
-      ]),
-
-      // port / destination
-      port_of_loading: pickFirst(header, ["port_of_loading", "pol", "port_loading"]),
-      final_destination: pickFirst(header, ["final_destination", "destination", "final_dest"]),
-
-      // ✅ incoterm / ship_mode (요청 핵심)
-      incoterm: pickFirst(header, ["incoterm", "incoterms"]),
-      ship_mode: pickFirst(header, ["ship_mode", "ship_mode_text", "ship_mode_code"]),
-
-      // coo
-      coo_text: pickFirst(header, ["coo_text", "coo", "country_of_origin_text"]),
-
-      // total display (기존 유지)
-      total_display: totalDisplay,
-    };
-
-    // signature (있으면 그대로 전달)
     const signatureUrl = (header as any).signature_url || null;
 
-    // 6) PDF 스트림 생성
-    const element = React.createElement(ProformaInvoicePDF as any, {
-      header: normalizedHeader,
+    // 5) PDF 스트림 생성 (여기가 핵심 수정 부분)
+    const element = React.createElement(ProformaInvoicePDF, {
+      header: { ...header, total_display: totalDisplay },
       lines: finalLines,
       signatureUrl,
     });
@@ -167,7 +109,7 @@ export async function GET(
     resHeaders.set("Content-Type", "application/pdf");
     resHeaders.set(
       "Content-Disposition",
-      `inline; filename="${safe((header as any).invoice_no) || "proforma"}.pdf"`
+      `inline; filename="${header.invoice_no || "proforma"}.pdf"`
     );
 
     // @ts-ignore - ReadableStream 타입 이슈 무시

@@ -764,19 +764,18 @@ cbm_per_ctn:
       const alive = lines.filter((l) => !l.is_deleted).map(recomputeLine);
       const groups = groupByPoForPdf(alive);
 
+      // Totals (NW/GW/CBM/QTY) are shown in the Totals section below,
+      // so we keep the table compact and show only per-carton values here.
       const head = [[
         "C/T No",
         "PO #",
         "Style #",
         "Description",
         "Cartons",
-        "Qty(Total)",
+        "Qty/CTN",
         "NW/CTN",
         "GW/CTN",
         "CBM/CTN",
-        "Total NW",
-        "Total GW",
-        "Total CBM",
       ]];
 
       const body: any[] = [];
@@ -787,6 +786,8 @@ cbm_per_ctn:
 
         for (const l of g.lines) {
           const cartons = n(l.cartons, 0);
+          // Qty/CTN is treated as integer; we store total qty in DB.
+          const qtyPerCtn = cartons > 0 ? Math.round(n(l.qty, 0) / cartons) : 0;
           const nwc = n(l.nw_per_carton, 0);
           const gwc = n(l.gw_per_carton, 0);
           const cbmc = n(l.cbm_per_carton, 0);
@@ -803,13 +804,10 @@ cbm_per_ctn:
             s(l.style_no),
             cleanDesc,
             fmt0(cartons),
-            fmt0(l.qty),
+            fmt0(qtyPerCtn),
             fmt1(nwc),
             fmt1(gwc),
             fmt3(cbmc),
-            fmt1(cartons * nwc),
-            fmt1(cartons * gwc),
-            fmt3(cartons * cbmc),
           ]);
         }
       }
@@ -830,9 +828,6 @@ cbm_per_ctn:
           6: { halign: "right" },
           7: { halign: "right" },
           8: { halign: "right" },
-          9: { halign: "right" },
-          10: { halign: "right" },
-          11: { halign: "right" },
         },
       });
 
@@ -1197,13 +1192,10 @@ cbm_per_ctn:
                     <th className="p-2 text-left">Style #</th>
                     <th className="p-2 text-left">Description</th>
                     <th className="p-2 text-right">Cartons</th>
-                    <th className="p-2 text-right">Qty</th>
+                    <th className="p-2 text-right">Qty/CTN</th>
                     <th className="p-2 text-right">NW/CTN</th>
                     <th className="p-2 text-right">GW/CTN</th>
                     <th className="p-2 text-right">CBM/CTN</th>
-                    <th className="p-2 text-right">Total NW</th>
-                    <th className="p-2 text-right">Total GW</th>
-                    <th className="p-2 text-right">Total CBM</th>
                     <th className="p-2 text-center">Action</th>
                   </tr>
                 </thead>
@@ -1211,6 +1203,7 @@ cbm_per_ctn:
                   {lines.map((l, idx) => {
                     const r = recomputeLine(l);
                     const ct = fmtCartonRange(r.carton_no_from, r.carton_no_to);
+                    const qtyPerCtn = r.cartons > 0 ? r.qty / r.cartons : r.qty;
                     return (
                       <tr
                         key={`${l.id}_${idx}`}
@@ -1250,17 +1243,39 @@ cbm_per_ctn:
                           <Input
                             className="w-[90px] text-right"
                             value={String(n(r.cartons, 0))}
-                            onChange={(e) => onLineChange(idx, { cartons: n(e.target.value, 0) })}
+                            onChange={(e) => {
+                          const nextCartons = n(e.target.value, 0);
+
+                          // Keep Qty/CTN stable when Cartons changes:
+                          // derive current Qty/CTN from (qty / cartons) BEFORE update
+                          const currentCartons = Math.max(0, n(r.cartons, 0));
+                          const currentQty = Math.max(0, Math.round(safeNum(r.qty, 0)));
+                          const baseQtyPerCtn =
+                            currentCartons > 0 ? Math.round(currentQty / currentCartons) : currentQty;
+
+                          const nextQty = Math.max(0, Math.round(baseQtyPerCtn)) * Math.max(0, nextCartons);
+
+                          onLineChange(idx, { cartons: nextCartons, qty: nextQty });
+                        }}
                           />
                         </td>
 
                         <td className="p-2 text-right">
-                          <Input
-                            className="w-[90px] text-right"
-                            value={String(n(r.qty, 0))}
-                            onChange={(e) => onLineChange(idx, { qty: n(e.target.value, 0) })}
-                          />
-                        </td>
+                        <Input
+                          className="w-[90px] text-right"
+                          inputMode="numeric"
+                          value={String(qtyPerCtn)}
+                          onChange={(e) => {
+                            // Qty/CTN: integers only
+                            const raw = (e.target.value ?? "").toString();
+                            const cleaned = raw.replace(/[^\d]/g, "");
+                            const next = cleaned === "" ? 0 : parseInt(cleaned, 10);
+
+                            const nextQty = Math.max(0, next) * Math.max(0, n(r.cartons, 0));
+                            onLineChange(idx, { qty: nextQty });
+                          }}
+                        />
+                      </td>
 
                         <td className="p-2 text-right">
                           <Input
@@ -1335,10 +1350,6 @@ cbm_per_ctn:
                             }}
                           />
                         </td>
-
-                        <td className="p-2 text-right">{fmt1(r.total_nw)}</td>
-                        <td className="p-2 text-right">{fmt1(r.total_gw)}</td>
-                        <td className="p-2 text-right">{fmtCbm(r.total_cbm)}</td>
 
                         <td className="p-2 text-center">
                           <div className="flex justify-center gap-2">

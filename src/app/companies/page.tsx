@@ -7,7 +7,9 @@ import React, {
   useRef,
 } from "react";
 
+import { useRouter } from "next/navigation";
 import AppShell from "@/components/layout/AppShell";
+import { usePermissions } from "@/hooks/usePermissions";
 import type { AppRole } from "@/config/menuConfig";
 import { createSupabaseBrowserClient } from "@/lib/supabaseClient";
 
@@ -204,8 +206,8 @@ const initialState: CompanyFormState = {
 
 export default function CompaniesPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
-  const [role, setRole] = useState<AppRole | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const router = useRouter();
+  const { status, loading: authLoading, has } = usePermissions();
 
   const [searchKeyword, setSearchKeyword] = useState("");
   const [companies, setCompanies] = useState<DbCompanyListRow[]>([]);
@@ -223,34 +225,38 @@ export default function CompaniesPage() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
-  // ------- Auth & 초기 리스트 -------
+  
+// ------- Auth & 초기 리스트 -------
+  // redirect / initial load guard (prevents login <-> companies redirect loop)
+  const didRedirectRef = useRef(false);
+  const didInitialLoadRef = useRef(false);
+
   useEffect(() => {
-    const init = async () => {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+    if (authLoading) return;
+    if (didRedirectRef.current) return;
 
-      if (!session) {
-        window.location.href = "/login?redirectTo=/companies";
-        return;
-      }
+    // ✅ login으로 보내는 조건은 "세션 없음(unauthenticated)" 하나만!
+    if (status === "unauthenticated") {
+      didRedirectRef.current = true;
+      router.replace("/login?redirectTo=/companies");
+      return;
+    }
 
-      const meta = (session.user.user_metadata || {}) as any;
-      const r: AppRole = meta.role || "viewer";
-      setRole(r);
-      setAuthLoading(false);
+    // ✅ 로그인은 됐는데 권한이 없으면 login으로 보내지 말고 home으로
+    if (status === "authenticated" && !has("companies.manage")) {
+      didRedirectRef.current = true;
+      alert("You do not have permission to manage companies.");
+      router.replace("/home");
+      return;
+    }
 
-      if (r === "viewer") {
-        alert("You do not have permission to manage companies.");
-        window.location.href = "/";
-        return;
-      }
-
-      await loadCompanyList("");
-    };
-
-    init();
-  }, [supabase]);
+    // ✅ 정상 진입: 최초 1회만 리스트 로딩
+    if (status === "authenticated" && !didInitialLoadRef.current) {
+      didInitialLoadRef.current = true;
+      loadCompanyList("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, status, router, has]);
 
   // ------- 리스트 로딩 / 검색 -------
   const loadCompanyList = async (keyword: string) => {
@@ -767,7 +773,7 @@ export default function CompaniesPage() {
     }
   }, [form.companyType, form.country]);
 
-  if (authLoading || !role) {
+  if (authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
         <div className="text-sm text-slate-500">Loading...</div>
@@ -776,9 +782,7 @@ export default function CompaniesPage() {
   }
 
   return (
-    <AppShell
-      role={role}
-      title="Companies"
+    <AppShell      title="Companies"
       description="Register and manage buyers, factories, suppliers, and JM internal entities."
     >
       <div className="p-4 space-y-4">
