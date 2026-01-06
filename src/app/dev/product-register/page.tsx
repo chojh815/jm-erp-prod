@@ -1,3 +1,4 @@
+// src/app/dev/product-register/page.tsx
 "use client";
 
 import React from "react";
@@ -91,6 +92,11 @@ export default function ProductRegisterPage() {
 
   const [styleNo, setStyleNo] = React.useState("JN250001");
   const [styleError, setStyleError] = React.useState<string | null>(null);
+
+  // ✅ Legacy(기존제품) 입력 모드: 스타일 번호 형식 제한 없이 저장 허용
+  // - 기존 상품을 DB에 처음 등록할 때(레거시 번호) 사용
+  // - 신규 상품(JM 규칙 생성)은 OFF로 두고 Auto Generate 권장
+  const [legacyStyleMode, setLegacyStyleMode] = React.useState(false);
 
   const [productCategory, setProductCategory] =
     React.useState<ProductCategoryCode | "">("");
@@ -279,42 +285,43 @@ export default function ProductRegisterPage() {
 
   // ===== Auto style number generator (공식 JM 번호) =====
   const handleAutoStyleNo = async () => {
-  try {
-    setStyleError(null);
+    try {
+      setStyleError(null);
 
-    const category = (productCategory || "N"); // E, N, B...
-    const res = await fetch(
-      `/api/dev/styles/next-style-no?category=${encodeURIComponent(category)}`
-    );
-    const json = await res.json();
+      const category = (productCategory || "N"); // E, N, B...
+      const res = await fetch(
+        `/api/dev/styles/next-style-no?category=${encodeURIComponent(category)}`
+      );
+      const json = await res.json();
 
-    if (!res.ok || json?.success === false) {
-      console.error("Failed to generate style number:", json);
-      setStyleError(json?.error || "스타일 넘버 자동 생성에 실패했습니다.");
-      return;
+      if (!res.ok || json?.success === false) {
+        console.error("Failed to generate style number:", json);
+        setStyleError(json?.error || "스타일 넘버 자동 생성에 실패했습니다.");
+        return;
+      }
+
+      // ✅ 서버 응답 키가 styleNo 또는 style_no 어떤 것이든 다 받기
+      const nextNo =
+        (typeof json?.styleNo === "string" && json.styleNo) ||
+        (typeof json?.style_no === "string" && json.style_no) ||
+        (typeof json?.nextStyleNo === "string" && json.nextStyleNo) ||
+        (typeof json?.next_style_no === "string" && json.next_style_no) ||
+        "";
+
+      if (!nextNo.trim()) {
+        console.error("style number missing in response:", json);
+        setStyleError("스타일 넘버 자동 생성에 실패했습니다.");
+        return;
+      }
+
+      setStyleNo(nextNo.trim().toUpperCase());
+      setLegacyStyleMode(false); // ✅ Auto Generate는 신규 JM 룰이므로 레거시 모드 해제
+      setStyleError(null); // ✅ 기존 에러 문구 강제 제거
+    } catch (err) {
+      console.error("handleAutoStyleNo error:", err);
+      setStyleError("스타일 넘버 자동 생성 중 오류가 발생했습니다.");
     }
-
-    // ✅ 서버 응답 키가 styleNo 또는 style_no 어떤 것이든 다 받기
-    const nextNo =
-      (typeof json?.styleNo === "string" && json.styleNo) ||
-      (typeof json?.style_no === "string" && json.style_no) ||
-      (typeof json?.nextStyleNo === "string" && json.nextStyleNo) ||
-      (typeof json?.next_style_no === "string" && json.next_style_no) ||
-      "";
-
-    if (!nextNo.trim()) {
-      console.error("style number missing in response:", json);
-      setStyleError("스타일 넘버 자동 생성에 실패했습니다.");
-      return;
-    }
-
-    setStyleNo(nextNo.trim().toUpperCase());
-    setStyleError(null); // ✅ 기존 에러 문구 강제 제거
-  } catch (err) {
-    console.error("handleAutoStyleNo error:", err);
-    setStyleError("스타일 넘버 자동 생성 중 오류가 발생했습니다.");
-  }
-};
+  };
 
   // ===== Image handling (원본 5MB 제한 + 자동 리사이즈/압축) =====
   const MAX_ORIGINAL_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB (원본 제한)
@@ -331,7 +338,11 @@ export default function ProductRegisterPage() {
       img.src = URL.createObjectURL(file);
     });
 
-  const canvasToJpegFile = (canvas: HTMLCanvasElement, fileNameBase: string, quality: number) =>
+  const canvasToJpegFile = (
+    canvas: HTMLCanvasElement,
+    fileNameBase: string,
+    quality: number
+  ) =>
     new Promise<File>((resolve, reject) => {
       canvas.toBlob(
         (blob) => {
@@ -390,7 +401,9 @@ export default function ProductRegisterPage() {
     return outFile;
   };
 
-  const handleImageChange: React.ChangeEventHandler<HTMLInputElement> = async (e) => {
+  const handleImageChange: React.ChangeEventHandler<HTMLInputElement> = async (
+    e
+  ) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -415,7 +428,6 @@ export default function ProductRegisterPage() {
       setImagePreview(null);
     }
   };
-
 
   // ===== Row operations =====
   const addMaterialRow = () => {
@@ -495,6 +507,7 @@ export default function ProductRegisterPage() {
   const handleReset = () => {
     setStyleNo("JN250001");
     setStyleError(null);
+    setLegacyStyleMode(false);
     setProductCategory("");
     setProductType("");
     setWeight("");
@@ -516,7 +529,6 @@ export default function ProductRegisterPage() {
   };
 
   // ===== Delete (DB에서 현재 스타일 삭제) =====
- 
   const handleDelete = async () => {
     const trimmed = s(styleNo).trim().toUpperCase();
 
@@ -545,9 +557,7 @@ export default function ProductRegisterPage() {
       let data: any = {};
       try {
         data = await res.json();
-      } catch {
-        // JSON 없으면 무시
-      }
+      } catch {}
 
       if (!res.ok) {
         console.error("Delete error", data);
@@ -556,7 +566,6 @@ export default function ProductRegisterPage() {
       }
 
       alert("Product deleted successfully.");
-      // 현재 화면 클리어
       handleReset();
     } catch (err) {
       console.error("Delete request error", err);
@@ -611,14 +620,7 @@ export default function ProductRegisterPage() {
       const q = toNumber(m.qty) ?? 0;
       const p = toNumber(m.unitPrice) ?? 0;
       const amt = q * p;
-      return [
-        m.name,
-        m.spec,
-        m.qty,
-        m.unitPrice,
-        m.supplier,
-        amt ? amt.toFixed(4) : "",
-      ];
+      return [m.name, m.spec, m.qty, m.unitPrice, m.supplier, amt ? amt.toFixed(4) : ""];
     });
 
     const operationHeader = [
@@ -704,7 +706,7 @@ export default function ProductRegisterPage() {
   // ===== Apply loaded product (header + materials + operations) =====
   const applyLoadedStyleFromApi = (data: any) => {
     const header = data.header ?? data.product ?? {};
-    
+
     // 기본 헤더 필드
     if (header.style_no || header.styleNo) {
       const sn = header.style_no ?? header.styleNo;
@@ -736,29 +738,20 @@ export default function ProductRegisterPage() {
       setCurrency(header.currency as "CNY" | "USD" | "KRW" | "VND");
     }
 
- // =================================
-// Image URL normalize & apply
-// (DB: image_urls jsonb[] 기준)
-// =================================
-const imageUrls =
-  header?.image_urls ??
-  data?.image_urls ??
-  null;
+    // 이미지
+    const imageUrls = header?.image_urls ?? data?.image_urls ?? null;
+    const imageUrl =
+      Array.isArray(imageUrls) && imageUrls.length > 0 ? imageUrls[0] : null;
 
-const imageUrl =
-  Array.isArray(imageUrls) && imageUrls.length > 0
-    ? imageUrls[0]
-    : null;
+    if (imageUrl && typeof imageUrl === "string") {
+      setImagePreview(imageUrl);
+      setImageFile(null);
+    } else {
+      setImagePreview(null);
+      setImageFile(null);
+    }
 
-if (imageUrl && typeof imageUrl === "string") {
-  setImagePreview(imageUrl);
-  setImageFile(null);
-} else {
-  setImagePreview(null);
-  setImageFile(null);
-}
-
-        // 자재
+    // 자재
     const matRows: MaterialRow[] =
       (data.materials as any[] | null)?.map((m, idx) => ({
         id: `m-${idx + 1}`,
@@ -782,30 +775,25 @@ if (imageUrl && typeof imageUrl === "string") {
     setMaterials(
       matRows.length
         ? matRows
-        : [
-            {
-              id: "m-1",
-              name: "",
-              spec: "",
-              qty: "",
-              unitPrice: "",
-              supplier: "",
-            },
-          ]
+        : [{ id: "m-1", name: "", spec: "", qty: "", unitPrice: "", supplier: "" }]
     );
     setOperations(
       opRows.length
         ? opRows
-        : [
-            {
-              id: "o-1",
-              name: "",
-              qty: "",
-              unitPrice: "",
-              supplier: "",
-            },
-          ]
+        : [{ id: "o-1", name: "", qty: "", unitPrice: "", supplier: "" }]
     );
+  };
+
+  // ===== 레거시 모드용: 해당 스타일이 DB에 존재하는지 조회 =====
+  const checkExistsByProductsApi = async (value: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/dev/products?styleNo=${encodeURIComponent(value)}`);
+      const json = await res.json().catch(() => ({} as any));
+      if (!res.ok) return false;
+      return Boolean(json?.header && json.header?.id);
+    } catch {
+      return false;
+    }
   };
 
   // ===== 스타일 번호 중복 체크 & blur 핸들러 =====
@@ -839,11 +827,20 @@ if (imageUrl && typeof imageUrl === "string") {
     }
   };
 
-  const handleStyleNoBlur = (
+  const handleStyleNoBlur = async (
     e: React.FocusEvent<HTMLInputElement, Element>
   ) => {
     const value = e.target.value.trim().toUpperCase();
     if (!value) return;
+
+    // ✅ 레거시 모드: 형식검사/서버 check-style-no(형식 강제) 호출 금지
+    if (legacyStyleMode) {
+      setStyleError(null);
+      // 레거시도 "이미 DB에 있으면" 안내만(막지 않음)
+      const exists = await checkExistsByProductsApi(value);
+      if (exists) setStyleError("이미 등록된 스타일입니다. 저장하면 업데이트됩니다.");
+      return;
+    }
 
     if (!isValidStyleNo(value)) {
       setStyleError(
@@ -857,87 +854,101 @@ if (imageUrl && typeof imageUrl === "string") {
 
   // ===== Save to Supabase (덮어쓰기 확인 + 히스토리와 연동) =====
   const handleSave = async () => {
-    // 1) 숫자 필드 검증
     if (!validateAllNumbers()) return;
 
     const trimmed = s(styleNo).trim().toUpperCase();
 
-    // 2) 스타일 번호 필수
     if (!trimmed) {
       alert("Style No. is required.");
       return;
     }
 
-    // 3) 형식 1차 체크
-    if (!isValidStyleNo(trimmed)) {
+    // ✅ 신규(JM 룰)일 때만 형식 강제. 레거시는 형식 제한 없음.
+    if (!legacyStyleMode && !isValidStyleNo(trimmed)) {
       alert("스타일 번호 형식이 잘못되었습니다. 예: JN250001 또는 JN250001A");
       return;
     }
 
-    // 기존 에러 메시지 있으면 막기
-    if (styleError) {
+    // 기존 에러 메시지 있으면 막기(레거시 모드에서는 "안내" 문구도 포함될 수 있음 → 저장은 허용)
+    if (styleError && !legacyStyleMode) {
       alert(styleError);
       return;
     }
 
-    // 4) 실제 저장 전, 다시 한 번 서버에 중복/유효성 확인 + 덮어쓰기 경고
+    // 4) 실제 저장 전, 존재여부 확인 + 덮어쓰기 경고
     let exists = false;
 
-    try {
-      const resCheck = await fetch(
-        `/api/dev/styles/check-style-no?styleNo=${encodeURIComponent(trimmed)}`
-      );
-      const json = await resCheck.json();
-
-      if (!resCheck.ok) {
-        console.error("check-style-no error:", json);
-        const msg =
-          json.error ||
-          "스타일 번호 중복 확인에 실패했습니다. 잠시 후 다시 시도해주세요.";
-        setStyleError(msg);
-        alert(msg);
-        return;
-      }
-
-      if (!json.valid) {
-        const msg =
-          "스타일 번호 형식이 잘못되었습니다. 예: JN250001 또는 JN250001A";
-        setStyleError(msg);
-        alert(msg);
-        return;
-      }
-
-      exists = !!json.exists;
-
+    if (legacyStyleMode) {
+      // ✅ 레거시: /api/dev/products로 존재여부만 판단 (형식검사 없음)
+      exists = await checkExistsByProductsApi(trimmed);
+      // 레거시도 덮어쓰기 확인은 동일
       if (exists) {
-        // 이미 존재하는 스타일이면 덮어쓰기 확인
         const ok = window.confirm(
           [
-            `이미 사용 중인 스타일 번호입니다: ${trimmed}`,
+            `이미 등록된 스타일입니다: ${trimmed}`,
             "",
             "이 스타일은 '기존 자료 수정(업데이트)' 방식으로 저장됩니다.",
-            "저장하면 이전 버전 데이터가 덮어쓰기되지만,",
             "이전 버전은 History에 백업되어 비교할 수 있습니다.",
             "",
             "계속 진행하시겠습니까?",
           ].join("\n")
         );
+        if (!ok) return;
+      }
+      setStyleError(null);
+    } else {
+      // ✅ 신규(JM 룰): 서버 check-style-no로 유효성+중복 확인
+      try {
+        const resCheck = await fetch(
+          `/api/dev/styles/check-style-no?styleNo=${encodeURIComponent(trimmed)}`
+        );
+        const json = await resCheck.json();
 
-        if (!ok) {
-          // 사용자가 취소함 → 저장 중단
+        if (!resCheck.ok) {
+          console.error("check-style-no error:", json);
+          const msg =
+            json.error ||
+            "스타일 번호 중복 확인에 실패했습니다. 잠시 후 다시 시도해주세요.";
+          setStyleError(msg);
+          alert(msg);
           return;
         }
-      } else {
-        // 새 번호면 에러 메시지 초기화
-        setStyleError(null);
+
+        if (!json.valid) {
+          const msg =
+            "스타일 번호 형식이 잘못되었습니다. 예: JN250001 또는 JN250001A";
+          setStyleError(msg);
+          alert(msg);
+          return;
+        }
+
+        exists = !!json.exists;
+
+        if (exists) {
+          const ok = window.confirm(
+            [
+              `이미 사용 중인 스타일 번호입니다: ${trimmed}`,
+              "",
+              "이 스타일은 '기존 자료 수정(업데이트)' 방식으로 저장됩니다.",
+              "저장하면 이전 버전 데이터가 덮어쓰기되지만,",
+              "이전 버전은 History에 백업되어 비교할 수 있습니다.",
+              "",
+              "계속 진행하시겠습니까?",
+            ].join("\n")
+          );
+
+          if (!ok) return;
+        } else {
+          setStyleError(null);
+        }
+      } catch (err) {
+        console.error("checkDuplicateStyle before save error:", err);
+        const msg =
+          "스타일 번호 중복 확인 중 오류가 발생했습니다. 네트워크나 서버 상태를 확인해주세요.";
+        setStyleError(msg);
+        alert(msg);
+        return;
       }
-    } catch (err) {
-      console.error("checkDuplicateStyle before save error:", err);
-      const msg =
-        "스타일 번호 중복 확인 중 오류가 발생했습니다. 네트워크나 서버 상태를 확인해주세요.";
-      setStyleError(msg);
-      alert(msg);
-      return;
     }
 
     // 포맷 통일
@@ -987,7 +998,7 @@ if (imageUrl && typeof imageUrl === "string") {
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({} as any));
 
       if (!res.ok) {
         console.error("Save error", data);
@@ -1006,14 +1017,11 @@ if (imageUrl && typeof imageUrl === "string") {
           formData.append("styleNo", trimmed);
           formData.append("file", imageFile);
 
-          const uploadRes = await fetch(
-            "/api/dev/products/upload-image",
-            {
-              method: "POST",
-              body: formData,
-            }
-          );
-          const uploadJson = await uploadRes.json();
+          const uploadRes = await fetch("/api/dev/products/upload-image", {
+            method: "POST",
+            body: formData,
+          });
+          const uploadJson = await uploadRes.json().catch(() => ({} as any));
 
           if (!uploadRes.ok) {
             console.error("Image upload error", uploadJson);
@@ -1035,13 +1043,9 @@ if (imageUrl && typeof imageUrl === "string") {
           alert(baseMsg + "\n\n이미지도 함께 업로드되었습니다.");
         } catch (e) {
           console.error("Image upload request error", e);
-          alert(
-            baseMsg +
-              "\n\n단, 네트워크 문제로 이미지 업로드에 실패했습니다."
-          );
+          alert(baseMsg + "\n\n단, 네트워크 문제로 이미지 업로드에 실패했습니다.");
         }
       } else {
-        // 이미지가 없는 경우 기존 메시지만
         alert(baseMsg);
       }
     } catch (err) {
@@ -1074,6 +1078,7 @@ if (imageUrl && typeof imageUrl === "string") {
 
     const newStyleNo = `${base}${suffix}`; // 9 chars
     setStyleNo(newStyleNo);
+    setLegacyStyleMode(false);
 
     try {
       const res = await fetch(
@@ -1109,29 +1114,12 @@ if (imageUrl && typeof imageUrl === "string") {
       setMaterials(
         matRows.length
           ? matRows
-          : [
-              {
-                id: "m-1",
-                name: "",
-                spec: "",
-                qty: "",
-                unitPrice: "",
-                supplier: "",
-              },
-            ]
+          : [{ id: "m-1", name: "", spec: "", qty: "", unitPrice: "", supplier: "" }]
       );
       setOperations(
         opRows.length
           ? opRows
-          : [
-              {
-                id: "o-1",
-                name: "",
-                qty: "",
-                unitPrice: "",
-                supplier: "",
-              },
-            ]
+          : [{ id: "o-1", name: "", qty: "", unitPrice: "", supplier: "" }]
       );
 
       alert("Base style materials & operations copied.");
@@ -1222,6 +1210,7 @@ if (imageUrl && typeof imageUrl === "string") {
       }
 
       applyLoadedStyleFromApi(data);
+      setLegacyStyleMode(false); // 로드된 스타일은 "등록된 스타일"이므로 레거시 토글은 자동 해제(원하면 다시 켜도 됨)
       setSearchOpen(false);
     } catch (err) {
       console.error("Load from search request error", err);
@@ -1245,16 +1234,12 @@ if (imageUrl && typeof imageUrl === "string") {
 
     try {
       const params = new URLSearchParams({ styleNo: trimmed });
-      const res = await fetch(
-        `/api/dev/products/history?${params.toString()}`
-      );
+      const res = await fetch(`/api/dev/products/history?${params.toString()}`);
       const data = await res.json();
 
       if (!res.ok) {
         console.error("History load error", data);
-        setHistoryError(
-          data.error || "Failed to load history for this style."
-        );
+        setHistoryError(data.error || "Failed to load history for this style.");
         return;
       }
 
@@ -1299,6 +1284,7 @@ if (imageUrl && typeof imageUrl === "string") {
     }
 
     applyLoadedStyleFromApi(item.snapshot);
+    setLegacyStyleMode(false);
     setHistoryOpen(false);
     setSelectedHistory(null);
   };
@@ -1325,7 +1311,6 @@ if (imageUrl && typeof imageUrl === "string") {
               Product Registration (Development)
             </CardTitle>
             <div className="flex items-center gap-3 text-xs">
-              {/* Search button */}
               <Button
                 type="button"
                 variant="outline"
@@ -1341,7 +1326,6 @@ if (imageUrl && typeof imageUrl === "string") {
                 Search
               </Button>
 
-              {/* History button */}
               <Button
                 type="button"
                 variant="outline"
@@ -1351,7 +1335,6 @@ if (imageUrl && typeof imageUrl === "string") {
                 History
               </Button>
 
-              {/* Base currency selector */}
               <div className="flex items-center gap-2">
                 <span className="text-slate-600">Base currency:</span>
                 <Select
@@ -1375,13 +1358,29 @@ if (imageUrl && typeof imageUrl === "string") {
           </CardHeader>
 
           <CardContent className="space-y-6">
-            {/* Top: basic info + image */}
             <div className="grid grid-cols-1 lg:grid-cols-[2.2fr,1fr] gap-6">
-              {/* Basic info */}
               <div className="space-y-3 text-sm">
                 <div className="grid grid-cols-[1.3fr,auto] gap-2 items-end">
                   <div>
-                    <Label className="mb-2 block">Style No.</Label>
+                    <div className="flex items-center justify-between">
+                      <Label className="mb-2 block">Style No.</Label>
+
+                      {!isPrintMode && (
+                        <label className="flex items-center gap-2 text-[11px] text-slate-600 select-none">
+                          <input
+                            type="checkbox"
+                            checked={legacyStyleMode}
+                            onChange={(e) => {
+                              const on = e.target.checked;
+                              setLegacyStyleMode(on);
+                              setStyleError(null);
+                            }}
+                          />
+                          Legacy style (allow any)
+                        </label>
+                      )}
+                    </div>
+
                     {isPrintMode ? (
                       <div className="min-h-[34px] flex items-center justify-center px-3 border rounded-md bg-white text-sm">
                         {styleNo}
@@ -1391,20 +1390,31 @@ if (imageUrl && typeof imageUrl === "string") {
                         <Input
                           className="h-9"
                           value={styleNo}
-                          onChange={(e) =>
-                            setStyleNo(e.target.value.toUpperCase())
-                          }
+                          onChange={(e) => setStyleNo(e.target.value.toUpperCase())}
                           onBlur={handleStyleNoBlur}
-                          placeholder="e.g. JN250001 or JN250001A"
+                          placeholder={
+                            legacyStyleMode
+                              ? "Any style no. allowed (legacy)."
+                              : "e.g. JN250001 or JN250001A"
+                          }
                         />
-                        {styleError && (
-                          <p className="mt-1 text-xs text-red-500">
-                            {styleError}
+                        {!legacyStyleMode && (
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            신규 제품은 JM 규칙 사용 권장 (Auto Generate).
                           </p>
+                        )}
+                        {legacyStyleMode && (
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            기존 제품(레거시) 등록용: 자리수/형식 제한 없이 저장됩니다.
+                          </p>
+                        )}
+                        {styleError && (
+                          <p className="mt-1 text-xs text-red-500">{styleError}</p>
                         )}
                       </>
                     )}
                   </div>
+
                   {!isPrintMode && (
                     <Button
                       type="button"
@@ -1547,6 +1557,7 @@ if (imageUrl && typeof imageUrl === "string") {
                       />
                     )}
                   </div>
+
                   {!isPrintMode && (
                     <div className="border rounded-lg px-3 py-2 bg-slate-50">
                       <p className="text-[11px] font-semibold mb-1">
@@ -1630,79 +1641,72 @@ if (imageUrl && typeof imageUrl === "string") {
                       onChange={handleImageChange}
                     />
                     <div className="flex gap-2 mt-1">
-  {/* === Download Image (그대로 사용) === */}
-  <Button
-    type="button"
-    variant="outline"
-    size="sm"
-    disabled={!imagePreview}
-    onClick={() => {
-      if (!imagePreview) return;
-      const a = document.createElement("a");
-      a.href = imagePreview;
-      a.download = `${styleNo || "image"}.jpg`;
-      a.click();
-    }}
-  >
-    Download Image
-  </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={!imagePreview}
+                        onClick={() => {
+                          if (!imagePreview) return;
+                          const a = document.createElement("a");
+                          a.href = imagePreview;
+                          a.download = `${styleNo || "image"}.jpg`;
+                          a.click();
+                        }}
+                      >
+                        Download Image
+                      </Button>
 
-  {/* === Remove (DB + Storage 까지 삭제) === */}
-  <Button
-    type="button"
-    variant="outline"
-    size="sm"
-    disabled={!imagePreview}
-    onClick={async () => {
-      if (!imagePreview) return;
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={!imagePreview}
+                        onClick={async () => {
+                          if (!imagePreview) return;
 
-      const trimmedStyleNo = (styleNo || "").trim().toUpperCase();
+                          const trimmedStyleNo = (styleNo || "").trim().toUpperCase();
 
-      // 스타일번호가 없으면 → 그냥 화면에서만 지움
-      if (!trimmedStyleNo) {
-        setImageFile(null);
-        setImagePreview(null);
-        return;
-      }
+                          if (!trimmedStyleNo) {
+                            setImageFile(null);
+                            setImagePreview(null);
+                            return;
+                          }
 
-      if (
-        typeof window !== "undefined" &&
-        !window.confirm(
-          "이미지를 완전히 삭제하시겠어요?\n(DB와 Storage에서도 삭제됩니다.)"
-        )
-      ) {
-        return;
-      }
+                          if (
+                            typeof window !== "undefined" &&
+                            !window.confirm(
+                              "이미지를 완전히 삭제하시겠어요?\n(DB와 Storage에서도 삭제됩니다.)"
+                            )
+                          ) {
+                            return;
+                          }
 
-      try {
-        const params = new URLSearchParams({ styleNo: trimmedStyleNo });
-        const res = await fetch(
-          `/api/dev/products/upload-image?${params.toString()}`,
-          { method: "DELETE" }
-        );
+                          try {
+                            const params = new URLSearchParams({ styleNo: trimmedStyleNo });
+                            const res = await fetch(
+                              `/api/dev/products/upload-image?${params.toString()}`,
+                              { method: "DELETE" }
+                            );
 
-        const json = await res.json().catch(() => ({} as any));
+                            const json = await res.json().catch(() => ({} as any));
 
-        if (!res.ok || !json?.success) {
-          console.error("Image delete error:", json);
-          alert(json?.error || "이미지 삭제에 실패했습니다.");
-          return;
-        }
+                            if (!res.ok || !json?.success) {
+                              console.error("Image delete error:", json);
+                              alert(json?.error || "이미지 삭제에 실패했습니다.");
+                              return;
+                            }
 
-        // 프론트 상태 정리
-        setImageFile(null);
-        setImagePreview(null);
-        // 필요하면 알림
-        // alert("이미지가 삭제되었습니다.");
-      } catch (err) {
-        console.error("Image delete request failed:", err);
-        alert("이미지 삭제 중 서버 통신 오류가 발생했습니다.");
-      }
-    }}
-  >
-    Remove
-  </Button>
-
+                            setImageFile(null);
+                            setImagePreview(null);
+                          } catch (err) {
+                            console.error("Image delete request failed:", err);
+                            alert("이미지 삭제 중 서버 통신 오류가 발생했습니다.");
+                          }
+                        }}
+                      >
+                        Remove
+                      </Button>
                     </div>
                     {imageFile && (
                       <p className="text-[11px] text-slate-500 mt-1">
@@ -1713,9 +1717,6 @@ if (imageUrl && typeof imageUrl === "string") {
                 )}
               </div>
             </div>
-
-            {/* MATERIALS */}
-            {/* ... 이하 부분은 그대로 (변경 없음) ... */}
 
             {/* MATERIALS */}
             <div className="space-y-2 text-sm">
@@ -1749,9 +1750,7 @@ if (imageUrl && typeof imageUrl === "string") {
                           Supplier
                         </div>
                       </th>
-                      <th className="border px-2 py-2 w-[4%]">
-                        {/* actions */}
-                      </th>
+                      <th className="border px-2 py-2 w-[4%]"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1865,9 +1864,7 @@ if (imageUrl && typeof imageUrl === "string") {
                               <Select
                                 value=""
                                 onValueChange={(id) => {
-                                  const found = suppliers.find(
-                                    (s) => s.id === id
-                                  );
+                                  const found = suppliers.find((s) => s.id === id);
                                   const label = found
                                     ? found.code
                                       ? `${found.code} - ${found.name}`
@@ -1882,9 +1879,7 @@ if (imageUrl && typeof imageUrl === "string") {
                                 <SelectContent>
                                   {suppliers.map((s) => (
                                     <SelectItem key={s.id} value={s.id}>
-                                      {s.code
-                                        ? `${s.code} - ${s.name}`
-                                        : s.name}
+                                      {s.code ? `${s.code} - ${s.name}` : s.name}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>
@@ -1895,11 +1890,7 @@ if (imageUrl && typeof imageUrl === "string") {
                                 placeholder="Or type supplier manually"
                                 value={row.supplier}
                                 onChange={(e) =>
-                                  updateMaterialRow(
-                                    row.id,
-                                    "supplier",
-                                    e.target.value
-                                  )
+                                  updateMaterialRow(row.id, "supplier", e.target.value)
                                 }
                               />
                             </div>
@@ -1959,9 +1950,7 @@ if (imageUrl && typeof imageUrl === "string") {
                           Supplier
                         </div>
                       </th>
-                      <th className="border px-2 py-2 w-[8%]">
-                        {/* actions */}
-                      </th>
+                      <th className="border px-2 py-2 w-[8%]"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1977,11 +1966,7 @@ if (imageUrl && typeof imageUrl === "string") {
                               className="h-8 text-xs text-center"
                               value={row.name}
                               onChange={(e) =>
-                                updateOperationRow(
-                                  row.id,
-                                  "name",
-                                  e.target.value
-                                )
+                                updateOperationRow(row.id, "name", e.target.value)
                               }
                             />
                           )}
@@ -2064,9 +2049,7 @@ if (imageUrl && typeof imageUrl === "string") {
                               <Select
                                 value=""
                                 onValueChange={(id) => {
-                                  const found = suppliers.find(
-                                    (s) => s.id === id
-                                  );
+                                  const found = suppliers.find((s) => s.id === id);
                                   const label = found
                                     ? found.code
                                       ? `${found.code} - ${found.name}`
@@ -2081,9 +2064,7 @@ if (imageUrl && typeof imageUrl === "string") {
                                 <SelectContent>
                                   {suppliers.map((s) => (
                                     <SelectItem key={s.id} value={s.id}>
-                                      {s.code
-                                        ? `${s.code} - ${s.name}`
-                                        : s.name}
+                                      {s.code ? `${s.code} - ${s.name}` : s.name}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>
@@ -2094,11 +2075,7 @@ if (imageUrl && typeof imageUrl === "string") {
                                 placeholder="Or type supplier manually"
                                 value={row.supplier}
                                 onChange={(e) =>
-                                  updateOperationRow(
-                                    row.id,
-                                    "supplier",
-                                    e.target.value
-                                  )
+                                  updateOperationRow(row.id, "supplier", e.target.value)
                                 }
                               />
                             </div>
@@ -2320,7 +2297,6 @@ if (imageUrl && typeof imageUrl === "string") {
             )}
 
             <div className="grid grid-cols-1 md:grid-cols-[1.4fr,1.6fr] gap-4 mt-1">
-              {/* 버전 리스트 */}
               <div className="border rounded-md max-h-64 overflow-auto">
                 {historyItems.length === 0 && !historyLoading && !historyError && (
                   <p className="text-[11px] text-slate-400 px-3 py-2">
@@ -2338,14 +2314,11 @@ if (imageUrl && typeof imageUrl === "string") {
                     }`}
                     onClick={() => setSelectedHistory(item)}
                   >
-                    <div className="font-semibold">
-                      Version {item.versionNo}
-                    </div>
+                    <div className="font-semibold">Version {item.versionNo}</div>
                     <div className="text-slate-500">
                       {new Date(item.createdAt).toLocaleString()}
                     </div>
                     <div className="text-slate-400 mt-0.5">
-                      {/* 간단 요약: product_type, currency */}
                       {item.snapshot?.header?.product_type
                         ? item.snapshot.header.product_type
                         : "-"}
@@ -2357,7 +2330,6 @@ if (imageUrl && typeof imageUrl === "string") {
                 ))}
               </div>
 
-              {/* 선택된 버전 상세 요약 */}
               <div className="border rounded-md px-3 py-2 text-[11px] min-h-[120px]">
                 {!selectedHistory && (
                   <p className="text-slate-400">
@@ -2371,9 +2343,7 @@ if (imageUrl && typeof imageUrl === "string") {
                         Version {selectedHistory.versionNo}
                       </span>
                       <span className="text-slate-500 ml-1">
-                        ({new Date(
-                          selectedHistory.createdAt
-                        ).toLocaleString()})
+                        ({new Date(selectedHistory.createdAt).toLocaleString()})
                       </span>
                     </div>
                     <div className="space-y-0.5">
@@ -2383,8 +2353,7 @@ if (imageUrl && typeof imageUrl === "string") {
                       </div>
                       <div>
                         <span className="font-semibold">Category:</span>{" "}
-                        {selectedHistory.snapshot?.header?.product_category ||
-                          "-"}
+                        {selectedHistory.snapshot?.header?.product_category || "-"}
                       </div>
                       <div>
                         <span className="font-semibold">Dev Date:</span>{" "}
