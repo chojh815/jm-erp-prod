@@ -1,6 +1,13 @@
 // src/pdf/ProformaInvoicePDF.tsx
 import React from "react";
-import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
+import {
+  Document,
+  Page,
+  Text,
+  View,
+  StyleSheet,
+  Image,
+} from "@react-pdf/renderer";
 
 // =====================
 // Types (필요 필드만)
@@ -44,12 +51,15 @@ export type ProformaLinePDF = {
   amount?: number | null;
 };
 
+// ✅ B안: signatureUrl 지원 (옵션)
 export default function ProformaInvoicePDF(props: {
   header: ProformaHeaderPDF;
   lines: ProformaLinePDF[];
+  signatureUrl?: string; // ✅ 추가
 }) {
   const header = props.header ?? {};
   const lines = props.lines ?? [];
+  const signatureUrl = (props.signatureUrl ?? "").toString().trim();
 
   const money2 = (v: any) => {
     const n = Number(v);
@@ -101,21 +111,21 @@ export default function ProformaInvoicePDF(props: {
       .filter(Boolean);
 
     // 너무 잘게 쪼개지면 2개씩 묶어서 줄로 만들기
-    const lines: string[] = [];
+    const out: string[] = [];
     for (let i = 0; i < parts.length; i += 2) {
       const a = parts[i];
       const b = parts[i + 1];
-      lines.push(b ? `${a}, ${b}` : a);
+      out.push(b ? `${a}, ${b}` : a);
     }
-    return lines.length ? lines : [s];
+    return out.length ? out : [s];
   };
 
   const Multiline = ({ text }: { text?: string | null }) => {
-    const lines = splitAddressLines(text);
-    if (!lines.length) return null;
+    const arr = splitAddressLines(text);
+    if (!arr.length) return null;
     return (
       <>
-        {lines.map((line, i) => (
+        {arr.map((line, i) => (
           <Text key={i} style={styles.boxText}>
             {line}
           </Text>
@@ -168,12 +178,16 @@ export default function ProformaInvoicePDF(props: {
         <View style={styles.row2}>
           <View style={styles.box}>
             <Text style={styles.boxTitle}>Shipper / Exporter</Text>
-            <Text style={styles.boxText}>{safe(header.shipper_name) || "JM INTERNATIONAL CO.,LTD"}</Text>
+            <Text style={styles.boxText}>
+              {safe(header.shipper_name) || "JM INTERNATIONAL CO.,LTD"}
+            </Text>
             {safe(header.shipper_address) ? (
               <Multiline text={header.shipper_address} />
             ) : (
               <>
-                <Text style={styles.boxText}>Lot16, CN4 Series, Khuc Xuyen Service Village Industrial cluster</Text>
+                <Text style={styles.boxText}>
+                  Lot16, CN4 Series, Khuc Xuyen Service Village Industrial cluster
+                </Text>
                 <Text style={styles.boxText}>Khuc Xuyen ward, Bac Ninh City</Text>
                 <Text style={styles.boxText}>VIETNAM</Text>
               </>
@@ -198,12 +212,10 @@ export default function ProformaInvoicePDF(props: {
         <View style={styles.row2}>
           <View style={styles.box}>
             <Text style={styles.boxTitle}>Consignee</Text>
-            {/* ✅ 여기서 주소(Intercom 포함) 멀티라인 출력 */}
             <Multiline text={consigneeText} />
           </View>
           <View style={styles.box}>
             <Text style={styles.boxTitle}>Notify Party</Text>
-            {/* ✅ 여기서 주소(Intercom 포함) 멀티라인 출력 */}
             <Multiline text={notifyText} />
           </View>
         </View>
@@ -212,11 +224,15 @@ export default function ProformaInvoicePDF(props: {
         <View style={styles.row2}>
           <View style={styles.box}>
             <Text style={styles.boxTitle}>Port of Loading</Text>
-            <Text style={styles.boxText}>{safe(header.port_of_loading) || "-"}</Text>
+            <Text style={styles.boxText}>
+              {safe(header.port_of_loading) || "-"}
+            </Text>
           </View>
           <View style={styles.box}>
             <Text style={styles.boxTitle}>Final Destination</Text>
-            <Text style={styles.boxText}>{safe(header.final_destination) || "-"}</Text>
+            <Text style={styles.boxText}>
+              {safe(header.final_destination) || "-"}
+            </Text>
           </View>
         </View>
 
@@ -224,10 +240,12 @@ export default function ProformaInvoicePDF(props: {
         <View style={styles.fullBox}>
           <Text style={styles.boxTitle}>COO / Certification</Text>
           <Text style={styles.boxText}>{safe(header.coo_text) || "COO: -"}</Text>
-          <Text style={styles.boxText}>WE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.</Text>
           <Text style={styles.boxText}>
-            Incoterm: {safe(header.incoterm) || "-"} &nbsp;&nbsp;|&nbsp;&nbsp; Ship Mode:{" "}
-            {safe(header.ship_mode) || "-"}
+            WE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.
+          </Text>
+          <Text style={styles.boxText}>
+            Incoterm: {safe(header.incoterm) || "-"} &nbsp;&nbsp;|&nbsp;&nbsp;
+            Ship Mode: {safe(header.ship_mode) || "-"}
           </Text>
         </View>
 
@@ -252,14 +270,28 @@ export default function ProformaInvoicePDF(props: {
 
           {lines.map((l, idx) => (
             <View key={idx} style={styles.tr}>
-              <Text style={[styles.td, colStyle(0)]}>{safe(l.po_no) || safe(header.po_no) || "-"}</Text>
-              <Text style={[styles.td, colStyle(1)]}>{safe(l.buyer_style_no) || "-"}</Text>
-              <Text style={[styles.td, colStyle(2)]}>{safe(l.description) || "-"}</Text>
-              <Text style={[styles.td, colStyle(3)]}>{safe(l.hs_code) || "-"}</Text>
-              <Text style={[styles.td, colStyle(4), styles.tdRight]}>{intFmt(l.qty)}</Text>
+              <Text style={[styles.td, colStyle(0)]}>
+                {safe(l.po_no) || safe(header.po_no) || "-"}
+              </Text>
+              <Text style={[styles.td, colStyle(1)]}>
+                {safe(l.buyer_style_no) || "-"}
+              </Text>
+              <Text style={[styles.td, colStyle(2)]}>
+                {safe(l.description) || "-"}
+              </Text>
+              <Text style={[styles.td, colStyle(3)]}>
+                {safe(l.hs_code) || "-"}
+              </Text>
+              <Text style={[styles.td, colStyle(4), styles.tdRight]}>
+                {intFmt(l.qty)}
+              </Text>
               <Text style={[styles.td, colStyle(5)]}>{safe(l.uom) || "-"}</Text>
-              <Text style={[styles.td, colStyle(6), styles.tdRight]}>{money2(l.unit_price)}</Text>
-              <Text style={[styles.td, colStyle(7), styles.tdRight]}>{money2(l.amount)}</Text>
+              <Text style={[styles.td, colStyle(6), styles.tdRight]}>
+                {money2(l.unit_price)}
+              </Text>
+              <Text style={[styles.td, colStyle(7), styles.tdRight]}>
+                {money2(l.amount)}
+              </Text>
             </View>
           ))}
         </View>
@@ -269,6 +301,17 @@ export default function ProformaInvoicePDF(props: {
           <Text style={styles.subtotalLabel}>Subtotal</Text>
           <Text style={styles.subtotalValue}>USD {money2(subtotal)}</Text>
         </View>
+
+        {/* ✅ Signature (B안) */}
+        {signatureUrl ? (
+          <View style={styles.signatureRow}>
+            <View style={styles.signatureBox}>
+              <Text style={styles.signatureTitle}>Authorized Signature</Text>
+              <Image src={signatureUrl} style={styles.signatureImage} />
+              <Text style={styles.signatureHint}>JM INTERNATIONAL CO.,LTD</Text>
+            </View>
+          </View>
+        ) : null}
       </Page>
     </Document>
   );
@@ -381,6 +424,34 @@ const styles = StyleSheet.create({
   subtotalValue: {
     fontSize: 12,
     fontWeight: 700 as any,
+  },
+
+  // ✅ Signature
+  signatureRow: {
+    marginTop: 18,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+  },
+  signatureBox: {
+    width: 200,
+    borderWidth: BORDER,
+    borderColor: "#000",
+    padding: 10,
+    alignItems: "center",
+  },
+  signatureTitle: {
+    fontSize: 11,
+    fontWeight: 700 as any,
+    marginBottom: 6,
+  },
+  signatureImage: {
+    width: 160,
+    height: 50,
+    objectFit: "contain",
+  },
+  signatureHint: {
+    marginTop: 6,
+    fontSize: 9,
   },
 });
 
