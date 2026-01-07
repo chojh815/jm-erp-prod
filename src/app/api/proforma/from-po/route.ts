@@ -1,4 +1,5 @@
 // src/app/api/proforma/from-po/route.ts
+import React from "react";
 import { NextRequest, NextResponse } from "next/server";
 import { renderToStream } from "@react-pdf/renderer";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
@@ -409,10 +410,13 @@ export async function POST(req: NextRequest) {
         } as ProformaLine;
       }) ?? [];
 
-    // 6) PDF 생성
-    const pdfStream = await renderToStream(
-      <ProformaInvoicePDF header={proformaHeader} lines={proformaLines} />
-    );
+   // 6) PDF 생성
+const pdfStream = await renderToStream(
+  React.createElement(ProformaInvoicePDF as any, {
+    header: proformaHeader,
+    lines: proformaLines,
+  })
+);
 
     return new NextResponse(pdfStream as any, {
       status: 200,
