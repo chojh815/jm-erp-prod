@@ -2,7 +2,7 @@
 "use client";
 
 import * as React from "react";
-import { useParams, useRouter, useSearchParams, } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import AppShell from "@/components/layout/AppShell";
 import type { AppRole } from "@/config/menuConfig";
@@ -109,6 +109,12 @@ function n(v: any, fallback = 0) {
   const x = Number(v);
   return Number.isNaN(x) ? fallback : x;
 }
+
+/** ✅ FIX: safeNum 누락으로 빌드 에러 → n()을 그대로 alias로 제공 */
+function safeNum(v: any, fallback = 0) {
+  return n(v, fallback);
+}
+
 function isDec4Input(s: string) {
   // 빈 값 허용, 정수/소수(소수점 이하 최대 4자리) 허용
   return /^(\d+(\.\d{0,4})?)?$/.test(s);
@@ -162,9 +168,7 @@ function fmtCbm(v: any) {
   const rounded = Math.round(num * 10000) / 10000;
 
   // 불필요한 뒤 0 제거
-  return String(rounded)
-    .replace(/(\.\d*?)0+$/, "$1")
-    .replace(/\.$/, "");
+  return String(rounded).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
 function keyOf(po?: string | null, style?: string | null) {
@@ -481,34 +485,34 @@ export default function PackingListDetailPage() {
             // ✅ UI는 *_per_carton을 유지하지만,
             // ✅ 서버/DB는 *_per_ctn 을 기대하는 경우가 많아서 "둘 다" 보낸다.
             gw_per_carton:
-  gw === null || gw === undefined || String(gw).trim() === ""
-    ? null
-    : n(gw, 0),
+              gw === null || gw === undefined || String(gw).trim() === ""
+                ? null
+                : n(gw, 0),
 
             nw_per_carton:
-  nw === null || nw === undefined || String(nw).trim() === ""
-    ? null
-    : n(nw, 0),
+              nw === null || nw === undefined || String(nw).trim() === ""
+                ? null
+                : n(nw, 0),
             cbm_per_carton:
-  cbm === null || cbm === undefined || String(cbm).trim() === ""
-    ? null
-    : n(cbm, 0),
+              cbm === null || cbm === undefined || String(cbm).trim() === ""
+                ? null
+                : n(cbm, 0),
 
             // ✅ 서버용 alias
-gw_per_ctn:
-  gw === null || gw === undefined || String(gw).trim() === ""
-    ? null
-    : n(gw, 0),
+            gw_per_ctn:
+              gw === null || gw === undefined || String(gw).trim() === ""
+                ? null
+                : n(gw, 0),
 
-nw_per_ctn:
-  nw === null || nw === undefined || String(nw).trim() === ""
-    ? null
-    : n(nw, 0),
+            nw_per_ctn:
+              nw === null || nw === undefined || String(nw).trim() === ""
+                ? null
+                : n(nw, 0),
 
-cbm_per_ctn:
-  cbm === null || cbm === undefined || String(cbm).trim() === ""
-    ? null
-    : n(cbm, 0),
+            cbm_per_ctn:
+              cbm === null || cbm === undefined || String(cbm).trim() === ""
+                ? null
+                : n(cbm, 0),
 
             total_gw: n(l.total_gw, 0),
             total_nw: n(l.total_nw, 0),
@@ -764,8 +768,6 @@ cbm_per_ctn:
       const alive = lines.filter((l) => !l.is_deleted).map(recomputeLine);
       const groups = groupByPoForPdf(alive);
 
-      // Totals (NW/GW/CBM/QTY) are shown in the Totals section below,
-      // so we keep the table compact and show only per-carton values here.
       const head = [[
         "C/T No",
         "PO #",
@@ -786,7 +788,6 @@ cbm_per_ctn:
 
         for (const l of g.lines) {
           const cartons = n(l.cartons, 0);
-          // Qty/CTN is treated as integer; we store total qty in DB.
           const qtyPerCtn = cartons > 0 ? Math.round(n(l.qty, 0) / cartons) : 0;
           const nwc = n(l.nw_per_carton, 0);
           const gwc = n(l.gw_per_carton, 0);
@@ -907,11 +908,9 @@ cbm_per_ctn:
       }
 
       if (autoPrint) {
-        // ✅ 새 탭에서 바로 열고 인쇄 다이얼로그 호출
         const url = doc.output("bloburl");
         const w = window.open(url, "_blank", "noopener,noreferrer");
         if (w) {
-          // 일부 브라우저에서 load 타이밍 필요
           const tt = window.setInterval(() => {
             try {
               if (w.document?.readyState === "complete") {
@@ -920,13 +919,11 @@ cbm_per_ctn:
                 w.print();
               }
             } catch {
-              // cross-origin일 수 있으니 안전하게 timeout fallback
               window.clearInterval(tt);
               w.focus();
               w.print();
             }
           }, 400);
-          // 5초 후에도 안되면 그냥 print 호출
           window.setTimeout(() => {
             try {
               w.focus();
@@ -934,7 +931,6 @@ cbm_per_ctn:
             } catch {}
           }, 2500);
         } else {
-          // 팝업 차단 등: 다운로드로 fallback
           doc.save(`${packingNo}.pdf`);
         }
       } else {
@@ -1062,9 +1058,7 @@ cbm_per_ctn:
                 <Label>Shipping Origin Code</Label>
                 <Input
                   value={header.shipping_origin_code || ""}
-                  onChange={(e) =>
-                    onHeaderChange({ shipping_origin_code: e.target.value })
-                  }
+                  onChange={(e) => onHeaderChange({ shipping_origin_code: e.target.value })}
                 />
               </div>
             </div>
@@ -1083,18 +1077,14 @@ cbm_per_ctn:
                   <Label>Port of Loading</Label>
                   <Input
                     value={header.port_of_loading || ""}
-                    onChange={(e) =>
-                      onHeaderChange({ port_of_loading: e.target.value || null })
-                    }
+                    onChange={(e) => onHeaderChange({ port_of_loading: e.target.value || null })}
                   />
                 </div>
                 <div>
                   <Label>Final Destination</Label>
                   <Input
                     value={header.final_destination || ""}
-                    onChange={(e) =>
-                      onHeaderChange({ final_destination: e.target.value || null })
-                    }
+                    onChange={(e) => onHeaderChange({ final_destination: e.target.value || null })}
                   />
                 </div>
                 <div>
@@ -1117,9 +1107,7 @@ cbm_per_ctn:
                 <Label>Notify Party</Label>
                 <Textarea
                   value={header.notify_party_text || ""}
-                  onChange={(e) =>
-                    onHeaderChange({ notify_party_text: e.target.value })
-                  }
+                  onChange={(e) => onHeaderChange({ notify_party_text: e.target.value })}
                   rows={4}
                 />
               </div>
@@ -1203,12 +1191,12 @@ cbm_per_ctn:
                   {lines.map((l, idx) => {
                     const r = recomputeLine(l);
                     const ct = fmtCartonRange(r.carton_no_from, r.carton_no_to);
-                    const qtyPerCtn = r.cartons > 0 ? r.qty / r.cartons : r.qty;
+                    const cartons = Number(r.cartons ?? 0);
+                    const qtyPerCtn =
+                      cartons > 0 ? Number(r.qty || 0) / cartons : Number(r.qty || 0);
+
                     return (
-                      <tr
-                        key={`${l.id}_${idx}`}
-                        className={l.is_deleted ? "opacity-40" : ""}
-                      >
+                      <tr key={`${l.id}_${idx}`} className={l.is_deleted ? "opacity-40" : ""}>
                         <td className="p-2">
                           <div className="flex gap-2">
                             <Input
@@ -1229,9 +1217,7 @@ cbm_per_ctn:
                                 })
                               }
                             />
-                            <div className="text-xs text-muted-foreground self-center">
-                              {ct}
-                            </div>
+                            <div className="text-xs text-muted-foreground self-center">{ct}</div>
                           </div>
                         </td>
 
@@ -1244,38 +1230,42 @@ cbm_per_ctn:
                             className="w-[90px] text-right"
                             value={String(n(r.cartons, 0))}
                             onChange={(e) => {
-                          const nextCartons = n(e.target.value, 0);
+                              const nextCartons = n(e.target.value, 0);
 
-                          // Keep Qty/CTN stable when Cartons changes:
-                          // derive current Qty/CTN from (qty / cartons) BEFORE update
-                          const currentCartons = Math.max(0, n(r.cartons, 0));
-                          const currentQty = Math.max(0, Math.round(safeNum(r.qty, 0)));
-                          const baseQtyPerCtn =
-                            currentCartons > 0 ? Math.round(currentQty / currentCartons) : currentQty;
+                              // Keep Qty/CTN stable when Cartons changes:
+                              // derive current Qty/CTN from (qty / cartons) BEFORE update
+                              const currentCartons = Math.max(0, n(r.cartons, 0));
+                              const currentQty = Math.max(0, Math.round(safeNum(r.qty, 0)));
+                              const baseQtyPerCtn =
+                                currentCartons > 0
+                                  ? Math.round(currentQty / currentCartons)
+                                  : currentQty;
 
-                          const nextQty = Math.max(0, Math.round(baseQtyPerCtn)) * Math.max(0, nextCartons);
+                              const nextQty =
+                                Math.max(0, Math.round(baseQtyPerCtn)) *
+                                Math.max(0, nextCartons);
 
-                          onLineChange(idx, { cartons: nextCartons, qty: nextQty });
-                        }}
+                              onLineChange(idx, { cartons: nextCartons, qty: nextQty });
+                            }}
                           />
                         </td>
 
                         <td className="p-2 text-right">
-                        <Input
-                          className="w-[90px] text-right"
-                          inputMode="numeric"
-                          value={String(qtyPerCtn)}
-                          onChange={(e) => {
-                            // Qty/CTN: integers only
-                            const raw = (e.target.value ?? "").toString();
-                            const cleaned = raw.replace(/[^\d]/g, "");
-                            const next = cleaned === "" ? 0 : parseInt(cleaned, 10);
+                          <Input
+                            className="w-[90px] text-right"
+                            inputMode="numeric"
+                            value={String(qtyPerCtn)}
+                            onChange={(e) => {
+                              // Qty/CTN: integers only
+                              const raw = (e.target.value ?? "").toString();
+                              const cleaned = raw.replace(/[^\d]/g, "");
+                              const next = cleaned === "" ? 0 : parseInt(cleaned, 10);
 
-                            const nextQty = Math.max(0, next) * Math.max(0, n(r.cartons, 0));
-                            onLineChange(idx, { qty: nextQty });
-                          }}
-                        />
-                      </td>
+                              const nextQty = Math.max(0, next) * Math.max(0, n(r.cartons, 0));
+                              onLineChange(idx, { qty: nextQty });
+                            }}
+                          />
+                        </td>
 
                         <td className="p-2 text-right">
                           <Input
@@ -1311,7 +1301,6 @@ cbm_per_ctn:
                             onChange={(e) => {
                               const v = e.target.value;
 
-                              // 소수점 4자리까지 허용(입력 중간 상태 유지)
                               if (!/^(?:\d+(\.\d{0,4})?)?$/.test(v)) return;
 
                               const num =
@@ -1340,12 +1329,11 @@ cbm_per_ctn:
                                 return;
                               }
 
-                              // ✅ 4자리 반올림 후 불필요한 뒤 0 제거 표시 (fmtCbm가 이미 위에 있음)
                               const normalized = fmtCbm(num);
 
                               onLineChange(idx, {
                                 cbm_per_carton_text: normalized,
-                                cbm_per_carton: Number(normalized), // 표시와 값 일치
+                                cbm_per_carton: Number(normalized),
                               });
                             }}
                           />
@@ -1395,8 +1383,8 @@ cbm_per_ctn:
             <DialogHeader>
               <DialogTitle>Split Last Carton (LAST CTN)</DialogTitle>
               <DialogDescription>
-                Use this only when the <b>last carton</b> has different quantity or
-                weight/CBM. If it’s identical, you don’t need to split.
+                Use this only when the <b>last carton</b> has different quantity or weight/CBM.
+                If it’s identical, you don’t need to split.
               </DialogDescription>
             </DialogHeader>
 

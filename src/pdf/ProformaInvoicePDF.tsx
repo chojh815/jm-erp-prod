@@ -101,13 +101,13 @@ export default function ProformaInvoicePDF(props: {
     if (s.includes("\n")) {
       return s
         .split(/\r?\n/)
-        .map((x) => x.trim())
+        .map((x: string) => x.trim())
         .filter(Boolean);
     }
     // 콤마 기준 줄바꿈 (주소/Intercom 포함 텍스트를 자연스럽게 분리)
     const parts = s
       .split(/\s*,\s*/)
-      .map((x) => x.trim())
+      .map((x: string) => x.trim())
       .filter(Boolean);
 
     // 너무 잘게 쪼개지면 2개씩 묶어서 줄로 만들기
@@ -125,7 +125,7 @@ export default function ProformaInvoicePDF(props: {
     if (!arr.length) return null;
     return (
       <>
-        {arr.map((line, i) => (
+        {arr.map((line: string, i: number) => (
           <Text key={i} style={styles.boxText}>
             {line}
           </Text>

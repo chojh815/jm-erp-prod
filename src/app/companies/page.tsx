@@ -207,7 +207,7 @@ const initialState: CompanyFormState = {
 export default function CompaniesPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const router = useRouter();
-  const { status, loading: authLoading, has } = usePermissions();
+  const { loading: authLoading, has } = usePermissions();
 
   const [searchKeyword, setSearchKeyword] = useState("");
   const [companies, setCompanies] = useState<DbCompanyListRow[]>([]);

@@ -386,7 +386,7 @@ export default function ProformaListPage() {
 
       // Proforma Invoice 타이틀 크게
       doc.setFontSize(20);
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Proforma Invoice", pageWidth / 2, cursorY, {
         align: "center",
       });
@@ -395,7 +395,7 @@ export default function ProformaListPage() {
 
       // Buyer / Brand & Dept (왼쪽)
       doc.setFontSize(9);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
 
       // Buyer 줄
       doc.text(`Buyer: ${buyerName || "-"}`, marginLeft, cursorY);
@@ -448,10 +448,10 @@ export default function ProformaListPage() {
       doc.rect(marginLeft, cursorY, halfWidth, blockHeight);
       doc.rect(marginLeft + halfWidth, cursorY, halfWidth, blockHeight);
 
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Shipper / Exporter", marginLeft + 2, cursorY + 5);
       doc.text("Invoice & Terms", marginLeft + halfWidth + 2, cursorY + 5);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
 
       doc.text(shipperLines, marginLeft + 2, cursorY + 10);
       doc.text(termsLines, marginLeft + halfWidth + 2, cursorY + 10);
@@ -476,15 +476,15 @@ export default function ProformaListPage() {
       doc.rect(marginLeft + halfWidth, cursorY, halfWidth, bothHeight);
 
       // 좌측 Consignee
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Consignee", marginLeft + 2, cursorY + 5);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       doc.text(consLines, marginLeft + 2, cursorY + 10);
 
       // 우측 Notify Party
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Notify Party", marginLeft + halfWidth + 2, cursorY + 5);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       doc.text(noteLines, marginLeft + halfWidth + 2, cursorY + 10);
 
       cursorY += bothHeight + 4;
@@ -495,10 +495,10 @@ export default function ProformaListPage() {
       doc.rect(marginLeft, cursorY, halfWidth, portBlockHeight);
       doc.rect(marginLeft + halfWidth, cursorY, halfWidth, portBlockHeight);
 
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("Port of Loading", marginLeft + 2, cursorY + 5);
       doc.text("Final Destination", marginLeft + halfWidth + 2, cursorY + 5);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       doc.text(portOfLoading || "-", marginLeft + 2, cursorY + 10);
       doc.text(
         finalDestinationText || "-",
@@ -517,9 +517,9 @@ export default function ProformaListPage() {
       const cooHeight = cooLines.length * cellLineHeight + 8;
 
       doc.rect(marginLeft, cursorY, contentWidth, cooHeight);
-      doc.setFont(undefined, "bold");
+      doc.setFont("helvetica", "bold");
       doc.text("COO / Certification", marginLeft + 2, cursorY + 5);
-      doc.setFont(undefined, "normal");
+      doc.setFont("helvetica", "normal");
       doc.text(cooLines, marginLeft + 2, cursorY + 10);
 
       cursorY += cooHeight + 6;

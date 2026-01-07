@@ -3,15 +3,15 @@ import React from "react";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { renderToStream } from "@react-pdf/renderer";
+import type { DocumentProps } from "@react-pdf/renderer";
 import ProformaInvoicePDF from "@/pdf/ProformaInvoicePDF";
 
-export const runtime = "nodejs"; // react-pdf는 node 런타임 사용
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function safe(v: any) {
   return (v ?? "").toString().trim();
 }
-
 function pickFirst(obj: any, keys: string[]) {
   for (const k of keys) {
     const val = obj?.[k];
@@ -30,7 +30,7 @@ export async function GET(
       return NextResponse.json({ error: "Missing PI ID" }, { status: 400 });
     }
 
-    // 1) 헤더 로드
+    // 1) header
     const { data: header, error: headerErr } = await supabaseAdmin
       .from("proforma_invoices")
       .select("*")
@@ -42,7 +42,7 @@ export async function GET(
       return NextResponse.json({ error: "PI not found" }, { status: 404 });
     }
 
-    // 2) 라인 로드
+    // 2) lines
     const { data: lines, error: linesErr } = await supabaseAdmin
       .from("proforma_invoice_lines")
       .select("*")
@@ -51,18 +51,14 @@ export async function GET(
 
     if (linesErr) {
       console.error("PI lines error", linesErr);
-      return NextResponse.json(
-        { error: "Could not load PI lines" },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "Could not load PI lines" }, { status: 500 });
     }
 
     const safeLines = (lines || []) as any[];
 
-    // 3) 숫자 포맷 함수
+    // 3) formatter
     const formatUnitPrice = (value: number) => {
       const v = Number(value || 0);
-      // 원래 네 로직 유지: 4자리까지 찍고 불필요 0 제거, 최소 2자리 보장
       let formatted = v.toFixed(4).replace(/\.?0+$/, "");
       if (!formatted.includes(".")) formatted += ".00";
       const decimals = formatted.split(".")[1];
@@ -76,7 +72,6 @@ export async function GET(
         maximumFractionDigits: 2,
       }).format(Number(v || 0));
 
-    // 4) 라인 포맷 적용 (display 값은 PDF에서 안 써도 harmless)
     const finalLines = safeLines.map((l) => ({
       ...l,
       unit_price_display: `$${formatUnitPrice(
@@ -84,113 +79,140 @@ export async function GET(
       )}`,
       amount_display: `$${formatAmount(
         l.amount ??
-          Number(l.qty || 0) *
-            Number(l.unit_price ?? (l as any).unitPrice ?? 0)
+          Number(l.qty || 0) * Number(l.unit_price ?? (l as any).unitPrice ?? 0)
       )}`,
     }));
 
-    // 5) total 계산
+    // 4) total
     const headerTotal =
       typeof (header as any).total_amount === "number"
         ? (header as any).total_amount
         : safeLines.reduce((sum, l) => {
             const amt =
               l.amount ??
-              Number(l.qty || 0) *
-                Number(l.unit_price ?? (l as any).unitPrice ?? 0);
+              Number(l.qty || 0) * Number(l.unit_price ?? (l as any).unitPrice ?? 0);
             return sum + Number(amt || 0);
           }, 0);
 
     const totalDisplay = `$${formatAmount(headerTotal)}`;
 
-    // ✅ 6) PDF header 키 정규화 (DB 컬럼명이 흔들려도 PDF는 절대 안 깨지게)
+    // ✅ 5) buyer fallback from companies
+    const buyerId =
+      pickFirst(header, ["buyer_id", "buyer_company_id", "company_id", "buyer_company"]) ||
+      null;
+
+    let buyerRow: any = null;
+
+    if (buyerId) {
+      const { data: c, error: cErr } = await supabaseAdmin
+        .from("companies")
+        .select("id, company_name, buyer_consignee, buyer_notify_party")
+        .eq("id", buyerId)
+        .maybeSingle();
+
+      if (!cErr && c) buyerRow = c;
+    }
+
+    // buyerId가 없거나 매칭이 안되면 buyer_name으로 한번 더 시도(최후 fallback)
+    if (!buyerRow) {
+      const buyerNameGuess =
+        pickFirst(header, ["buyer_name", "buyer_company_name", "buyer"]) || null;
+
+      if (buyerNameGuess) {
+        const { data: c2, error: c2Err } = await supabaseAdmin
+          .from("companies")
+          .select("id, company_name, buyer_consignee, buyer_notify_party")
+          .ilike("company_name", `%${safe(buyerNameGuess)}%`)
+          .limit(1)
+          .maybeSingle();
+
+        if (!c2Err && c2) buyerRow = c2;
+      }
+    }
+
+    // ✅ 6) normalize (consignee/notify는 header → companies → buyerName 순)
+    const buyerName =
+      safe(pickFirst(header, ["buyer_name", "buyer_company_name", "buyer"])) ||
+      safe(buyerRow?.company_name) ||
+      "-";
+
     const normalizedHeader: any = {
       ...header,
 
-      // buyer
-      buyer_name: pickFirst(header, ["buyer_name", "buyer_company_name", "buyer"]),
+      buyer_name: buyerName,
       buyer_brand_name: pickFirst(header, ["buyer_brand_name", "brand_name", "brand"]),
       buyer_dept_name: pickFirst(header, ["buyer_dept_name", "dept_name", "department"]),
 
-      // shipper
       shipper_name: pickFirst(header, ["shipper_name", "exporter_name"]),
       shipper_address: pickFirst(header, ["shipper_address", "exporter_address"]),
 
-      // terms / remarks
-      payment_term: pickFirst(header, ["payment_term", "payment_terms", "payment_term_text", "terms"]),
+      payment_term: pickFirst(header, [
+        "payment_term",
+        "payment_terms",
+        "payment_term_text",
+        "terms",
+      ]),
       remarks: pickFirst(header, ["remarks", "remark", "note", "notes"]),
 
-      // consignee / notify
-      consignee_text: pickFirst(header, [
-        "consignee_text",
-        "consignee",
-        "consignee_address",
-        "consignee_addr",
-      ]),
-      notify_party_text: pickFirst(header, [
-        "notify_party_text",
-        "notify_party",
-        "notify",
-        "notify_address",
-        "notify_addr",
-      ]),
+      consignee_text:
+        pickFirst(header, ["consignee_text", "consignee", "consignee_address", "consignee_addr"]) ||
+        safe(buyerRow?.buyer_consignee) ||
+        buyerName,
 
-      // port / destination
+      notify_party_text:
+        pickFirst(header, [
+          "notify_party_text",
+          "notify_party",
+          "notify",
+          "notify_address",
+          "notify_addr",
+        ]) ||
+        safe(buyerRow?.buyer_notify_party) ||
+        buyerName,
+
       port_of_loading: pickFirst(header, ["port_of_loading", "pol", "port_loading"]),
       final_destination: pickFirst(header, ["final_destination", "destination", "final_dest"]),
 
-      // incoterm / ship_mode
       incoterm: pickFirst(header, ["incoterm", "incoterms"]),
       ship_mode: pickFirst(header, ["ship_mode", "ship_mode_text", "ship_mode_code"]),
 
-      // coo
       coo_text: pickFirst(header, ["coo_text", "coo", "country_of_origin_text"]),
-
-      // totals (기존 유지)
       total_display: totalDisplay,
     };
 
-    // ✅ B안: signatureUrl은 “가능한 후보들”에서 pickFirst로 흡수
-    const signatureUrl = pickFirst(header, [
-      "signature_url",
-      "signatureUrl",
-      "signature_url_public",
-      "signature_public_url",
-      "sign_url",
-    ]);
+    // ✅ 7) signatureUrl (B안)
+    const signatureUrl =
+      pickFirst(header, [
+        "signature_url",
+        "signatureUrl",
+        "signature_url_public",
+        "signature_public_url",
+        "sign_url",
+      ]) ||
+      process.env.DEFAULT_PI_SIGNATURE_URL ||
+      undefined;
 
-    // 7) PDF 스트림 생성 (B안: signatureUrl 전달)
+    // ✅ 8) render (TS 빌드 에러 완전 차단)
+    // ProformaInvoicePDF는 내부에서 <Document>를 반환한다고 가정.
+    // TS는 이를 추론 못하므로 DocumentProps로 캐스팅해서 renderToStream 타입 만족시킴.
     const element = React.createElement(ProformaInvoicePDF as any, {
       header: normalizedHeader,
       lines: finalLines,
-      signatureUrl: signatureUrl || undefined,
-    });
+      signatureUrl,
+    }) as unknown as React.ReactElement<DocumentProps>;
 
     const pdfStream = await renderToStream(element);
 
     const resHeaders = new Headers();
     resHeaders.set("Content-Type", "application/pdf");
 
-    const invNo =
-      safe((header as any).invoice_no) ||
-      safe((header as any).invoiceNo) ||
-      "proforma";
-
-    // 파일명에 특수문자/공백이 있으면 브라우저가 깨질 수 있어 최소 정리
+    const invNo = safe((header as any).invoice_no) || safe((header as any).invoiceNo) || "proforma";
     const safeFile = invNo.replace(/[^\w\-\.]+/g, "_");
+    resHeaders.set("Content-Disposition", `inline; filename="${safeFile}.pdf"`);
 
-    resHeaders.set(
-      "Content-Disposition",
-      `inline; filename="${safeFile}.pdf"`
-    );
-
-    // @ts-ignore - ReadableStream 타입 이슈 무시
     return new Response(pdfStream as any, { headers: resHeaders });
   } catch (err) {
     console.error("PI PDF error", err);
-    return NextResponse.json(
-      { error: "Failed to generate PI PDF" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to generate PI PDF" }, { status: 500 });
   }
 }

@@ -1,3 +1,4 @@
+// src/components/layout/AppSidebar.tsx
 "use client";
 
 import Link from "next/link";
@@ -7,7 +8,14 @@ import {
   MENU_SECTIONS,
   type MenuSection,
   type MenuItem,
+  type AppRole,
 } from "@/config/menuConfig";
+
+type AppSidebarProps = {
+  /** AppShell에서 내려주는 역할(사이드바 메뉴 표시 기준으로 사용 가능) */
+  role?: AppRole;
+  currentRole?: AppRole;
+};
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -145,14 +153,14 @@ function SidebarHeader({
 
         <div className={cx("min-w-0", collapsed && "hidden")}>
           <div className="font-semibold text-sm leading-4">JM ERP</div>
-          <div className="text-[11px] text-slate-500 leading-4">erp.jm-i.com</div>
+          <div className="text-[11px] text-slate-500 leading-4">
+            erp.jm-i.com
+          </div>
         </div>
       </div>
 
       {!collapsed && (
-        <div className="text-xs text-slate-500">
-          {loading ? "loading..." : role}
-        </div>
+        <div className="text-xs text-slate-500">{loading ? "loading..." : role}</div>
       )}
     </div>
   );
@@ -184,7 +192,10 @@ function ExpandedMenu({
         const wrap = WRAP[key] ?? WRAP["HOME"];
 
         return (
-          <div key={sec.label} className={cx("rounded-xl border shadow-sm px-2 py-2", wrap)}>
+          <div
+            key={sec.label}
+            className={cx("rounded-xl border shadow-sm px-2 py-2", wrap)}
+          >
             <div
               className={cx(
                 "px-2 py-1 flex items-center gap-2",
@@ -242,7 +253,6 @@ function CollapsedMenu({
 
           return (
             <div key={sec.label} className="space-y-1">
-              {/* 섹션 구분선 + 점 (카드 X) */}
               <div
                 className={cx(
                   "flex items-center justify-center",
@@ -255,7 +265,6 @@ function CollapsedMenu({
                 <span className={cx("h-2 w-2 rounded-full", style.dot)} />
               </div>
 
-              {/* 아이템을 얇은 버튼 리스트로 */}
               <div className="space-y-1">
                 {sec.items.map((item) => {
                   const active = isActive(pathname, item.href);
@@ -274,7 +283,6 @@ function CollapsedMenu({
                           : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
                       )}
                     >
-                      {/* active left bar 느낌을 아주 얇게 */}
                       <span
                         className={cx(
                           "absolute left-0 top-0 h-full w-[3px] rounded-r",
@@ -313,19 +321,10 @@ function SidebarInner({
     <div className="h-full w-full bg-white flex flex-col">
       <SidebarHeader collapsed={collapsed} loading={loading} role={role} />
 
-      {/* ✅ collapsed면 컴팩트 리스트, 아니면 기존 카드 */}
       {collapsed ? (
-        <CollapsedMenu
-          pathname={pathname}
-          sections={sections}
-          onNavigate={onNavigate}
-        />
+        <CollapsedMenu pathname={pathname} sections={sections} onNavigate={onNavigate} />
       ) : (
-        <ExpandedMenu
-          pathname={pathname}
-          sections={sections}
-          onNavigate={onNavigate}
-        />
+        <ExpandedMenu pathname={pathname} sections={sections} onNavigate={onNavigate} />
       )}
 
       {!collapsed && (
@@ -337,11 +336,11 @@ function SidebarInner({
   );
 }
 
-export default function AppSidebar() {
+export default function AppSidebar({ role: roleProp, currentRole }: AppSidebarProps) {
   const pathname = usePathname();
 
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState<string>("viewer");
+  const [roleApi, setRoleApi] = useState<string>("viewer");
   const [permissions, setPermissions] = useState<string[]>([]);
 
   // 모바일 오버레이
@@ -374,7 +373,7 @@ export default function AppSidebar() {
 
         if (!res.ok) {
           if (!mounted) return;
-          setRole("viewer");
+          setRoleApi("viewer");
           setPermissions([]);
           setLoading(false);
           return;
@@ -383,12 +382,12 @@ export default function AppSidebar() {
         const json: PermissionApiResp = await res.json();
         if (!mounted) return;
 
-        setRole(normalizeRole(json));
+        setRoleApi(normalizeRole(json));
         setPermissions(normalizePerms(json));
         setLoading(false);
       } catch {
         if (!mounted) return;
-        setRole("viewer");
+        setRoleApi("viewer");
         setPermissions([]);
         setLoading(false);
       }
@@ -398,6 +397,9 @@ export default function AppSidebar() {
       mounted = false;
     };
   }, []);
+
+  // ✅ 표시용 role: props가 오면 그걸 우선, 없으면 API role
+  const displayRole = (currentRole ?? roleProp)?.toString() || roleApi;
 
   const permSet = useMemo(() => new Set(permissions), [permissions]);
   const sections = useMemo(
@@ -437,23 +439,22 @@ export default function AppSidebar() {
             <SidebarInner
               pathname={pathname}
               sections={sections}
-              role={role}
+              role={displayRole}
               loading={loading}
               onNavigate={() => setMobileOpen(false)}
-              collapsed={false} // ✅ 모바일은 무조건 펼침형
+              collapsed={false}
             />
           </div>
         </div>
       )}
 
-      {/* ✅ 데스크탑: 접기 토글 + collapsed에 따라 폭 변화 */}
+      {/* ✅ 데스크탑 */}
       <aside
         className={cx(
           "hidden lg:flex h-screen border-r bg-white flex-col transition-[width] duration-200",
           collapsed ? "w-16" : "w-60"
         )}
       >
-        {/* 토글 버튼 */}
         <div className={cx("p-2", collapsed ? "px-2" : "px-3")}>
           <button
             type="button"
@@ -471,7 +472,7 @@ export default function AppSidebar() {
         <SidebarInner
           pathname={pathname}
           sections={sections}
-          role={role}
+          role={displayRole}
           loading={loading}
           collapsed={collapsed}
         />

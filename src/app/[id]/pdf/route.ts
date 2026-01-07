@@ -1,24 +1,31 @@
-// src/app/api/proforma/[id]/pdf/route.ts
+// src/app/[id]/pdf/route.ts
+import React from "react";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { renderToStream } from "@react-pdf/renderer";
+import type { DocumentProps } from "@react-pdf/renderer";
 import ProformaInvoicePDF from "@/pdf/ProformaInvoicePDF";
-import React from "react";
 
-export const runtime = "nodejs"; // react-pdf는 node 런타임 사용
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-export async function GET(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
+function safe(v: any) {
+  return (v ?? "").toString().trim();
+}
+function pickFirst(obj: any, keys: string[]) {
+  for (const k of keys) {
+    const val = obj?.[k];
+    if (val !== null && val !== undefined && safe(val) !== "") return val;
+  }
+  return null;
+}
+
+export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const id = params.id;
+    const id = params?.id?.toString().trim();
+    if (!id) return NextResponse.json({ error: "Missing PI ID" }, { status: 400 });
 
-    if (!id) {
-      return NextResponse.json({ error: "Missing PI ID" }, { status: 400 });
-    }
-
-    // 1) 헤더 로드
+    // 1) header
     const { data: header, error: headerErr } = await supabaseAdmin
       .from("proforma_invoices")
       .select("*")
@@ -30,7 +37,7 @@ export async function GET(
       return NextResponse.json({ error: "PI not found" }, { status: 404 });
     }
 
-    // 2) 라인 로드
+    // 2) lines
     const { data: lines, error: linesErr } = await supabaseAdmin
       .from("proforma_invoice_lines")
       .select("*")
@@ -39,86 +46,46 @@ export async function GET(
 
     if (linesErr) {
       console.error("PI lines error", linesErr);
-      return NextResponse.json(
-        { error: "Could not load PI lines" },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "Could not load PI lines" }, { status: 500 });
     }
 
     const safeLines = (lines || []) as any[];
 
-    // 3) 숫자 포맷 함수
-    const formatUnitPrice = (value: number) => {
-      const v = Number(value || 0);
-      let formatted = v.toFixed(4).replace(/\.?0+$/, "");
-      if (!formatted.includes(".")) formatted += ".00";
-      const decimals = formatted.split(".")[1];
-      if (decimals.length < 2) {
-        formatted += "0".repeat(2 - decimals.length);
-      }
-      return formatted;
-    };
+    // 3) signatureUrl (fallback)
+    const signatureUrl =
+      pickFirst(header, [
+        "signature_url",
+        "signatureUrl",
+        "signature_url_public",
+        "signature_public_url",
+        "sign_url",
+      ]) ||
+      process.env.DEFAULT_PI_SIGNATURE_URL ||
+      undefined;
 
-    const formatAmount = (v: number) =>
-      new Intl.NumberFormat("en-US", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }).format(Number(v || 0));
+    // (여기서 normalizedHeader를 네 기존 로직으로 교체해도 됨)
+    const normalizedHeader: any = { ...header };
 
-    // 4) 라인 포맷 적용
-    const finalLines = safeLines.map((l) => ({
-      ...l,
-      unit_price_display: `$${formatUnitPrice(
-        l.unit_price ?? (l as any).unitPrice ?? 0
-      )}`,
-      amount_display: `$${formatAmount(
-        l.amount ??
-          Number(l.qty || 0) *
-            Number(l.unit_price ?? (l as any).unitPrice ?? 0)
-      )}`,
-    }));
-
-    const headerTotal =
-      typeof header.total_amount === "number"
-        ? header.total_amount
-        : safeLines.reduce(
-            (sum, l) =>
-              sum +
-              Number(
-                l.amount ??
-                  Number(l.qty || 0) *
-                    Number(l.unit_price ?? (l as any).unitPrice ?? 0)
-              ),
-            0
-          );
-
-    const totalDisplay = `$${formatAmount(headerTotal)}`;
-
-    const signatureUrl = (header as any).signature_url || null;
-
-    // 5) PDF 스트림 생성 (여기가 핵심 수정 부분)
-    const element = React.createElement(ProformaInvoicePDF, {
-      header: { ...header, total_display: totalDisplay },
-      lines: finalLines,
+    // ✅ JSX 금지: route.ts에서는 createElement로 만든다
+    const element = React.createElement(ProformaInvoicePDF as any, {
+      header: normalizedHeader,
+      lines: safeLines,
       signatureUrl,
-    });
+    }) as unknown as React.ReactElement<DocumentProps>;
 
     const pdfStream = await renderToStream(element);
 
     const resHeaders = new Headers();
     resHeaders.set("Content-Type", "application/pdf");
-    resHeaders.set(
-      "Content-Disposition",
-      `inline; filename="${header.invoice_no || "proforma"}.pdf"`
-    );
 
-    // @ts-ignore - ReadableStream 타입 이슈 무시
-    return new Response(pdfStream, { headers: resHeaders });
+    const invNo =
+      safe((header as any).invoice_no) || safe((header as any).invoiceNo) || "proforma";
+    const safeFile = invNo.replace(/[^\w\-\.]+/g, "_");
+    resHeaders.set("Content-Disposition", `inline; filename="${safeFile}.pdf"`);
+
+    return new Response(pdfStream as any, { headers: resHeaders });
   } catch (err) {
     console.error("PI PDF error", err);
-    return NextResponse.json(
-      { error: "Failed to generate PI PDF" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to generate PI PDF" }, { status: 500 });
   }
 }
