@@ -297,11 +297,26 @@ export default function PackingListPdfPage() {
       <div className="totalsWrap">
         <div style={{ fontWeight: 800, fontSize: 34, marginBottom: 10 }}>Totals</div>
         <div className="totalsGrid">
-          <div> Total Cartons: <b>{fmt0(totals?.total_cartons ?? totals?.cartons)}</b></div>
-          <div> Total Qty: <b>{fmt0(totals?.total_qty ?? totals?.qty)}</b></div>
-          <div> Total N.W.: <b>{fmt0(totals?.total_nw ?? totals?.nw)}</b></div>
-          <div> Total G.W.: <b>{fmt0(totals?.total_gw ?? totals?.gw)}</b></div>
-          <div> Total CBM: <b>{fmtCbm(totals?.total_cbm ?? totals?.cbm)}</b></div>
+          <div>
+  Total Cartons: <b>{fmt0(totals?.total_cartons ?? totals?.cartons)} ctns</b>
+</div>
+
+<div>
+  Total Qty: <b>{fmt0(totals?.total_qty ?? totals?.qty)} pcs</b>
+</div>
+
+<div>
+  Total N.W.: <b>{fmt0(totals?.total_nw ?? totals?.nw)} kg</b>
+</div>
+
+<div>
+  Total G.W.: <b>{fmt0(totals?.total_gw ?? totals?.gw)} kg</b>
+</div>
+
+<div>
+  Total CBM: <b>{fmtCbm(totals?.total_cbm ?? totals?.cbm)} CBM</b>
+</div>
+
         </div>
       </div>
 

@@ -34,13 +34,78 @@ function derivePackingListNoFromInvoiceNo(invoiceNo: string) {
   return `PL-${invoiceNo}`;
 }
 
+function safeText(v: any) {
+  return (v ?? "").toString().trim();
+}
+
+/**
+ * ✅ Shipment에 연결된 Invoice 찾기 (긴 버전)
+ * 우선순위:
+ * 1) invoice_shipments 테이블이 있으면: shipment_id -> invoice_id -> invoice_headers
+ * 2) fallback: invoice_headers.shipment_id = shipmentId (예전 스키마 호환)
+ */
+async function findInvoiceByShipmentId(shipmentId: string) {
+  let invoice: any = null;
+
+  // 1) invoice_shipments 우선
+  try {
+    let linkQ = supabaseAdmin
+      .from("invoice_shipments")
+      .select("invoice_id, is_deleted")
+      .eq("shipment_id", shipmentId);
+
+    linkQ = notDeletedOrNull(linkQ);
+
+    const { data: link, error: linkErr } = await linkQ.maybeSingle();
+    if (linkErr) throw new Error(linkErr.message);
+
+    const invId = link?.invoice_id ?? null;
+    if (invId && isUuid(String(invId))) {
+      let invQ = supabaseAdmin
+        .from("invoice_headers")
+        .select("id, invoice_no, invoice_date, is_deleted")
+        .eq("id", invId);
+
+      invQ = notDeletedOrNull(invQ);
+
+      const { data: invRow, error: invErr } = await invQ.maybeSingle();
+      if (invErr) throw new Error(invErr.message);
+
+      if (invRow?.id) invoice = invRow;
+    }
+  } catch (e) {
+    // invoice_shipments가 없거나 구조가 다르면 여기서 실패할 수 있음 → fallback 진행
+    console.warn("findInvoiceByShipmentId: invoice_shipments path failed:", e);
+  }
+
+  // 2) fallback: invoice_headers.shipment_id
+  if (!invoice) {
+    let invQ2 = supabaseAdmin
+      .from("invoice_headers")
+      .select("id, invoice_no, invoice_date, is_deleted")
+      .eq("shipment_id", shipmentId);
+
+    invQ2 = notDeletedOrNull(invQ2);
+
+    const { data: invRow2, error: invErr2 } = await invQ2.maybeSingle();
+    if (invErr2) throw new Error(invErr2.message);
+
+    if (invRow2?.id) invoice = invRow2;
+  }
+
+  return invoice;
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
     const shipmentId = body?.shipmentId;
     if (!shipmentId || !isUuid(shipmentId)) return bad("Invalid shipmentId", 400);
 
+    // ------------------------------------------------------------
     // 0) 이미 PL 있으면 재사용 (중복 생성 방지)
+    //    ✅ 단, 기존 PL의 invoice_id/no가 비어 있으면 여기서 같이 백필
+    // ------------------------------------------------------------
     {
       let q = supabaseAdmin
         .from("packing_list_headers")
@@ -52,6 +117,29 @@ export async function POST(req: Request) {
       if (error) throw new Error(error.message);
 
       if (existing?.id) {
+        // ✅ invoice_id/no 누락된 기존 데이터 백필
+        const needBackfill =
+          (existing.invoice_id == null || safeText(existing.invoice_id) === "") ||
+          (existing.invoice_no == null || safeText(existing.invoice_no) === "");
+
+        if (needBackfill) {
+          const invoice = await findInvoiceByShipmentId(shipmentId).catch(() => null);
+          if (invoice?.id && safeText(invoice?.invoice_no)) {
+            await supabaseAdmin
+              .from("packing_list_headers")
+              .update({
+                invoice_id: invoice.id,
+                invoice_no: safeText(invoice.invoice_no),
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", existing.id);
+
+            // response에도 반영
+            existing.invoice_id = invoice.id;
+            existing.invoice_no = safeText(invoice.invoice_no);
+          }
+        }
+
         let lq = supabaseAdmin
           .from("packing_list_lines")
           .select("*")
@@ -72,7 +160,9 @@ export async function POST(req: Request) {
       }
     }
 
+    // ------------------------------------------------------------
     // 1) shipment 조회
+    // ------------------------------------------------------------
     let shQ = supabaseAdmin.from("shipments").select("*").eq("id", shipmentId);
     shQ = notDeletedOrNull(shQ);
 
@@ -80,24 +170,23 @@ export async function POST(req: Request) {
     if (shErr) throw new Error(shErr.message);
     if (!shipment) return bad("Shipment not found", 404);
 
+    // ------------------------------------------------------------
     // 2) invoice 조회 (PL No 파생용) - 없으면 생성 막음(정책)
-    let invQ = supabaseAdmin
-      .from("invoice_headers")
-      .select("id, invoice_no, invoice_date, is_deleted")
-      .eq("shipment_id", shipmentId);
-    invQ = notDeletedOrNull(invQ);
-
-    const { data: invoice, error: invErr } = await invQ.maybeSingle();
-    if (invErr) throw new Error(invErr.message);
+    //    ✅ invoice_shipments 우선 + fallback 포함
+    // ------------------------------------------------------------
+    const invoice = await findInvoiceByShipmentId(shipmentId);
     if (!invoice?.invoice_no) {
       return bad("Invoice must be created first for this shipment.", 409);
     }
 
+    const invoiceId = invoice?.id ?? null;
     const invoiceNo = String(invoice.invoice_no);
     const packingListNo = derivePackingListNoFromInvoiceNo(invoiceNo);
     if (!packingListNo) return bad("Failed to derive packing_list_no", 500);
 
+    // ------------------------------------------------------------
     // 3) shipment_lines 조회 (네 스키마 기준!)
+    // ------------------------------------------------------------
     let slQ = supabaseAdmin
       .from("shipment_lines")
       .select(
@@ -131,11 +220,18 @@ export async function POST(req: Request) {
     });
     if (slErr) throw new Error(slErr.message);
 
+    // ------------------------------------------------------------
     // 4) header 생성 (Shipment → PL Header 복사)
+    //    ✅ 핵심: invoice_id / invoice_no 저장!
+    // ------------------------------------------------------------
     const { data: header, error: hErr } = await supabaseAdmin
       .from("packing_list_headers")
       .insert({
         shipment_id: shipmentId,
+
+        // ✅✅✅ 여기 추가 (리스트 Invoice No 표시의 핵심)
+        invoice_id: invoiceId ?? null,
+        invoice_no: invoiceNo ?? null,
 
         // ✅ PL No 유지 (입력 안 받음)
         packing_list_no: packingListNo,
@@ -177,7 +273,9 @@ export async function POST(req: Request) {
 
     if (hErr) throw new Error(hErr.message);
 
+    // ------------------------------------------------------------
     // 5) PL Lines 생성 (shipment_lines → packing_list_lines)
+    // ------------------------------------------------------------
     const linesToInsert =
       (sLines || []).map((r: any) => {
         // ✅ qty는 shipped_qty 우선, 없으면 order_qty
@@ -239,7 +337,9 @@ export async function POST(req: Request) {
       insertedLines = plLines || [];
     }
 
+    // ------------------------------------------------------------
     // 6) header totals 재계산해서 업데이트
+    // ------------------------------------------------------------
     const sumCartons = insertedLines.reduce((acc, r) => acc + n(r.cartons, 0), 0);
     const sumGw = insertedLines.reduce((acc, r) => acc + n(r.total_gw, 0), 0);
     const sumNw = insertedLines.reduce((acc, r) => acc + n(r.total_nw, 0), 0);
@@ -250,6 +350,7 @@ export async function POST(req: Request) {
         total_cartons: sumCartons,
         total_gw: sumGw,
         total_nw: sumNw,
+        updated_at: new Date().toISOString(),
       })
       .eq("id", header.id)
       .select("*")
@@ -262,7 +363,11 @@ export async function POST(req: Request) {
       packingListId: header.id,
       header: header2,
       lines: insertedLines,
-      invoice: { invoice_no: invoiceNo, invoice_date: invoice.invoice_date ?? null },
+      invoice: {
+        invoice_id: invoiceId ?? null,
+        invoice_no: invoiceNo,
+        invoice_date: invoice.invoice_date ?? null,
+      },
       copiedShipmentLines: (sLines || []).length,
       createdPackingLines: insertedLines.length,
     });

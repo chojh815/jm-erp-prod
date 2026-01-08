@@ -8,8 +8,8 @@ export const revalidate = 0;
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
 }
-function bad(message: string, status = 400) {
-  return NextResponse.json({ success: false, error: message }, { status });
+function bad(message: string, status = 400, extra?: any) {
+  return NextResponse.json({ success: false, error: message, ...(extra ?? {}) }, { status });
 }
 
 function safeTrim(v: any) {
@@ -22,77 +22,152 @@ function isUuid(v: string) {
   return UUID_RE.test(v);
 }
 
+async function findInvoiceHeader(args: {
+  invoiceId?: string;
+  invoiceNo?: string;
+  shipmentId?: string;
+}) {
+  const { invoiceId, invoiceNo, shipmentId } = args;
+
+  let header: any = null;
+
+  if (invoiceId && isUuid(invoiceId)) {
+    const { data, error } = await supabaseAdmin
+      .from("invoice_headers")
+      .select("*")
+      .eq("id", invoiceId)
+      .limit(1)
+      .maybeSingle();
+    if (!error && data) header = data;
+  }
+
+  if (!header && invoiceNo) {
+    const { data, error } = await supabaseAdmin
+      .from("invoice_headers")
+      .select("*")
+      .eq("invoice_no", invoiceNo)
+      .limit(1)
+      .maybeSingle();
+    if (!error && data) header = data;
+  }
+
+  if (!header && shipmentId) {
+    const { data, error } = await supabaseAdmin
+      .from("invoice_headers")
+      .select("*")
+      .eq("shipment_id", shipmentId)
+      // created_at 없을 수 있어 order 제거(안전)
+      .limit(1)
+      .maybeSingle();
+    if (!error && data) header = data;
+  }
+
+  return header;
+}
+
+async function findPackingHeader(args: {
+  invoiceId?: string;
+  invoiceNo?: string;
+  shipmentId?: string;
+}) {
+  const { invoiceId, invoiceNo, shipmentId } = args;
+
+  // packing_list_headers 구조가 프로젝트마다 다를 수 있으니:
+  // - 실패하더라도 route 자체는 죽지 않게 최대한 방어적으로 시도
+  const tryQuery = async (qb: any) => {
+    // created_at 없을 수 있어 order는 updated_at 우선, 없으면 order 없이
+    const q1 = qb.order("updated_at", { ascending: false }).limit(1);
+    const r1 = await q1.maybeSingle();
+    if (!r1.error && r1.data) return r1.data;
+
+    // updated_at도 없으면 order 없이
+    const q2 = qb.limit(1);
+    const r2 = await q2.maybeSingle();
+    if (!r2.error && r2.data) return r2.data;
+
+    return null;
+  };
+
+  let packingHeader: any = null;
+
+  // 1) invoice_id
+  if (invoiceId && isUuid(invoiceId)) {
+    try {
+      packingHeader = await tryQuery(
+        supabaseAdmin
+          .from("packing_list_headers")
+          .select("*")
+          .eq("invoice_id", invoiceId)
+          .eq("is_deleted", false)
+      );
+      if (packingHeader) return packingHeader;
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2) shipment_id
+  if (shipmentId && isUuid(shipmentId)) {
+    try {
+      packingHeader = await tryQuery(
+        supabaseAdmin
+          .from("packing_list_headers")
+          .select("*")
+          .eq("shipment_id", shipmentId)
+          .eq("is_deleted", false)
+      );
+      if (packingHeader) return packingHeader;
+    } catch {
+      // ignore
+    }
+  }
+
+  // 3) invoice_no(text) 컬럼(있을 때)
+  if (invoiceNo) {
+    try {
+      packingHeader = await tryQuery(
+        supabaseAdmin
+          .from("packing_list_headers")
+          .select("*")
+          .eq("invoice_no", invoiceNo)
+          .eq("is_deleted", false)
+      );
+      if (packingHeader) return packingHeader;
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   try {
-    // ✅ request.url 금지 -> req.nextUrl
     const sp = req.nextUrl.searchParams;
 
-    // 보통 packing-detail은 invoice_id 또는 invoice_no 로 들어옴
     const invoiceId = safeTrim(sp.get("invoice_id") || sp.get("id"));
     const invoiceNo = safeTrim(sp.get("invoice_no"));
     const shipmentId = safeTrim(sp.get("shipment_id"));
 
     if (!invoiceId && !invoiceNo && !shipmentId) {
-      return bad("Missing query. Provide one of: invoice_id | invoice_no | shipment_id", 400);
+      return bad(
+        "Missing query. Provide one of: invoice_id | invoice_no | shipment_id",
+        400
+      );
     }
 
-    // 1) invoice header 찾기
-    let header: any = null;
+    // 1) invoice header
+    const header = await findInvoiceHeader({ invoiceId, invoiceNo, shipmentId });
+    if (!header) return bad("Invoice not found.", 404);
 
-    if (invoiceId && isUuid(invoiceId)) {
-      const { data, error } = await supabaseAdmin
-        .from("invoice_headers")
-        .select("*")
-        .eq("id", invoiceId)
-        .limit(1)
-        .maybeSingle();
-      if (!error && data) header = data;
-    }
+    // 2) packing header (fallback: invoice_id -> shipment_id -> invoice_no)
+    const packingHeader = await findPackingHeader({
+      invoiceId: header.id,
+      invoiceNo: safeTrim(header.invoice_no) || invoiceNo,
+      shipmentId: safeTrim(header.shipment_id) || shipmentId,
+    });
 
-    if (!header && invoiceNo) {
-      const { data, error } = await supabaseAdmin
-        .from("invoice_headers")
-        .select("*")
-        .eq("invoice_no", invoiceNo)
-        .limit(1)
-        .maybeSingle();
-      if (!error && data) header = data;
-    }
-
-    if (!header && shipmentId) {
-      const { data, error } = await supabaseAdmin
-        .from("invoice_headers")
-        .select("*")
-        .eq("shipment_id", shipmentId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (!error && data) header = data;
-    }
-
-    if (!header) {
-      return bad("Invoice not found.", 404);
-    }
-
-    // 2) packing list header 찾기 (있으면)
-    // 프로젝트마다 packing_list_headers 구조가 다를 수 있으니 실패해도 빌드는 깨지지 않게
-    let packingHeader: any = null;
-    try {
-      // invoice_id 컬럼이 있는 경우가 가장 흔함
-      const { data, error } = await supabaseAdmin
-        .from("packing_list_headers")
-        .select("*")
-        .eq("invoice_id", header.id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (!error && data) packingHeader = data;
-    } catch {
-      // ignore
-    }
-
-    // 3) packing lines 가져오기 (있으면)
+    // 3) packing lines
     let packingLines: any[] = [];
     if (packingHeader?.id) {
       try {
@@ -100,7 +175,11 @@ export async function GET(req: NextRequest) {
           .from("packing_list_lines")
           .select("*")
           .eq("packing_list_id", packingHeader.id)
-          .order("created_at", { ascending: true });
+          .eq("is_deleted", false)
+          // created_at 없을 수 있어 안전 정렬
+          .order("carton_no_from", { ascending: true })
+          .order("po_no", { ascending: true })
+          .order("style_no", { ascending: true });
 
         if (!error && Array.isArray(data)) packingLines = data;
       } catch {
@@ -108,7 +187,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // 4) buyer/company (있으면)
+    // 4) buyer/company
     let buyer: any = null;
     try {
       const buyerId = header.buyer_id;

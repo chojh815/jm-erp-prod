@@ -846,11 +846,11 @@ export default function PackingListDetailPage() {
 
       doc.setFont("helvetica", "normal");
       doc.setFontSize(11);
-      doc.text(`Total Cartons: ${fmt0(totals.totalCartons)}`, marginX, tY + 10);
-      doc.text(`Total Qty: ${fmt0(totals.totalQty)}`, marginX + 70, tY + 10);
-      doc.text(`Total N.W.: ${fmt1(totals.totalNW)}`, marginX, tY + 18);
-      doc.text(`Total G.W.: ${fmt1(totals.totalGW)}`, marginX + 70, tY + 18);
-      doc.text(`Total CBM: ${fmt3(totals.totalCBM)}`, marginX, tY + 26);
+      doc.text(`Total Cartons: ${fmt0(totals.totalCartons)} ctn`, marginX, tY + 10);
+      doc.text(`Total Qty: ${fmt0(totals.totalQty)} pcs`, marginX + 70, tY + 10);
+      doc.text(`Total N.W.: ${fmt1(totals.totalNW)} kg`, marginX, tY + 18);
+      doc.text(`Total G.W.: ${fmt1(totals.totalGW)} kg`, marginX + 70, tY + 18);
+      doc.text(`Total CBM: ${fmt3(totals.totalCBM)} cbm`, marginX, tY + 26);
 
       const memo = s(header.memo);
       let afterTotalsY = tY + 34;
@@ -1143,24 +1143,24 @@ export default function PackingListDetailPage() {
 
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
               <div>
-                <div className="text-muted-foreground">Total Cartons</div>
-                <div className="font-semibold">{fmt0(totals.totalCartons)}</div>
+                <div className="text-muted-foreground">Total Cartons </div>
+                <div className="font-semibold">{fmt0(totals.totalCartons)} ctn</div>
               </div>
               <div>
                 <div className="text-muted-foreground">Total Qty</div>
-                <div className="font-semibold">{fmt0(totals.totalQty)}</div>
+                <div className="font-semibold">{fmt0(totals.totalQty)} pcs</div>
               </div>
               <div>
                 <div className="text-muted-foreground">Total N.W.</div>
-                <div className="font-semibold">{fmt1(totals.totalNW)}</div>
+                <div className="font-semibold">{fmt1(totals.totalNW)} kg</div>
               </div>
               <div>
                 <div className="text-muted-foreground">Total G.W.</div>
-                <div className="font-semibold">{fmt1(totals.totalGW)}</div>
+                <div className="font-semibold">{fmt1(totals.totalGW)} kg</div>
               </div>
               <div>
                 <div className="text-muted-foreground">Total CBM</div>
-                <div className="font-semibold">{fmt3(totals.totalCBM)}</div>
+                <div className="font-semibold">{fmt3(totals.totalCBM)} cbm</div>
               </div>
             </div>
           </CardContent>

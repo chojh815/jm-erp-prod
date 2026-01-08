@@ -107,7 +107,6 @@ async function safeUpdateOne(table: string, id: string, patch: Record<string, an
 }
 
 async function generatePackingListNo(shippingOriginCode?: string | null, baseDate?: string | null) {
-  // ✅ DB 컬럼명: packing_list_no (너 스샷 기준)
   const cc = originToCountryCode(shippingOriginCode);
   const d = baseDate ? new Date(baseDate) : new Date();
   const yy = String(d.getFullYear()).slice(-2);
@@ -201,41 +200,63 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
 
 /**
  * POST: 생성(없으면) / 있으면 유지
- * ✅ 핵심: 기존 PL이 있어도 packing_list_no가 NULL이면 즉시 채우고 반환
+ * ✅ 핵심:
+ *  - Invoice가 없으면 생성 막기(409) (정책 동일)
+ *  - 기존 PL이 있어도 invoice_id/invoice_no가 비어있으면 즉시 백필
+ *  - 신규 생성 시 packing_list_headers에 invoice_id/invoice_no를 반드시 저장
  */
 export async function POST(_req: Request, ctx: { params: { id: string } }) {
   try {
     const shipmentId = ctx?.params?.id;
     if (!isUuid(shipmentId)) return bad("Invalid shipment id", 400);
 
-    // 0) 기존 PL 있으면 그대로 반환 (단, 번호 NULL이면 채우기)
+    // 1) shipment
+    const shipment = await getShipmentOr404(shipmentId);
+    if (!shipment) return bad("Shipment not found", 404);
+
+    // 2) invoice (필수 정책)
+    const inv = await getLatestInvoiceHeaderByShipment(shipmentId);
+    if (!inv?.id || !inv?.invoice_no) {
+      return bad("Invoice must be created first for this shipment.", 409, {
+        shipment_id: shipmentId,
+      });
+    }
+
+    // 0) 기존 PL 있으면 그대로 반환 (단, 번호 NULL이면 채우기 + invoice null이면 백필)
     const existing = await findExistingPackingList(shipmentId);
     if (existing) {
-      if (!existing.packing_list_no) {
-        const finalNo = `PL-${String(existing.id).slice(0, 8)}`;
-        const upd = await safeUpdateOne("packing_list_headers", existing.id, {
-          packing_list_no: finalNo,
-          updated_at: new Date().toISOString(),
-        });
+      const patch: Record<string, any> = { updated_at: new Date().toISOString() };
 
+      // packing_list_no 보정
+      if (!existing.packing_list_no) {
+        patch.packing_list_no = `PL-${String(existing.id).slice(0, 8)}`;
+      }
+
+      // ✅ invoice_id / invoice_no 보정 (핵심!)
+      if (!existing.invoice_id) patch.invoice_id = inv.id;
+      if (!existing.invoice_no) patch.invoice_no = inv.invoice_no;
+
+      // patch할 게 있으면 업데이트
+      const shouldPatch =
+        Object.keys(patch).some((k) => k !== "updated_at") || !existing.updated_at;
+
+      if (shouldPatch) {
+        const upd = await safeUpdateOne("packing_list_headers", existing.id, patch);
         if (upd.error) {
-          console.error("existing packing_list_no fill error:", upd.error, {
-            finalPatch: upd.finalPatch,
-          });
-          // 번호 채우기 실패해도 기존 PL은 반환 (업무 진행 우선)
+          console.error("existing packing_list patch error:", upd.error, { finalPatch: upd.finalPatch });
+          // 업데이트 실패해도 기존 반환(업무 진행 우선)
           return ok({
             already_exists: true,
             packing_list_id: existing.id,
             packing_list: existing,
-            warn: "packing_list_no was null but auto-fill failed",
+            warn: "Existing PL found, but auto-patch failed",
           });
         }
-
         return ok({
           already_exists: true,
           packing_list_id: existing.id,
           packing_list: upd.data ?? existing,
-          auto_filled_packing_list_no: true,
+          auto_patched: true,
         });
       }
 
@@ -245,13 +266,6 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
         packing_list: existing,
       });
     }
-
-    // 1) shipment
-    const shipment = await getShipmentOr404(shipmentId);
-    if (!shipment) return bad("Shipment not found", 404);
-
-    // 2) invoice(optional)
-    const inv = await getLatestInvoiceHeaderByShipment(shipmentId);
 
     // 3) shipment_lines
     const sLines = await loadShipmentLines(shipmentId);
@@ -267,7 +281,7 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
     );
     const packingListNo = genNo || null;
 
-    // 5) header insert
+    // 5) header insert  ✅ invoice_id / invoice_no 포함!
     const headerPayload: Record<string, any> = {
       shipment_id: shipment.id,
       shipment_no: shipment.shipment_no ?? null,
@@ -276,7 +290,7 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
 
       buyer_id: shipment.buyer_id ?? inv?.buyer_id ?? null,
       buyer_name: shipment.buyer_name ?? inv?.buyer_name ?? null,
-      buyer_code: inv?.buyer_code ?? null,
+      buyer_code: inv?.buyer_code ?? shipment.buyer_code ?? null,
 
       currency: shipment.currency ?? inv?.currency ?? null,
       incoterm: shipment.incoterm ?? inv?.incoterm ?? null,
@@ -290,6 +304,10 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
       total_cartons: shipment.total_cartons ?? totalCartonsCalc,
       total_gw: shipment.total_gw ?? totalGwCalc,
       total_nw: shipment.total_nw ?? totalNwCalc,
+
+      // ✅ INVOICE LINK (핵심)
+      invoice_id: inv.id,
+      invoice_no: inv.invoice_no,
 
       // invoice_headers → PL 복사(있으면)
       remarks: inv?.remarks ?? null,
@@ -315,7 +333,7 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
     const packingListId = header?.id;
     if (!packingListId) return bad("packing_list_headers insert succeeded but id missing", 500);
 
-    // 6) 번호 NULL 금지: insert 결과가 NULL이면 즉시 채움
+    // 6) packing_list_no NULL 방지
     if (!header?.packing_list_no) {
       const finalNo = packingListNo || `PL-${String(packingListId).slice(0, 8)}`;
       const upd = await safeUpdateOne("packing_list_headers", packingListId, {
@@ -366,6 +384,7 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
       packing_list_id: packingListId,
       packing_list: header,
       copied_lines: insLines.data.length,
+      invoice: { id: inv.id, invoice_no: inv.invoice_no },
     });
   } catch (e: any) {
     console.error(e);

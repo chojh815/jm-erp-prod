@@ -219,8 +219,8 @@ export default function InvoiceDetailPage() {
     setErrorMsg(null);
     try {
       const res = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
-        cache: "no-store",
-      });
+  cache: "no-store",
+});
       const json = await res.json().catch(() => null);
 
       if (!res.ok) {

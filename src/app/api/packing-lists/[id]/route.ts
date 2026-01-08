@@ -25,11 +25,17 @@ function num(v: any, fallback = 0): number {
 }
 
 function isEmptyNumber(v: any) {
-  // 프로젝트에서는 0도 “미입력”으로 취급하는 케이스가 많음
   return v === null || v === undefined || v === "" || Number(v) === 0;
 }
 function pickIfEmpty(cur: any, fallback: any) {
   return isEmptyNumber(cur) ? fallback : cur;
+}
+
+function isBlankText(v: any) {
+  return v === null || v === undefined || String(v).trim() === "";
+}
+function pickTextIfEmpty(cur: any, fallback: any) {
+  return isBlankText(cur) ? fallback : cur;
 }
 
 function calcPerCtn(total: any, cartons: any): number | null {
@@ -47,10 +53,25 @@ function calcPerCtn(total: any, cartons: any): number | null {
  */
 function readShipmentPerCtn(sl: any, cartons: number) {
   const slNwPer =
-    sl?.nw_per_ctn ?? sl?.nw_per_carton ?? sl?.nw_per_cartons ?? null;
+    sl?.nw_per_ctn ??
+    sl?.nw_per_carton ??
+    sl?.nw_per_cartons ??
+    sl?.nw_per_ctns ??
+    null;
+
   const slGwPer =
-    sl?.gw_per_ctn ?? sl?.gw_per_carton ?? sl?.gw_per_cartons ?? null;
-  const slCbmPer = sl?.cbm_per_carton ?? sl?.cbm_per_carton ?? null;
+    sl?.gw_per_ctn ??
+    sl?.gw_per_carton ??
+    sl?.gw_per_cartons ??
+    sl?.gw_per_ctns ??
+    null;
+
+  const slCbmPer =
+    sl?.cbm_per_ctn ??
+    sl?.cbm_per_carton ??
+    sl?.cbm_per_cartons ??
+    sl?.cbm_per_ctns ??
+    null;
 
   const nwPer =
     slNwPer != null
@@ -75,6 +96,8 @@ function readShipmentPerCtn(sl: any, cartons: number) {
       ? num(slCbmPer, 0)
       : sl?.total_cbm != null
       ? calcPerCtn(sl.total_cbm, cartons)
+      : sl?.cbm != null
+      ? calcPerCtn(sl.cbm, cartons)
       : null;
 
   return { nwPer, gwPer, cbmPer };
@@ -113,8 +136,8 @@ function normalizeLine(row: any) {
       : null;
 
   const cbmPer =
-    row?.cbm_per_carton !== undefined && row?.cbm_per_carton !== null
-      ? num(row.cbm_per_carton, 0)
+    row?.cbm_per_ctn !== undefined && row?.cbm_per_ctn !== null
+      ? num(row.cbm_per_ctn, 0)
       : row?.cbm_per_carton !== undefined && row?.cbm_per_carton !== null
       ? num(row.cbm_per_carton, 0)
       : null;
@@ -139,7 +162,7 @@ function normalizeLine(row: any) {
     cartons,
     qty,
 
-    // canonical (db)
+    // canonical (api/UI)
     nw_per_carton: nwPer,
     gw_per_carton: gwPer,
     cbm_per_carton: cbmPer,
@@ -216,6 +239,70 @@ function computeTotals(lines: any[]) {
   return { total_cartons, total_qty, total_nw, total_gw, total_cbm };
 }
 
+/**
+ * ✅ 핵심: [id]가 "PL id"가 아닐 수도 있다.
+ * - 1) packing_list_headers.id = id
+ * - 2) packing_list_headers.invoice_id = id  (id를 invoice_id로 해석)
+ * - 3) invoice_headers.id = id -> invoice_no -> packing_list_headers.invoice_no = invoice_no
+ *
+ * 반환: { plId, header, resolved_by }
+ */
+async function resolvePackingListHeader(id: string) {
+  // 1) PL id로 시도
+  const r1 = await supabaseAdmin
+    .from("packing_list_headers")
+    .select("*")
+    .eq("id", id)
+    .eq("is_deleted", false)
+    .maybeSingle();
+  if (r1.data) return { plId: id, header: r1.data, resolved_by: "packing_list_id" as const };
+
+  // 2) invoice_id로 시도
+  const r2 = await supabaseAdmin
+    .from("packing_list_headers")
+    .select("*")
+    .eq("invoice_id", id)
+    .eq("is_deleted", false)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (r2.data) return { plId: r2.data.id, header: r2.data, resolved_by: "invoice_id" as const };
+
+  // 3) invoice_no로 시도 (invoice_headers에서 invoice_no를 얻어와서 매칭)
+  const inv = await supabaseAdmin
+    .from("invoice_headers")
+    .select("id, invoice_no")
+    .eq("id", id)
+    .maybeSingle();
+
+  const invoiceNo = (inv.data?.invoice_no ?? "").toString().trim();
+  if (invoiceNo) {
+    const r3 = await supabaseAdmin
+      .from("packing_list_headers")
+      .select("*")
+      .eq("invoice_no", invoiceNo)
+      .eq("is_deleted", false)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (r3.data) {
+      // 다음부터 빠르게 찾도록 invoice_id 백필(빈 값만)
+      const curInvId = r3.data.invoice_id ?? null;
+      if (!curInvId) {
+        await supabaseAdmin
+          .from("packing_list_headers")
+          .update({ invoice_id: id, updated_at: new Date().toISOString() })
+          .eq("id", r3.data.id);
+        r3.data.invoice_id = id;
+      }
+      return { plId: r3.data.id, header: r3.data, resolved_by: "invoice_no" as const };
+    }
+  }
+
+  return { plId: null as any, header: null as any, resolved_by: "none" as const };
+}
+
 export async function GET(
   _req: Request,
   ctx: { params: Promise<{ id: string }> }
@@ -224,23 +311,85 @@ export async function GET(
     const { id } = await ctx.params;
     if (!id || !isUuid(id)) return bad("Invalid id", 400);
 
-    const { data: header, error: hErr } = await supabaseAdmin
-      .from("packing_list_headers")
-      .select("*")
-      .eq("id", id)
-      .eq("is_deleted", false)
-      .maybeSingle();
+    // ✅ 여기서 id가 PL id인지, invoice id인지 자동 판별
+    const resolved = await resolvePackingListHeader(id);
+    if (!resolved.header) return bad("Packing list not found", 404);
 
-    if (hErr) return bad(hErr.message, 500);
-    if (!header) return bad("Packing list not found", 404);
+    const plId = resolved.plId as string;
+    const H = resolved.header as any;
 
-    const H = header as any;
+    // ------------------------------------------------------------
+    // ✅ Invoice처럼 주소/문구가 나오도록 보강:
+    // packing_list_headers의 shipper/consignee/notify가 비어있으면
+    // invoice_headers에서 "빈 값만" 채워서 내려줌 + DB backfill
+    // ------------------------------------------------------------
+    try {
+      let inv: any = null;
 
-    // 1) packing_list_lines (DB 컬럼: carton_no_from/to)
+      const invId = H.invoice_id ?? null;
+      if (invId && isUuid(String(invId))) {
+        const { data: invRow } = await supabaseAdmin
+          .from("invoice_headers")
+          .select(
+            "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+          )
+          .eq("id", invId)
+          .maybeSingle();
+        inv = invRow ?? null;
+      }
+
+      if (!inv) {
+        const invNo =
+          H.invoice_no ??
+          H.invoice_no_text ??
+          H.invoice_number ??
+          H.invoice ??
+          null;
+        const invNoText = (invNo ?? "").toString().trim();
+        if (invNoText) {
+          const { data: invRow } = await supabaseAdmin
+            .from("invoice_headers")
+            .select(
+              "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+            )
+            .eq("invoice_no", invNoText)
+            .maybeSingle();
+          inv = invRow ?? null;
+        }
+      }
+
+      if (inv) {
+        const patch: any = {};
+        patch.shipper_name = pickTextIfEmpty(H.shipper_name, inv.shipper_name);
+        patch.shipper_address = pickTextIfEmpty(H.shipper_address, inv.shipper_address);
+        patch.consignee_text = pickTextIfEmpty(H.consignee_text, inv.consignee_text);
+        patch.notify_party_text = pickTextIfEmpty(H.notify_party_text, inv.notify_party_text);
+        if ("coo_text" in H || "coo_text" in inv) {
+          patch.coo_text = pickTextIfEmpty(H.coo_text, inv.coo_text);
+        }
+
+        const changed: any = {};
+        for (const k of Object.keys(patch)) {
+          if (patch[k] !== undefined && patch[k] !== (H as any)[k]) changed[k] = patch[k];
+        }
+
+        if (Object.keys(changed).length > 0) {
+          Object.assign(H, changed);
+          await supabaseAdmin
+            .from("packing_list_headers")
+            .update({ ...changed, updated_at: new Date().toISOString() })
+            .eq("id", plId);
+        }
+      }
+    } catch (e) {
+      console.warn("PackingList header hydrate from invoice failed:", e);
+    }
+
+    // 1) packing_list_lines
     const { data: plLines, error: plErr } = await supabaseAdmin
       .from("packing_list_lines")
       .select("*")
-      .eq("packing_list_id", id)
+      .eq("packing_list_id", plId)
       .eq("is_deleted", false)
       .order("carton_no_from", { ascending: true })
       .order("po_no", { ascending: true })
@@ -298,7 +447,13 @@ export async function GET(
     const lines = rawLines.map(normalizeLine);
     const totals = computeTotals(lines);
 
-    return ok({ header: H, lines, totals });
+    // ✅ resolved_by, resolved_pl_id를 같이 내려주면 프론트 디버깅이 쉬움
+    return ok({
+      header: H,
+      lines,
+      totals,
+      resolved: { input_id: id, packing_list_id: plId, resolved_by: resolved.resolved_by },
+    });
   } catch (e: any) {
     return bad(e?.message || "Server error", 500);
   }
@@ -312,15 +467,12 @@ export async function PUT(
     const { id } = await ctx.params;
     if (!id || !isUuid(id)) return bad("Invalid id", 400);
 
-    const { data: header, error: hErr } = await supabaseAdmin
-      .from("packing_list_headers")
-      .select("*")
-      .eq("id", id)
-      .eq("is_deleted", false)
-      .maybeSingle();
+    // ✅ PUT도 같은 방식으로 id를 PL id로 resolve
+    const resolved = await resolvePackingListHeader(id);
+    if (!resolved.header) return bad("Packing list not found", 404);
 
-    if (hErr) return bad(hErr.message, 500);
-    if (!header) return bad("Packing list not found", 404);
+    const plId = resolved.plId as string;
+    const header = resolved.header as any;
 
     const body = await req.json().catch(() => ({}));
     const headerIn = body?.header || {};
@@ -333,19 +485,15 @@ export async function PUT(
         packing_date: headerIn.packing_date ?? header.packing_date ?? null,
         memo: headerIn.memo ?? header.memo ?? null,
         consignee_text: headerIn.consignee_text ?? header.consignee_text ?? null,
-        notify_party_text:
-          headerIn.notify_party_text ?? header.notify_party_text ?? null,
+        notify_party_text: headerIn.notify_party_text ?? header.notify_party_text ?? null,
         shipper_name: headerIn.shipper_name ?? header.shipper_name ?? null,
-        shipper_address:
-          headerIn.shipper_address ?? header.shipper_address ?? null,
-        port_of_loading:
-          headerIn.port_of_loading ?? header.port_of_loading ?? null,
-        final_destination:
-          headerIn.final_destination ?? header.final_destination ?? null,
+        shipper_address: headerIn.shipper_address ?? header.shipper_address ?? null,
+        port_of_loading: headerIn.port_of_loading ?? header.port_of_loading ?? null,
+        final_destination: headerIn.final_destination ?? header.final_destination ?? null,
         coo_text: headerIn.coo_text ?? header.coo_text ?? null,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", id);
+      .eq("id", plId);
 
     if (upErr) return bad(upErr.message, 500);
 
@@ -353,7 +501,7 @@ export async function PUT(
     const { error: delErr } = await supabaseAdmin
       .from("packing_list_lines")
       .update({ is_deleted: true, updated_at: new Date().toISOString() })
-      .eq("packing_list_id", id)
+      .eq("packing_list_id", plId)
       .eq("is_deleted", false);
 
     if (delErr) return bad(delErr.message, 500);
@@ -366,15 +514,18 @@ export async function PUT(
         const cartons = num(x.cartons, 0);
         const qty = num(x.qty ?? x.shipped_qty ?? x.order_qty, 0);
 
-        const nwRaw = x.nw_per_carton ?? x.nw_per_carton ?? null;
-        const gwRaw = x.gw_per_carton ?? x.gw_per_carton ?? null;
-        const cbmRaw = x.cbm_per_carton ?? x.cbm_per_carton ?? null;
+        const nwRaw =
+          x.nw_per_ctn ?? x.nw_per_carton ?? x.nw_per_cartons ?? x.nw_per_ctns ?? null;
+        const gwRaw =
+          x.gw_per_ctn ?? x.gw_per_carton ?? x.gw_per_cartons ?? x.gw_per_ctns ?? null;
+        const cbmRaw =
+          x.cbm_per_ctn ?? x.cbm_per_carton ?? x.cbm_per_cartons ?? x.cbm_per_ctns ?? null;
 
         const fromRaw = x.carton_no_from ?? x.ct_no_from ?? null;
         const toRaw = x.carton_no_to ?? x.ct_no_to ?? null;
 
         return {
-          packing_list_id: id,
+          packing_list_id: plId,
 
           po_no: x.po_no ?? null,
           style_no: x.style_no ?? null,
@@ -383,7 +534,6 @@ export async function PUT(
           cartons,
           qty,
 
-          // 비워둔 값은 NULL 저장(그래야 GET에서 shipment로 보강됨)
           nw_per_carton: isEmptyNumber(nwRaw) ? null : num(nwRaw, 0),
           gw_per_carton: isEmptyNumber(gwRaw) ? null : num(gwRaw, 0),
           cbm_per_carton: isEmptyNumber(cbmRaw) ? null : num(cbmRaw, 0),
@@ -413,7 +563,7 @@ export async function PUT(
     const { data: newHeader, error: nhErr } = await supabaseAdmin
       .from("packing_list_headers")
       .select("*")
-      .eq("id", id)
+      .eq("id", plId)
       .maybeSingle();
 
     if (nhErr) return bad(nhErr.message, 500);
@@ -422,7 +572,7 @@ export async function PUT(
     const { data: outLines, error: outErr } = await supabaseAdmin
       .from("packing_list_lines")
       .select("*")
-      .eq("packing_list_id", id)
+      .eq("packing_list_id", plId)
       .eq("is_deleted", false)
       .order("carton_no_from", { ascending: true })
       .order("po_no", { ascending: true })
@@ -433,7 +583,12 @@ export async function PUT(
     const lines = (outLines ?? []).map(normalizeLine);
     const totals = computeTotals(lines);
 
-    return ok({ header: newHeader, lines, totals });
+    return ok({
+      header: newHeader,
+      lines,
+      totals,
+      resolved: { input_id: id, packing_list_id: plId, resolved_by: resolved.resolved_by },
+    });
   } catch (e: any) {
     return bad(e?.message || "Server error", 500);
   }

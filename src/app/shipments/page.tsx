@@ -26,6 +26,10 @@ type ShipmentRow = {
   created_at: string;
 };
 
+function safeTrim(v: any) {
+  return (v ?? "").toString().trim();
+}
+
 export default function ShipmentsHomePage() {
   const role: AppRole = "staff";
   const router = useRouter();
@@ -40,6 +44,9 @@ export default function ShipmentsHomePage() {
   // ---- 데이터/로딩 ----
   const [rows, setRows] = React.useState<ShipmentRow[]>([]);
   const [loading, setLoading] = React.useState(false);
+
+  // ---- 삭제 중 상태(중복 클릭 방지) ----
+  const [deletingId, setDeletingId] = React.useState<string | null>(null);
 
   const loadShipments = React.useCallback(async () => {
     setLoading(true);
@@ -60,24 +67,19 @@ export default function ShipmentsHomePage() {
           created_at
         `
         )
+        .eq("is_deleted", false)   // ✅ 이거 추가
         .order("created_at", { ascending: false });
 
-      if (poKeyword.trim()) {
-        const like = `%${poKeyword.trim()}%`;
-        query = query.ilike("po_no", like);
-      }
+      const po = safeTrim(poKeyword);
+      const buyer = safeTrim(buyerKeyword);
 
-      if (buyerKeyword.trim()) {
-        const like = `%${buyerKeyword.trim()}%`;
-        query = query.ilike("buyer_name", like);
-      }
+      if (po) query = query.ilike("po_no", `%${po}%`);
+      if (buyer) query = query.ilike("buyer_name", `%${buyer}%`);
 
-      if (dateFrom) {
-        query = query.gte("created_at", `${dateFrom}T00:00:00`);
-      }
-      if (dateTo) {
-        query = query.lte("created_at", `${dateTo}T23:59:59`);
-      }
+      // 날짜는 created_at(UTC/타임존) 때문에 정확히 하루 경계가 틀어질 수 있어도
+      // 현재 UX 목적(대략 필터)에는 이 방식이 가장 안전.
+      if (dateFrom) query = query.gte("created_at", `${dateFrom}T00:00:00`);
+      if (dateTo) query = query.lte("created_at", `${dateTo}T23:59:59`);
 
       const { data, error } = await query;
 
@@ -94,7 +96,6 @@ export default function ShipmentsHomePage() {
   }, [supabase, poKeyword, buyerKeyword, dateFrom, dateTo]);
 
   React.useEffect(() => {
-    // 최초 진입 시 전체 리스트
     loadShipments();
   }, [loadShipments]);
 
@@ -103,12 +104,14 @@ export default function ShipmentsHomePage() {
     setBuyerKeyword("");
     setDateFrom("");
     setDateTo("");
-    loadShipments();
+    // state set 이후 바로 loadShipments 호출하면 이전 값으로 필터가 걸릴 수 있어
+    // 다음 tick에 호출
+    setTimeout(() => loadShipments(), 0);
   };
 
   const formatDate = (iso: string) => {
     try {
-      return new Date(iso).toLocaleDateString();
+      return new Date(iso).toLocaleString(); // 날짜+시간까지 (삭제 확인할 때 유용)
     } catch {
       return "-";
     }
@@ -118,9 +121,10 @@ export default function ShipmentsHomePage() {
     router.push(`/shipments/${id}`);
   };
 
-  // ✅ Confirm Dialog + 삭제 로직
+  // ✅ Confirm Dialog + 삭제 로직(즉시 리스트 반영)
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation(); // 행 클릭으로 상세 들어가는 것 막기
+    if (deletingId) return; // 이미 삭제 중이면 무시
 
     const ok = window.confirm(
       [
@@ -132,23 +136,43 @@ export default function ShipmentsHomePage() {
     );
     if (!ok) return;
 
+    // ✅ 1) UI에서 즉시 제거(optimistic)
+    const snapshot = rows; // 실패 시 복원용
+    setDeletingId(id);
+    setRows((prev) => prev.filter((x) => x.id !== id));
+
     try {
       const res = await fetch(`/api/shipments/${id}`, {
         method: "DELETE",
+        cache: "no-store",
       });
 
-      const json = await res.json();
+      let json: any = null;
+      try {
+        json = await res.json();
+      } catch {
+        // JSON 파싱 실패도 실패 처리
+      }
 
-      if (!json.success) {
-        alert("삭제 중 오류가 발생했습니다:\n" + (json.error ?? "Unknown"));
+      if (!res.ok || !json?.success) {
+        // ✅ 실패하면 리스트 복원
+        setRows(snapshot);
+        alert(
+          "삭제 중 오류가 발생했습니다:\n" +
+            (json?.error ?? `HTTP ${res.status}`)
+        );
         return;
       }
 
-      alert("Shipment 가 삭제되었습니다.");
-      loadShipments();
+      // ✅ 2) 서버와 최종 동기화(혹시 다른 필터/정렬/상태 변화 반영)
+      await loadShipments();
     } catch (err: any) {
       console.error("Delete shipment error:", err);
+      // ✅ 실패하면 복원
+      setRows(snapshot);
       alert("삭제 중 알 수 없는 오류가 발생했습니다.");
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -170,9 +194,7 @@ export default function ShipmentsHomePage() {
           </CardHeader>
           <CardContent className="flex flex-wrap gap-3">
             <Button asChild>
-              <Link href="/shipments/create-from-po">
-                Create Shipment from PO
-              </Link>
+              <Link href="/shipments/create-from-po">Create Shipment from PO</Link>
             </Button>
             <Button variant="outline" asChild>
               <Link href="/shipments/create">Create Shipment (Manual)</Link>
@@ -243,9 +265,7 @@ export default function ShipmentsHomePage() {
                     <th className="px-3 py-2 text-left border-b">PO No</th>
                     <th className="px-3 py-2 text-left border-b">Buyer</th>
                     <th className="px-3 py-2 text-left border-b">Origin</th>
-                    <th className="px-3 py-2 text-left border-b">
-                      Destination
-                    </th>
+                    <th className="px-3 py-2 text-left border-b">Destination</th>
                     <th className="px-3 py-2 text-right border-b">Cartons</th>
                     <th className="px-3 py-2 text-right border-b">G.W (KGS)</th>
                     <th className="px-3 py-2 text-right border-b">N.W (KGS)</th>
@@ -254,47 +274,54 @@ export default function ShipmentsHomePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row) => (
-                    <tr
-                      key={row.id}
-                      className="hover:bg-gray-50 cursor-pointer"
-                      onClick={() => handleRowClick(row.id)}
-                    >
-                      <td className="px-3 py-2 border-b">
-                        {row.shipment_no ?? "-"}
-                      </td>
-                      <td className="px-3 py-2 border-b">{row.po_no ?? "-"}</td>
-                      <td className="px-3 py-2 border-b">
-                        {row.buyer_name ?? "-"}
-                      </td>
-                      <td className="px-3 py-2 border-b">
-                        {row.shipping_origin_code ?? "-"}
-                      </td>
-                      <td className="px-3 py-2 border-b">
-                        {row.destination ?? "-"}
-                      </td>
-                      <td className="px-3 py-2 border-b text-right">
-                        {row.total_cartons ?? 0}
-                      </td>
-                      <td className="px-3 py-2 border-b text-right">
-                        {row.total_gw ?? 0}
-                      </td>
-                      <td className="px-3 py-2 border-b text-right">
-                        {row.total_nw ?? 0}
-                      </td>
-                      <td className="px-3 py-2 border-b">
-                        {formatDate(row.created_at)}
-                      </td>
-                      <td className="px-3 py-2 border-b text-right">
-                        <button
-                          className="text-red-600 hover:text-red-800 text-xs"
-                          onClick={(e) => handleDelete(row.id, e)}
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {rows.map((row) => {
+                    const isDeleting = deletingId === row.id;
+                    return (
+                      <tr
+                        key={row.id}
+                        className="hover:bg-gray-50 cursor-pointer"
+                        onClick={() => handleRowClick(row.id)}
+                      >
+                        <td className="px-3 py-2 border-b">
+                          {row.shipment_no ?? "-"}
+                        </td>
+                        <td className="px-3 py-2 border-b">{row.po_no ?? "-"}</td>
+                        <td className="px-3 py-2 border-b">
+                          {row.buyer_name ?? "-"}
+                        </td>
+                        <td className="px-3 py-2 border-b">
+                          {row.shipping_origin_code ?? "-"}
+                        </td>
+                        <td className="px-3 py-2 border-b">
+                          {row.destination ?? "-"}
+                        </td>
+                        <td className="px-3 py-2 border-b text-right">
+                          {row.total_cartons ?? 0}
+                        </td>
+                        <td className="px-3 py-2 border-b text-right">
+                          {row.total_gw ?? 0}
+                        </td>
+                        <td className="px-3 py-2 border-b text-right">
+                          {row.total_nw ?? 0}
+                        </td>
+                        <td className="px-3 py-2 border-b">
+                          {formatDate(row.created_at)}
+                        </td>
+                        <td className="px-3 py-2 border-b text-right">
+                          <button
+                            className="text-red-600 hover:text-red-800 text-xs disabled:opacity-50"
+                            onClick={(e) => handleDelete(row.id, e)}
+                            disabled={!!deletingId}
+                            title={
+                              isDeleting ? "Deleting..." : "Delete this shipment"
+                            }
+                          >
+                            {isDeleting ? "Deleting..." : "Delete"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
 
                   {rows.length === 0 && !loading && (
                     <tr>
@@ -303,6 +330,17 @@ export default function ShipmentsHomePage() {
                         colSpan={10}
                       >
                         검색 결과가 없습니다.
+                      </td>
+                    </tr>
+                  )}
+
+                  {loading && (
+                    <tr>
+                      <td
+                        className="px-3 py-4 text-center text-gray-500"
+                        colSpan={10}
+                      >
+                        Loading...
                       </td>
                     </tr>
                   )}

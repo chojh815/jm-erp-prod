@@ -22,8 +22,6 @@ function isUuid(v: string) {
 }
 
 function pickQty(row: any) {
-  // ✅ 옵션 A (추천): shipment_lines에 shipped_qty / order_qty 존재
-  // UI Qty는 shipped_qty 우선, 없으면 order_qty
   return row?.shipped_qty ?? row?.order_qty ?? 0;
 }
 
@@ -34,8 +32,6 @@ function groupByPo(lines: any[]) {
     if (!map.has(key)) map.set(key, []);
     map.get(key)!.push(l);
   }
-
-  // key 정렬 (PO 번호 기준)
   const keys = Array.from(map.keys()).sort((a, b) => a.localeCompare(b));
   return keys.map((k) => ({
     po_key: k,
@@ -45,7 +41,6 @@ function groupByPo(lines: any[]) {
 }
 
 async function getInvoiceLink(shipmentId: string) {
-  // 가장 최신 invoice 1건 (Revision 구조가 있어도 "최신 한 건"만 상태표시엔 충분)
   const { data, error } = await supabaseAdmin
     .from("invoice_headers")
     .select("id, invoice_no, status, created_at, updated_at, is_deleted, is_latest")
@@ -72,17 +67,12 @@ async function getPackingListLink(shipmentId: string) {
   return data?.[0] ?? null;
 }
 
-export async function GET(
-  _req: Request,
-  ctx: { params: Promise<{ id: string }> }
-) {
+export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
     const shipmentId = String(id || "").trim();
-
     if (!isUuid(shipmentId)) return bad("Invalid shipment id", 400);
 
-    // 1) Shipment Header
     const { data: shipment, error: shErr } = await supabaseAdmin
       .from("shipments")
       .select("*")
@@ -93,7 +83,6 @@ export async function GET(
     if (shErr) throw new Error(shErr.message);
     if (!shipment) return bad("Shipment not found", 404);
 
-    // 2) Shipment Lines
     const { data: rawLines, error: lnErr } = await supabaseAdmin
       .from("shipment_lines")
       .select("*")
@@ -117,7 +106,6 @@ export async function GET(
       color: r.color ?? null,
       size: r.size ?? null,
 
-      // ✅ Qty 0 문제 해결: 숫자 변환해서 내려줌
       qty: num(pickQty(r), 0),
 
       cartons: num(r.cartons, 0),
@@ -130,10 +118,8 @@ export async function GET(
       amount: r.amount ?? null,
     }));
 
-    // 3) 그룹(PO별 블록)
     const groups_by_po = groupByPo(lines);
 
-    // 4) totals (라인 합계 우선)
     const calcTotalCTN = lines.reduce((s, l) => s + num(l.cartons), 0);
     const calcTotalGW = lines.reduce((s, l) => s + num(l.gw), 0);
     const calcTotalNW = lines.reduce((s, l) => s + num(l.nw), 0);
@@ -142,13 +128,11 @@ export async function GET(
     const finalTotalGW = shipment.total_gw ?? calcTotalGW;
     const finalTotalNW = shipment.total_nw ?? calcTotalNW;
 
-    // 5) Header fallback (shipment이 비어있을 때만 po_headers에서 보충)
-    // ✅ 중요: po_headers.etd/eta 같은 존재하지 않는 컬럼은 절대 참조하지 않음
     let fallbackPo: any = null;
     if (shipment.po_header_id) {
       const { data, error } = await supabaseAdmin
         .from("po_headers")
-        .select("*") // 안전: 특정 컬럼 지정하다가 "없음" 터지는 것 방지
+        .select("*")
         .eq("id", shipment.po_header_id)
         .eq("is_deleted", false)
         .maybeSingle();
@@ -167,17 +151,13 @@ export async function GET(
       shipment.shipping_origin_code ?? fallbackPo?.shipping_origin_code ?? null;
 
     const destination = shipment.destination ?? fallbackPo?.destination ?? null;
-    const final_destination =
-      shipment.final_destination ?? fallbackPo?.final_destination ?? null;
+    const final_destination = shipment.final_destination ?? fallbackPo?.final_destination ?? null;
 
-    const port_of_loading =
-      shipment.port_of_loading ?? fallbackPo?.port_of_loading ?? null;
+    const port_of_loading = shipment.port_of_loading ?? fallbackPo?.port_of_loading ?? null;
 
-    // ✅ ETD/ETA는 shipments 테이블 기준 (po_headers로부터 끌어오지 않음)
     const etd = shipment.etd ?? null;
     const eta = shipment.eta ?? null;
 
-    // 6) Links
     const invoiceLink = await getInvoiceLink(shipmentId);
     const packingListLink = await getPackingListLink(shipmentId);
 
@@ -201,7 +181,7 @@ export async function GET(
         total_nw: finalTotalNW,
       },
       lines,
-      groups_by_po, // ✅ UI에서 PO별 블록 렌더링
+      groups_by_po,
       summary: {
         shipment_id: shipmentId,
         shipment_no: shipment.shipment_no ?? null,
@@ -225,10 +205,7 @@ export async function GET(
   }
 }
 
-export async function PUT(
-  req: Request,
-  ctx: { params: Promise<{ id: string }> }
-) {
+export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
     const shipmentId = String(id || "").trim();
@@ -236,7 +213,6 @@ export async function PUT(
 
     const body = await req.json().catch(() => ({}));
 
-    // ✅ 허용 필드만 업데이트 (존재하지 않는 컬럼 업데이트 시 500 방지)
     const patch: any = {
       shipment_no: body.shipment_no ?? undefined,
       po_header_id: body.po_header_id ?? undefined,
@@ -269,7 +245,6 @@ export async function PUT(
       updated_at: new Date().toISOString(),
     };
 
-    // undefined 제거
     Object.keys(patch).forEach((k) => patch[k] === undefined && delete patch[k]);
 
     const { data, error } = await supabaseAdmin
@@ -288,15 +263,49 @@ export async function PUT(
   }
 }
 
-export async function DELETE(
-  _req: Request,
-  ctx: { params: Promise<{ id: string }> }
-) {
+export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
     const shipmentId = String(id || "").trim();
     if (!isUuid(shipmentId)) return bad("Invalid shipment id", 400);
 
+    // 0) 존재/미삭제 확인
+    const { data: sh, error: shErr } = await supabaseAdmin
+      .from("shipments")
+      .select("id, is_deleted")
+      .eq("id", shipmentId)
+      .maybeSingle();
+
+    if (shErr) throw new Error(shErr.message);
+    if (!sh) return bad("Shipment not found", 404);
+    if (sh.is_deleted) return bad("Shipment already deleted", 409);
+
+    // 1) ✅ 연결된 Invoice 있으면 삭제 금지 (409)
+    const { data: inv, error: invErr } = await supabaseAdmin
+      .from("invoice_headers")
+      .select("id")
+      .eq("shipment_id", shipmentId)
+      .eq("is_deleted", false)
+      .limit(1);
+
+    if (invErr) throw new Error(invErr.message);
+    if ((inv ?? []).length > 0) {
+      return bad("Cannot delete: linked Invoice exists", 409);
+    }
+
+    // 2) ✅ 라인도 같이 soft-delete (추천)
+    const { error: lnErr } = await supabaseAdmin
+      .from("shipment_lines")
+      .update({
+        is_deleted: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("shipment_id", shipmentId)
+      .eq("is_deleted", false);
+
+    if (lnErr) throw new Error(lnErr.message);
+
+    // 3) 헤더 soft-delete
     const { error } = await supabaseAdmin
       .from("shipments")
       .update({
@@ -304,7 +313,8 @@ export async function DELETE(
         status: "DELETED",
         updated_at: new Date().toISOString(),
       })
-      .eq("id", shipmentId);
+      .eq("id", shipmentId)
+      .eq("is_deleted", false);
 
     if (error) throw new Error(error.message);
     return ok();
