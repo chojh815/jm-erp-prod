@@ -217,6 +217,11 @@ React.useEffect(() => {
   // ----------------------
   const [poNo, setPoNo] = React.useState("");
   const [poHeaderId, setPoHeaderId] = React.useState<string | null>(null);
+
+  // ✅ Track the loaded PO identity to prevent accidental overwrite when PO No changes
+  const loadedPoNoRef = React.useRef<string | null>(null);
+  const loadedHeaderIdRef = React.useRef<string | null>(null);
+
   const [orderType, setOrderType] = React.useState<OrderType>("NEW");
   const [status, setStatus] = React.useState<POStatus>("DRAFT");
 
@@ -1115,6 +1120,8 @@ const fetchPoList = React.useCallback(
   const resetForm = React.useCallback(() => {
     setPoNo("");
     setPoHeaderId(null);
+    loadedPoNoRef.current = null;
+    loadedHeaderIdRef.current = null;
     setOrderType("NEW");
     setStatus("DRAFT");
     setBuyerId("");
@@ -1165,7 +1172,10 @@ const fetchPoList = React.useCallback(
         const header = data.header as any;
 
         // keep header id for UPDATE
-        setPoHeaderId(header?.id ? String(header.id) : null);
+        const _loadedHeaderId = header?.id ? String(header.id) : null;
+        setPoHeaderId(_loadedHeaderId);
+        loadedHeaderIdRef.current = _loadedHeaderId;
+        loadedPoNoRef.current = (header.po_no || "").toString();
         const apiLines = (data.lines as any[]) || [];
 
         setPoNo(header.po_no || "");
@@ -1477,7 +1487,44 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
     resetForm();
   };
 
+  
   // ----------------------
+  // 📄 Duplicate / Save as New
+  // - Keeps current header fields + lines
+  // - Clears poHeaderId so backend creates a NEW header row
+  // ----------------------
+  const handleDuplicateAsNew = async () => {
+    const base = (poNo || "").toString().trim();
+    const suggested =
+      base && !base.toUpperCase().endsWith("S") ? `${base}S` : `${base}-COPY`;
+
+    const nextPoNo = window.prompt("New PO No (Duplicate as New):", suggested);
+    if (!nextPoNo) return;
+
+    // Clear loaded identity so we don't overwrite
+    setPoHeaderId(null);
+    loadedPoNoRef.current = null;
+    loadedHeaderIdRef.current = null;
+
+    setPoNo(nextPoNo.trim());
+    setStatus("DRAFT");
+
+    // Optional: reset line_no sequencing to avoid accidental duplicates
+    setLines((prev) =>
+      (prev || []).map((l: any, idx: number) => ({
+        ...l,
+        // keep UI id, but normalize line numbers
+        lineNo: idx + 1,
+      }))
+    );
+
+    alert(
+      `Duplicated as NEW draft.\n\nNow save to create a new PO: ${nextPoNo.trim()}`
+    );
+  };
+
+
+// ----------------------
   // 🗑️ PO 삭제
   // ----------------------
   const handleDeletePO = async () => {
@@ -1547,10 +1594,26 @@ if (!poNo) {
       console.error("Unexpected error in getUser (onSavePO):", err);
     }
 
+
     // PO No 필수 체크 (빈 문자열 방지)
     if (!poNo || poNo.trim() === "") {
       alert("PO No is required.");
       return;
+    }
+
+    // ✅ Safety: if this page loaded an existing PO and user changed PO No,
+    //    saving would RENAME the existing PO (overwrite). Block unless confirmed.
+    const loadedPoNo = (loadedPoNoRef.current ?? "").toString().trim();
+    const loadedId = (loadedHeaderIdRef.current ?? "").toString().trim();
+    const currentPoNo = poNo.toString().trim();
+
+    if (poHeaderId && loadedId && loadedPoNo && currentPoNo && loadedPoNo !== currentPoNo) {
+      const okRename = window.confirm(
+        `⚠️ You changed PO No from "${loadedPoNo}" to "${currentPoNo}".\n\n` +
+          `If you click OK, this will RENAME the EXISTING PO (ID: ${loadedId}).\n` +
+          `If you want a NEW PO instead, click Cancel and use "Duplicate / Save as New".`
+      );
+      if (!okRename) return;
     }
 
     const toNum = (d: string) => (d ? Number(d.replace(/-/g, "")) : 0);
@@ -3033,6 +3096,16 @@ const canCreateProforma =
                           {saving && status === "DRAFT"
                             ? "Saving..."
                             : "Save as Draft"}
+                        </Button>
+
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="w-full"
+                          disabled={saving}
+                          onClick={handleDuplicateAsNew}
+                        >
+                          Duplicate / Save as New
                         </Button>
                         <Button
                           type="button"

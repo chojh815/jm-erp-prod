@@ -2,7 +2,7 @@
 "use client";
 
 import * as React from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import AppShell from "@/components/layout/AppShell";
 import type { AppRole } from "@/config/menuConfig";
@@ -195,6 +195,7 @@ function groupInvoiceLines(lines: InvoiceLine[]) {
 
 export default function InvoiceDetailPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const params = useParams<{ id: string }>();
   const invoiceId = params?.id;
 
@@ -209,6 +210,14 @@ export default function InvoiceDetailPage() {
   const [header, setHeader] = React.useState<InvoiceHeader | null>(null);
   const [lines, setLines] = React.useState<InvoiceLine[]>([]);
 
+  // ✅ autoPdf=1 처리 (PDF 버튼 의미 분리)
+  // IMPORTANT FIX:
+  // - router.replace()를 PDF 실행 "이후"에 호출해야 함.
+  // - replace를 먼저 호출하면, App Router가 navigation/re-render를 하면서
+  //   setTimeout이 취소되거나 effect가 꼬여 자동 실행이 안 될 수 있음.
+  const autoPdfRequested = (searchParams?.get("autoPdf") || "") === "1";
+  const autoPdfRanRef = React.useRef(false);
+
   React.useEffect(() => {
     setRole("admin");
   }, []);
@@ -219,8 +228,8 @@ export default function InvoiceDetailPage() {
     setErrorMsg(null);
     try {
       const res = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
-  cache: "no-store",
-});
+        cache: "no-store",
+      });
       const json = await res.json().catch(() => null);
 
       if (!res.ok) {
@@ -389,8 +398,8 @@ export default function InvoiceDetailPage() {
     }
   }, [invoiceId, header, lines, recomputeTotal, loadInvoice]);
 
-  // ====== PDF (jsPDF 유지) : ✅ PO별 블록 + ✅ PO Subtotal + ✅ Grand Total + ✅ 도장 하단 고정 + ✅ Page X of Y
-  const handlePdf = React.useCallback(async () => {
+  // ====== PDF (jsPDF 유지)
+  const handlePdf = React.useCallback(async (): Promise<void> => {
     if (!header) return;
 
     setExporting(true);
@@ -522,7 +531,7 @@ export default function InvoiceDetailPage() {
 
       y += cooH + 8;
 
-      // ===== Table (Material/HS는 규칙에 따라 컬럼 ON/OFF)
+      // ===== Table
       const showMatHs = shouldShowMaterialHS(header, lines);
 
       const headBase = ["PO No", "Style No", "Description"];
@@ -532,7 +541,6 @@ export default function InvoiceDetailPage() {
 
       const colCount = head[0].length;
 
-      // ✅ PO별 블록 body + ✅ PO Subtotal row + ✅ Grand Total
       const groups = groupInvoiceLines(lines);
       const body: any[] = [];
 
@@ -541,7 +549,6 @@ export default function InvoiceDetailPage() {
       for (const g of groups) {
         grandTotalCalc += Number(g.poSubtotal || 0);
 
-        // ✅ PO 헤더: PO#만 표시 (위쪽 USD subtotal 완전 제거)
         body.push([
           {
             content: `PO# ${g.poNo}`,
@@ -557,7 +564,6 @@ export default function InvoiceDetailPage() {
           body.push(row);
         }
 
-        // ✅ PO Subtotal row (밑에 1번만) + ✅ 금액에만 USD 붙이기
         body.push([
           {
             content: `PO Subtotal (Qty: ${fmtQty0(g.poQty)})`,
@@ -588,7 +594,7 @@ export default function InvoiceDetailPage() {
 
       const lastTableY = (doc as any).lastAutoTable?.finalY ?? y + 40;
 
-      // ===== Grand Total (테이블 아래)
+      // ===== Grand Total
       let y2 = lastTableY + 10;
       if (y2 > pageHeight - 40) {
         doc.addPage();
@@ -605,16 +611,14 @@ export default function InvoiceDetailPage() {
       doc.text("Grand Total", margin, y2);
       doc.text(`${cur} ${fmtMoney2(grandTotal)}`, pageWidth - margin, y2, { align: "right" });
 
-      // ===== Signed by + Stamp (✅ 가능하면 같은 페이지에, Grand Total 아래에 배치)
+      // ===== Signed by + Stamp
       const stampWidth = 60;
       const stampHeight = 30;
 
-      // "Signed by" + 회사명 텍스트까지 포함한 사인 블록 높이(여유 포함)
       const sigTextTopGap = 6;
       const sigBottomGap = 8;
       const sigBlockH = sigTextTopGap + stampHeight + sigBottomGap + 10;
 
-      // 1) 같은 페이지 우선
       let stampY = y2 + 18;
       const fitsSamePage = stampY + sigBlockH <= pageHeight - 12;
 
@@ -663,6 +667,30 @@ export default function InvoiceDetailPage() {
       setExporting(false);
     }
   }, [header, lines, recomputeTotal]);
+
+  // ✅ autoPdf=1이면 로드 완료 후 자동 PDF 실행 (1회)
+  React.useEffect(() => {
+    if (!autoPdfRequested) return;
+    if (autoPdfRanRef.current) return;
+    if (loading) return;
+    if (!header) return;
+    if (exporting) return;
+
+    autoPdfRanRef.current = true;
+
+    const run = async () => {
+      // 약간 딜레이(렌더 안정)
+      await new Promise((r) => setTimeout(r, 150));
+      await handlePdf();
+
+      // PDF 실행 후 URL에서 autoPdf 제거 (새로고침 반복 방지)
+      if (invoiceId) {
+        router.replace(`/invoices/${encodeURIComponent(invoiceId)}`);
+      }
+    };
+
+    run();
+  }, [autoPdfRequested, loading, header, exporting, invoiceId, router, handlePdf]);
 
   if (loading) {
     return (
@@ -894,7 +922,6 @@ export default function InvoiceDetailPage() {
                   ) : (
                     groupsUI.map((g) => (
                       <React.Fragment key={g.poNo}>
-                        {/* ✅ UI는 PO Subtotal을 헤더에 보여줘도 OK */}
                         <tr className="border-t bg-muted/20">
                           <td className="px-3 py-2 font-semibold" colSpan={showMatHsUI ? 8 : 6}>
                             <div className="flex items-center justify-between gap-3">

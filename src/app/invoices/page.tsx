@@ -160,7 +160,7 @@ export default function InvoicesPage() {
     setRole("admin");
   }, []);
 
-  // ✅ 변경: keyword/buyer/status를 받아 서버 검색 가능하게
+  // ✅ keyword/buyer/status를 받아 서버 검색 가능하게
   const loadInvoiceList = React.useCallback(
     async (keyword?: string, buyer?: string, status?: string) => {
       setLoading(true);
@@ -202,7 +202,7 @@ export default function InvoicesPage() {
     []
   );
 
-  // ✅ 변경: keyword/buyer/status를 받아 서버 검색 가능하게
+  // ✅ keyword/buyer/status를 받아 서버 검색 가능하게
   const loadPackingList = React.useCallback(
     async (keyword?: string, buyer?: string, status?: string) => {
       setLoading(true);
@@ -484,12 +484,6 @@ export default function InvoicesPage() {
     }
   }, []);
 
-  // ✅ Search/Refresh는 현재 필터 값 기준으로 서버 재조회
-  const doSearch = React.useCallback(() => {
-    if (tab === "invoices") loadInvoiceList(invQ, invBuyer, invStatus);
-    else loadPackingList(plQ, plBuyer, plStatus);
-  }, [tab, invQ, invBuyer, invStatus, plQ, plBuyer, plStatus, loadInvoiceList, loadPackingList]);
-
   const doRefresh = React.useCallback(() => {
     if (tab === "invoices") loadInvoiceList(invQ, invBuyer, invStatus);
     else loadPackingList(plQ, plBuyer, plStatus);
@@ -519,7 +513,6 @@ export default function InvoicesPage() {
           <CardContent>
             <TabsContent value="invoices">
               <div className="grid gap-3">
-                {/* ✅ Search / Buyer / Status row */}
                 <div className="grid gap-2">
                   <Label>Search</Label>
 
@@ -536,7 +529,10 @@ export default function InvoicesPage() {
                       }}
                     />
 
-                    <Select value={invBuyer || "ALL"} onValueChange={(v) => setInvBuyer(v === "ALL" ? "" : v)}>
+                    <Select
+                      value={invBuyer || "ALL"}
+                      onValueChange={(v) => setInvBuyer(v === "ALL" ? "" : v)}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Buyer" />
                       </SelectTrigger>
@@ -550,7 +546,10 @@ export default function InvoicesPage() {
                       </SelectContent>
                     </Select>
 
-                    <Select value={invStatus || "ALL"} onValueChange={(v) => setInvStatus(v === "ALL" ? "" : v)}>
+                    <Select
+                      value={invStatus || "ALL"}
+                      onValueChange={(v) => setInvStatus(v === "ALL" ? "" : v)}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Status" />
                       </SelectTrigger>
@@ -642,7 +641,6 @@ export default function InvoicesPage() {
 
             <TabsContent value="packing">
               <div className="grid gap-3">
-                {/* ✅ Search / Buyer / Status row */}
                 <div className="grid gap-2">
                   <Label>Search</Label>
 
@@ -659,7 +657,10 @@ export default function InvoicesPage() {
                       }}
                     />
 
-                    <Select value={plBuyer || "ALL"} onValueChange={(v) => setPlBuyer(v === "ALL" ? "" : v)}>
+                    <Select
+                      value={plBuyer || "ALL"}
+                      onValueChange={(v) => setPlBuyer(v === "ALL" ? "" : v)}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Buyer" />
                       </SelectTrigger>
@@ -673,7 +674,10 @@ export default function InvoicesPage() {
                       </SelectContent>
                     </Select>
 
-                    <Select value={plStatus || "ALL"} onValueChange={(v) => setPlStatus(v === "ALL" ? "" : v)}>
+                    <Select
+                      value={plStatus || "ALL"}
+                      onValueChange={(v) => setPlStatus(v === "ALL" ? "" : v)}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Status" />
                       </SelectTrigger>
@@ -747,8 +751,11 @@ export default function InvoicesPage() {
                               >
                                 Detail
                               </Button>
-                              <Button size="sm" onClick={() => window.open(`/packing-lists/${r.id}?print=1`, "_blank")}
->
+                              {/* ✅ 여기만 통일: 리스트에서 바로 새 탭 열기 (detail 페이지가 autoPdf 감지해서 생성) */}
+                              <Button
+                                size="sm"
+                                onClick={() => window.open(`/packing-lists/${r.id}?autoPdf=1`, "_blank")}
+                              >
                                 PDF
                               </Button>
                             </td>

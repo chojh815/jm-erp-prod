@@ -47,7 +47,7 @@ async function loadInvoiceLines(invoiceId: string) {
   // 1) invoice_id 우선
   const { data: a, error: e1 } = await supabaseAdmin
     .from("invoice_lines")
-    .select("*")
+    .select(`*, po_lines:po_lines ( buyer_style_no, buyer_style_code, jm_style_no, jm_style_code )`)
     .eq("invoice_id", invoiceId)
     .order("po_no", { ascending: true })
     .order("style_no", { ascending: true })
@@ -58,7 +58,7 @@ async function loadInvoiceLines(invoiceId: string) {
   // 2) fallback: invoice_header_id
   const { data: b, error: e2 } = await supabaseAdmin
     .from("invoice_lines")
-    .select("*")
+    .select(`*, po_lines:po_lines ( buyer_style_no, buyer_style_code, jm_style_no, jm_style_code )`)
     .eq("invoice_header_id", invoiceId)
     .order("po_no", { ascending: true })
     .order("style_no", { ascending: true })
@@ -73,6 +73,24 @@ function computeTotalAmount(lines: any[]) {
   return alive.reduce((sum, l) => sum + n(l.amount, n(l.qty) * n(l.unit_price)), 0);
 }
 
+function pickStyleNo(line: any) {
+  // buyer_style_no 우선, 없으면 buyer_style_code, 없으면 jm_style_no/jm_style_code, 마지막으로 기존 style_no
+  const p = line?.po_lines ?? {};
+  const candidates = [
+    p.buyer_style_no,
+    p.buyer_style_code,
+    p.jm_style_no,
+    p.jm_style_code,
+    line?.style_no,
+  ];
+  for (const v of candidates) {
+    const s = (v ?? "").toString().trim();
+    if (s) return s;
+  }
+  return "-";
+}
+
+
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
@@ -81,7 +99,13 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     const header = await loadInvoiceHeader(id);
     if (!header) return bad("Invoice not found", 404);
 
-    const lines = await loadInvoiceLines(id);
+    let lines = await loadInvoiceLines(id);
+
+    // ✅ display용 Style No = Buyer Style No 우선
+    lines = (lines || []).map((l: any) => ({
+      ...(l ?? {}),
+      style_no: pickStyleNo(l),
+    }));
 
     // total_amount가 비어있거나 0이면 lines로 계산해서 내려줌(화면 표시 안정)
     const computed = computeTotalAmount(lines);
@@ -194,7 +218,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
             po_no: x.po_no ?? null,
             line_no: x.line_no ?? null,
-            style_no: x.style_no ?? null,
+            style_no: x.style_no && x.style_no !== "-" ? x.style_no : null,
             description: x.description ?? null,
 
             material_content: x.material_content ?? null,

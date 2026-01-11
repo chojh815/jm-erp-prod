@@ -193,16 +193,46 @@ export async function POST(req: Request) {
     const headerIdFromClient = pickStr(headerIn, ["id", "header_id", "headerId"]);
     const headerId = headerIdFromClient && isUuid(headerIdFromClient) ? headerIdFromClient : undefined;
 
-    // Load existing header by po_no to decide create vs update (and for confirmed_at handling)
-    const { data: existingHeader, error: exErr } = await supabaseAdmin
-      .from("po_headers")
-      .select("id, confirmed_at")
-      .eq("po_no", poNo)
-      .eq("is_deleted", false)
-      .maybeSingle();
-    if (exErr) throw exErr;
+    // Load existing header:
+// - if client sent id => treat as UPDATE by id (and forbid po_no change)
+// - else => treat as CREATE by po_no (exact match). If po_no already exists, reject to prevent overwrite.
+let existingHeader: any = null;
 
-    const effectiveHeaderId = headerId ?? (existingHeader?.id as string | undefined);
+if (headerId) {
+  const { data: byId, error: byIdErr } = await supabaseAdmin
+    .from("po_headers")
+    .select("id, po_no, confirmed_at")
+    .eq("id", headerId)
+    .maybeSingle();
+  if (byIdErr) throw byIdErr;
+  existingHeader = byId;
+
+  if (!existingHeader?.id) return bad("PO not found (invalid header id)", 404);
+
+  const existingPoNo = str((existingHeader as any).po_no);
+  if (existingPoNo && existingPoNo !== poNo) {
+    return bad(
+      `PO No cannot be changed from ${existingPoNo} to ${poNo}. Use 'Copy as New PO' instead.`,
+      409
+    );
+  }
+} else {
+  const { data: byPo, error: byPoErr } = await supabaseAdmin
+    .from("po_headers")
+    .select("id, po_no, confirmed_at")
+    .eq("po_no", poNo)
+    .eq("is_deleted", false)
+    .maybeSingle();
+  if (byPoErr) throw byPoErr;
+  existingHeader = byPo;
+
+  if (existingHeader?.id) {
+    return bad("PO No already exists. Open it and edit, or use 'Copy as New PO'.", 409);
+  }
+}
+
+const effectiveHeaderId = headerId ?? undefined;
+
 
     // Snapshot brand/dept
     const buyerBrandName = str(
@@ -301,27 +331,35 @@ export async function POST(req: Request) {
       headerRow.confirmed_at = new Date().toISOString();
     }
 
-    // Upsert header
-    let savedHeader: any;
-    let duplicatePoNoUpdated = false;
+    // Save header
+let savedHeader: any;
 
-    if (effectiveHeaderId) {
-      savedHeader = await updateById("po_headers", effectiveHeaderId, headerRow);
-    } else {
-      if (existingHeader?.id) {
-        // If a header already exists for this PO No, treat this as update to avoid "duplicate" failures.
-        savedHeader = await updateById("po_headers", existingHeader.id, { ...headerRow, id: undefined });
-        duplicatePoNoUpdated = true;
-      } else {
-        savedHeader = await upsertByConflict("po_headers", headerRow, "po_no");
-      }
-    }
+if (effectiveHeaderId) {
+  // UPDATE by id (po_no change already blocked above)
+  savedHeader = await updateById("po_headers", effectiveHeaderId, { ...headerRow, id: undefined });
+} else {
+  // CREATE new (po_no duplicate already blocked above)
+  savedHeader = await upsertByConflict("po_headers", headerRow, "po_no");
+}
 
-    const poHeaderId = savedHeader?.id as string | undefined;
+const poHeaderId = savedHeader?.id as string | undefined;
     if (!poHeaderId) return bad("Saved header but missing id", 500);
 
     // Lines: upsert by line_no (keep existing image urls if UI didn't send)
-    const lines = Array.isArray(linesIn) ? linesIn : [];
+    // Lines: update/insert by (id if provided) else by line_no.
+// To avoid accidental overwrites when payload contains duplicate/invalid line_no,
+// we normalize line numbers to be unique (fallback to sequential 1..N).
+const linesRaw = Array.isArray(linesIn) ? linesIn : [];
+const lines = linesRaw.map((x: any) => x ?? {});
+
+const parsedLineNos = lines.map((ln: any, i: number) => {
+  const n = Number(ln?.line_no ?? ln?.lineNo);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : i + 1;
+});
+const hasDupLineNo = new Set(parsedLineNos).size !== parsedLineNos.length;
+const useSequentialLineNo = hasDupLineNo;
+
+
 
     // Load existing ACTIVE lines for this header (keyed by line_no)
     const { data: existingActiveLines, error: linesErr } = await supabaseAdmin
@@ -342,7 +380,7 @@ export async function POST(req: Request) {
 
     for (let i = 0; i < lines.length; i++) {
       const ln: any = lines[i] || {};
-      const lineNo = (num(ln.line_no ?? ln.lineNo ?? i + 1, i + 1) as number) ?? i + 1;
+      const lineNo = useSequentialLineNo ? i + 1 : ((num(ln.line_no ?? ln.lineNo ?? i + 1, i + 1) as number) ?? i + 1);
 
       const existing = byLineNo.get(lineNo);
 
@@ -454,7 +492,6 @@ export async function POST(req: Request) {
       po_no: savedHeader.po_no ?? poNo,
       poNo: savedHeader.po_no ?? poNo,
       status: savedHeader.status ?? status,
-      duplicate_po_no_updated: duplicatePoNoUpdated,
     });
   } catch (e: any) {
     const msg = e?.message || String(e);

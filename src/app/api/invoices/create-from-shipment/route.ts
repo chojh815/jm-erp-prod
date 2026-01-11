@@ -223,7 +223,19 @@ export async function POST(req: Request) {
     // 5) shipment lines
     const { data: shipLines, error: slErr } = await supabaseAdmin
       .from("shipment_lines")
-      .select("*")
+      .select(`
+        *,
+        po_lines:po_lines (
+          buyer_style_no,
+          buyer_style_code,
+          jm_style_no,
+          jm_style_code,
+          plating_color,
+          color,
+          size,
+          description
+        )
+      `)
       .eq("shipment_id", shipmentId)
       .or("is_deleted.is.null,is_deleted.eq.false")
       .order("line_no", { ascending: true });
@@ -318,10 +330,10 @@ export async function POST(req: Request) {
       po_no: l.po_no ?? null,
 
       line_no: l.line_no ?? null,
-      style_no: l.style_no ?? null,
-      description: l.description ?? null,
-      color: l.color ?? null,
-      size: l.size ?? null,
+      style_no: pickStyleNo(l),
+      description: (l.description ?? l.po_lines?.description ?? null),
+      color: (l.color ?? l.po_lines?.plating_color ?? l.po_lines?.color ?? null),
+      size: (l.size ?? l.po_lines?.size ?? null),
 
       qty: safeNumber(l.shipped_qty),
       unit_price: safeNumber(l.unit_price),

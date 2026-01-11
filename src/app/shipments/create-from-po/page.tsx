@@ -92,6 +92,15 @@ function commonOrMixed(values: Array<string | null | undefined>) {
   return same ? first : "MIXED";
 }
 
+function originCodeToCooText(code: string | null | undefined) {
+  const v = safeStr(code).toUpperCase();
+  if (!v) return "";
+  if (v.startsWith("VN_")) return "MADE IN VIETNAM";
+  if (v.startsWith("CN_")) return "MADE IN CHINA";
+  if (v.startsWith("KR_")) return "MADE IN KOREA";
+  return "";
+}
+
 export default function CreateShipmentFromPOPage() {
   const router = useRouter();
 
@@ -487,6 +496,7 @@ export default function CreateShipmentFromPOPage() {
   const commonPay = commonOrMixed(selectedPos.map((p) => p.payment_term));
   const commonDest = commonOrMixed(selectedPos.map((p) => p.destination));
   const commonOrigin = commonOrMixed(selectedPos.map((p) => p.shipping_origin_code));
+  const commonCoo = originCodeToCooText(commonOrigin) || "-";
   const commonShipDate = commonOrMixed(selectedPos.map((p) => p.requested_ship_date));
 
   return (
@@ -651,6 +661,10 @@ export default function CreateShipmentFromPOPage() {
               <div>
                 <div className="font-semibold">Shipping Origin</div>
                 <div>{commonOrigin}</div>
+              </div>
+              <div>
+                <div className="font-semibold">COO</div>
+                <div>{commonCoo}</div>
               </div>
             </div>
           ) : (

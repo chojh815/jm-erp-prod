@@ -944,10 +944,15 @@ export default function PackingListDetailPage() {
     }
   }, [header, lines, totals, invoiceLink]);
 
-  // ✅ Auto PDF/Print when opened with ?print=1 (open from list page)
+  // ✅ Auto PDF/Print when opened with ?print=1 OR ?autoPdf=1
+  // - print=1   → generate + open print dialog
+  // - autoPdf=1 → just generate PDF (no auto print)
   React.useEffect(() => {
     const p = searchParams?.get("print");
-    if (p !== "1") return;
+    const ap = searchParams?.get("autoPdf");
+    const shouldAuto = p === "1" || ap === "1";
+    if (!shouldAuto) return;
+
     if (loading) return;
     if (!header) return;
     if (printedRef.current) return;
@@ -955,7 +960,8 @@ export default function PackingListDetailPage() {
     printedRef.current = true;
 
     const t = window.setTimeout(() => {
-      handlePdf(true);
+      // print=1 일때만 자동 프린트, autoPdf=1은 저장만
+      handlePdf(p === "1");
     }, 250);
 
     return () => window.clearTimeout(t);

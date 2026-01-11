@@ -1,815 +1,703 @@
-// src/app/shipments/create/page.tsx
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-
 import AppShell from "@/components/layout/AppShell";
 import type { AppRole } from "@/config/menuConfig";
 import { createSupabaseBrowserClient } from "@/lib/supabaseClient";
 
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Separator } from "@/components/ui/separator";
-import { Switch } from "@/components/ui/switch";
 
 type DevRole = AppRole;
 
-// 숫자 안전 변환
-const safeNumber = (v: any, fallback = 0): number => {
+type ShipMode = "SEA" | "AIR" | "COURIER";
+
+function safe(v: any) {
+  return (v ?? "").toString().trim();
+}
+function num(v: any, fallback = 0) {
   if (v === null || v === undefined || v === "") return fallback;
   const n = Number(v);
-  if (Number.isNaN(n)) return fallback;
-  return n;
-};
-
-interface PoListItem {
-  id: string;
-  po_no: string | null;
-  buyer_name: string | null;
-  currency: string | null;
-  order_date: string | null;
-  status: string | null;
+  return Number.isFinite(n) ? n : fallback;
+}
+function money(v: any, currency = "USD") {
+  const n = num(v, 0);
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: currency || "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+function normalizeMode(v: any): ShipMode {
+  const s = safe(v).toUpperCase();
+  if (s.includes("AIR")) return "AIR";
+  if (s.includes("COURIER") || s.includes("DHL") || s.includes("FEDEX") || s.includes("UPS"))
+    return "COURIER";
+  // default SEA
+  return "SEA";
+}
+function pickFirst(obj: any, keys: string[]) {
+  for (const k of keys) {
+    const val = obj?.[k];
+    if (val !== null && val !== undefined && safe(val) !== "") return val;
+  }
+  return "";
 }
 
-interface ShipmentHeaderForm {
-  id?: string | null;
-  shipment_no?: string | null;
-  po_header_id: string | null;
-  po_no: string | null;
-  buyer_id: string | null;
-  buyer_name: string | null;
-  currency: string | null;
-  incoterm: string | null;
-  payment_term: string | null;
-  shipping_origin_code: string | null;
-  destination: string | null;
-  etd: string | null;
-  eta: string | null;
-  status: string | null;
-  // 합계(자동/수동 겸용)
-  total_cartons?: number | null;
-  total_gw?: number | null;
-  total_nw?: number | null;
-}
+type PoHeader = any;
+type PoLine = any;
 
-interface ShipmentLineForm {
-  po_line_id: string | null;
-  line_no: number;
-  style_no: string | null;
-  description: string | null;
-  color: string | null;
-  size: string | null;
-  // 이번 선적에 사용 가능한 남은 수량
+type AllocationRow = {
+  id: string; // client local id
+  po_id: string;
+  po_no: string;
+  po_line_id: string;
+  line_no: number | null;
+
+  style_no: string;
+  description: string;
+  color: string;
+  size: string;
+
   order_qty: number;
-  // 실제 선적 수량 (0이면 이번 선적에서 제외)
   shipped_qty: number;
+
   unit_price: number;
   amount: number;
+
   cartons: number;
-  gw: number;
-  nw: number;
-  // 참고용
-  ordered_total_qty?: number;
-  shipped_so_far?: number;
+  gw_per_ctn: number;
+  nw_per_ctn: number;
+
+  include: boolean;
+
+  ship_mode: ShipMode;
+  carrier: string;
+  tracking_no: string;
+};
+
+function uid() {
+  return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
-export default function ShipmentCreatePage() {
-  const router = useRouter();
+export default function ShipmentsCreateFromPoPage() {
+  const role: DevRole = "admin" as any; // keep consistent with your other pages
   const supabase = React.useMemo(() => createSupabaseBrowserClient(), []);
 
-  const [role] = React.useState<DevRole>("admin");
-
-  // STEP 1: PO 선택
-  const [poLoading, setPoLoading] = React.useState(true);
-  const [poError, setPoError] = React.useState<string | null>(null);
-  const [poItems, setPoItems] = React.useState<PoListItem[]>([]);
-  const [poKeyword, setPoKeyword] = React.useState("");
-  const [selectedPoId, setSelectedPoId] = React.useState<string | null>(null);
-
-  // STEP 2: Shipment 데이터
-  const [header, setHeader] = React.useState<ShipmentHeaderForm | null>(null);
-  const [lines, setLines] = React.useState<ShipmentLineForm[]>([]);
-  const [shipmentError, setShipmentError] = React.useState<string | null>(null);
-  const [shipmentLoading, setShipmentLoading] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
 
-  // 합계 모드: true = 라인 합계 자동계산, false = 수동입력
-  const [autoTotals, setAutoTotals] = React.useState(true);
+  // PO list
+  const [poKeyword, setPoKeyword] = React.useState("");
+  const [poHeaders, setPoHeaders] = React.useState<PoHeader[]>([]);
+  const [selectedPoIds, setSelectedPoIds] = React.useState<string[]>([]);
 
-  // =========================
-  // 1) PO 리스트 로드
-  // =========================
-  React.useEffect(() => {
-    const run = async () => {
-      try {
-        setPoLoading(true);
-        setPoError(null);
+  // Loaded details
+  const [selectedHeaders, setSelectedHeaders] = React.useState<PoHeader[]>([]);
+  const [allocs, setAllocs] = React.useState<AllocationRow[]>([]);
 
-        const { data, error } = await supabase
-          .from("po_headers")
-          .select("id, po_no, buyer_name, currency, order_date, status")
-          .order("created_at", { ascending: false })
-          .limit(200);
+  const selectedBuyerId = React.useMemo(() => {
+    const h = selectedHeaders?.[0];
+    return (
+      pickFirst(h, ["buyer_company_id", "buyer_id", "company_id"]) || ""
+    );
+  }, [selectedHeaders]);
 
+  // ---- Load PO headers (CONFIRMED only if column exists) ----
+  const loadPoList = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      // Try to filter by status/is_deleted if columns exist (fallback safely)
+      let q = supabase.from("po_headers").select("*").order("created_at", { ascending: false }).limit(500);
+
+      // best-effort: apply is_deleted=false if exists (ignore errors by retry)
+      const tryRun = async (qq: any) => {
+        const { data, error } = await qq;
         if (error) throw error;
-        setPoItems((data || []) as PoListItem[]);
-      } catch (err: any) {
-        console.error("[ShipmentCreate] PO load error:", err);
-        setPoError(
-          err.message || "PO 리스트를 불러오는 중 오류가 발생했습니다."
-        );
-      } finally {
-        setPoLoading(false);
+        return data ?? [];
+      };
+
+      try {
+        const data = await tryRun(q.eq("is_deleted", false));
+        setPoHeaders(data);
+        return;
+      } catch {}
+
+      try {
+        const data = await tryRun(q);
+        setPoHeaders(data);
+      } catch (e: any) {
+        console.error(e);
+        alert(`PO list load failed: ${e?.message ?? e}`);
       }
-    };
-    run();
+    } finally {
+      setLoading(false);
+    }
   }, [supabase]);
 
-  const filteredPoItems = React.useMemo(() => {
-    if (!poKeyword.trim()) return poItems;
-    const lower = poKeyword.trim().toLowerCase();
-    return poItems.filter((po) => {
-      const poNo = po.po_no?.toLowerCase() ?? "";
-      const buyer = po.buyer_name?.toLowerCase() ?? "";
-      const status = po.status?.toLowerCase() ?? "";
-      return (
-        poNo.includes(lower) || buyer.includes(lower) || status.includes(lower)
-      );
+  React.useEffect(() => {
+    loadPoList();
+  }, [loadPoList]);
+
+  const filteredPoHeaders = React.useMemo(() => {
+    const kw = safe(poKeyword).toUpperCase();
+    if (!kw) return poHeaders;
+    return poHeaders.filter((h) => {
+      const poNo = safe(pickFirst(h, ["po_no", "poNo"])).toUpperCase();
+      const buyer = safe(pickFirst(h, ["buyer_name", "buyerName"])).toUpperCase();
+      const brand = safe(pickFirst(h, ["buyer_brand_name", "brand"])).toUpperCase();
+      return poNo.includes(kw) || buyer.includes(kw) || brand.includes(kw);
     });
-  }, [poItems, poKeyword]);
+  }, [poHeaders, poKeyword]);
 
-  // =========================
-  // 2) 선택한 PO 기준 Shipment 초안 호출
-  // =========================
-  const loadShipmentFromPo = async (poId: string) => {
-    try {
-      setSelectedPoId(poId);
-      setShipmentLoading(true);
-      setShipmentError(null);
+  const togglePo = (po_id: string, checked: boolean) => {
+    setSelectedPoIds((prev) => {
+      if (checked) return prev.includes(po_id) ? prev : [...prev, po_id];
+      return prev.filter((x) => x !== po_id);
+    });
+  };
 
-      const res = await fetch("/api/shipments/from-po", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ poHeaderId: poId }),
-      });
-
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        throw new Error(json.error || "Shipment용 PO 로딩 중 오류");
+  // When selection changes: load headers + lines
+  React.useEffect(() => {
+    (async () => {
+      if (selectedPoIds.length === 0) {
+        setSelectedHeaders([]);
+        setAllocs([]);
+        return;
       }
+      setLoading(true);
+      try {
+        const { data: headers, error: hErr } = await supabase
+          .from("po_headers")
+          .select("*")
+          .in("id", selectedPoIds);
 
-      const fromApiHeader = json.shipmentHeader;
-      const fromApiLines = json.shipmentLines || [];
+        if (hErr) throw hErr;
 
-      const headerForm: ShipmentHeaderForm = {
-        id: null,
-        shipment_no: null,
-        po_header_id: fromApiHeader.po_header_id ?? null,
-        po_no: fromApiHeader.po_no ?? null,
-        buyer_id: fromApiHeader.buyer_id ?? null,
-        buyer_name: fromApiHeader.buyer_name ?? null,
-        currency: fromApiHeader.currency ?? null,
-        incoterm: fromApiHeader.incoterm ?? null,
-        payment_term: fromApiHeader.payment_term ?? null,
-        shipping_origin_code: fromApiHeader.shipping_origin_code ?? null,
-        destination: fromApiHeader.destination ?? null,
-        etd: null,
-        eta: null,
-        status: "DRAFT",
-        total_cartons: 0,
-        total_gw: 0,
-        total_nw: 0,
-      };
-
-      const lineForms: ShipmentLineForm[] = fromApiLines.map(
-        (line: any, idx: number) => {
-          const remaining = safeNumber(line.order_qty);
-          const unitPrice = safeNumber(line.unit_price);
-
-          return {
-            po_line_id: line.po_line_id ?? line.id ?? null,
-            line_no: line.line_no ?? idx + 1,
-            style_no: line.style_no ?? null,
-            description: line.description ?? null,
-            color: line.color ?? null,
-            size: line.size ?? null,
-            order_qty: remaining, // 이번 선적 가능 수량
-            shipped_qty: remaining, // 기본값: 전량
-            unit_price: unitPrice,
-            amount: remaining * unitPrice,
-            cartons: 0,
-            gw: 0,
-            nw: 0,
-            ordered_total_qty: safeNumber(line.ordered_total_qty),
-            shipped_so_far: safeNumber(line.shipped_so_far),
-          };
+        const hs = headers ?? [];
+        // Enforce "same buyer" rule
+        const buyerKey = pickFirst(hs[0], ["buyer_company_id", "buyer_id", "company_id"]);
+        const allSameBuyer = hs.every((x) => {
+          const b = pickFirst(x, ["buyer_company_id", "buyer_id", "company_id"]);
+          return safe(b) === safe(buyerKey);
+        });
+        if (!allSameBuyer) {
+          alert("한 Shipment에는 같은 Buyer의 PO만 선택 가능합니다. (Different Buyer detected)");
+          setSelectedPoIds([hs[0]?.id].filter(Boolean));
+          return;
         }
-      );
 
-      setHeader(headerForm);
-      setLines(lineForms);
-    } catch (err: any) {
-      console.error("[ShipmentCreate] loadShipmentFromPo error:", err);
-      setShipmentError(
-        err.message || "Shipment 초안 생성 중 오류가 발생했습니다."
-      );
-      setHeader(null);
-      setLines([]);
-    } finally {
-      setShipmentLoading(false);
+        setSelectedHeaders(hs);
+
+        const { data: lines, error: lErr } = await supabase
+          .from("po_lines")
+          .select("*")
+          .in("po_header_id", selectedPoIds);
+
+        if (lErr) throw lErr;
+
+        const headerMode = normalizeMode(pickFirst(hs[0], ["ship_mode", "shipMode", "shipmode"]));
+
+        const rows: AllocationRow[] = (lines ?? [])
+          .filter((ln) => {
+            const isDel = ln?.is_deleted;
+            return isDel === undefined ? true : isDel === false;
+          })
+          .map((ln: PoLine) => {
+            const po_id = ln.po_header_id;
+            const header = hs.find((x) => x.id === po_id);
+            const po_no = pickFirst(header, ["po_no", "poNo"]);
+            const mode = normalizeMode(pickFirst(ln, ["ship_mode", "shipMode"]) || pickFirst(header, ["ship_mode", "shipMode"]) || headerMode);
+
+            const orderQty = num(pickFirst(ln, ["qty", "order_qty", "orderQty"]), 0);
+            const unitPrice = num(pickFirst(ln, ["unit_price", "unitPrice"]), 0);
+            const amt = num(pickFirst(ln, ["amount"]), orderQty * unitPrice);
+
+            const style = pickFirst(ln, ["buyer_style_no", "buyer_style_code", "style_no", "jm_style_no", "jm_style_code"]);
+
+            return {
+              id: uid(),
+              po_id,
+              po_no: safe(po_no),
+              po_line_id: ln.id,
+              line_no: ln.line_no ?? null,
+              style_no: safe(style),
+              description: safe(pickFirst(ln, ["description"])),
+              color: safe(pickFirst(ln, ["color"])),
+              size: safe(pickFirst(ln, ["size"])),
+              order_qty: orderQty,
+              shipped_qty: orderQty,
+              unit_price: unitPrice,
+              amount: amt,
+              cartons: 0,
+              gw_per_ctn: 0,
+              nw_per_ctn: 0,
+              include: true,
+              ship_mode: mode,
+              carrier: "",
+              tracking_no: "",
+            };
+          });
+
+        // sort stable: PO -> line_no
+        rows.sort((a, b) => {
+          if (a.po_no !== b.po_no) return a.po_no.localeCompare(b.po_no);
+          return (a.line_no ?? 0) - (b.line_no ?? 0);
+        });
+
+        setAllocs(rows);
+      } catch (e: any) {
+        console.error(e);
+        alert(`Load failed: ${e?.message ?? e}`);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [selectedPoIds, supabase]);
+
+  const summary = React.useMemo(() => {
+    const inc = allocs.filter((r) => r.include && num(r.shipped_qty, 0) > 0);
+    const totalCartons = inc.reduce((acc, r) => acc + num(r.cartons, 0), 0);
+    const totalGW = inc.reduce((acc, r) => acc + num(r.cartons, 0) * num(r.gw_per_ctn, 0), 0);
+    const totalNW = inc.reduce((acc, r) => acc + num(r.cartons, 0) * num(r.nw_per_ctn, 0), 0);
+    const currency = safe(pickFirst(selectedHeaders?.[0], ["currency"])) || "USD";
+    const totalAmount = inc.reduce((acc, r) => acc + num(r.shipped_qty, 0) * num(r.unit_price, 0), 0);
+
+    const byMode: Record<ShipMode, { qty: number; amount: number }> = {
+      SEA: { qty: 0, amount: 0 },
+      AIR: { qty: 0, amount: 0 },
+      COURIER: { qty: 0, amount: 0 },
+    };
+    for (const r of inc) {
+      const m = r.ship_mode;
+      byMode[m].qty += num(r.shipped_qty, 0);
+      byMode[m].amount += num(r.shipped_qty, 0) * num(r.unit_price, 0);
     }
+
+    return { totalCartons, totalGW, totalNW, totalAmount, currency, byMode };
+  }, [allocs, selectedHeaders]);
+
+  const updateAlloc = (id: string, patch: Partial<AllocationRow>) => {
+    setAllocs((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   };
 
-  // =========================
-  // 공통 핸들러
-  // =========================
-  const handleHeaderChange = (
-    field: keyof ShipmentHeaderForm,
-    value: string
-  ) => {
-    setHeader((prev) => {
-      if (!prev) return prev;
+  const splitRow = (id: string) => {
+    const row = allocs.find((r) => r.id === id);
+    if (!row) return;
 
-      if (
-        field === "total_cartons" ||
-        field === "total_gw" ||
-        field === "total_nw"
-      ) {
-        const num = safeNumber(value, 0);
-        return { ...prev, [field]: num };
-      }
+    const max = num(row.shipped_qty, 0);
+    if (max <= 0) {
+      alert("Shipped Qty가 0이면 split 할 수 없습니다.");
+      return;
+    }
+    const input = window.prompt(`Split qty (0 ~ ${max})`, String(Math.floor(max / 2)));
+    if (input === null) return;
 
-      return {
-        ...prev,
-        [field]: value === "" ? null : value,
-      };
-    });
-  };
+    const splitQty = num(input, NaN as any);
+    if (!Number.isFinite(splitQty) || splitQty <= 0 || splitQty >= max) {
+      alert("Invalid split qty");
+      return;
+    }
 
-  const handleLineChange = (
-    index: number,
-    field: keyof ShipmentLineForm,
-    value: string
-  ) => {
-    setLines((prev) => {
-      const next = [...prev];
-      const target = { ...next[index] };
+    // current row becomes splitQty, new row is remainder
+    const remain = max - splitQty;
 
-      if (
-        field === "order_qty" ||
-        field === "shipped_qty" ||
-        field === "unit_price" ||
-        field === "cartons" ||
-        field === "gw" ||
-        field === "nw"
-      ) {
-        const numValue = safeNumber(value, 0);
-        (target as any)[field] = numValue;
-
-        if (field === "shipped_qty" || field === "unit_price") {
-          const qty =
-            field === "shipped_qty" ? numValue : safeNumber(target.shipped_qty);
-          const price =
-            field === "unit_price" ? numValue : safeNumber(target.unit_price);
-          target.amount = qty * price;
+    setAllocs((prev) => {
+      const next: AllocationRow[] = [];
+      for (const r of prev) {
+        if (r.id !== id) {
+          next.push(r);
+          continue;
         }
-      } else {
-        (target as any)[field] = value === "" ? null : value;
+        next.push({ ...r, shipped_qty: splitQty });
+        next.push({
+          ...r,
+          id: uid(),
+          shipped_qty: remain,
+          // keep same line_no but visually it is a split allocation
+        });
       }
-
-      next[index] = target;
       return next;
     });
   };
 
-  // shipped_qty > 0 인 라인만 이번 선적에 포함
-  const effectiveLines = React.useMemo(
-    () => lines.filter((l) => l.shipped_qty > 0),
-    [lines]
-  );
+  const removeRow = (id: string) => {
+    setAllocs((prev) => prev.filter((r) => r.id !== id));
+  };
 
-  // 라인 기준 자동 합계
-  const autoTotalsValue = React.useMemo(() => {
-    let cartons = 0;
-    let gw = 0;
-    let nw = 0;
-    effectiveLines.forEach((l) => {
-      cartons += l.cartons || 0;
-      gw += l.gw || 0;
-      nw += l.nw || 0;
-    });
-    return { cartons, gw, nw };
-  }, [effectiveLines]);
-
-  // Auto 모드일 때만 header.total_* 을 자동합계로 동기화
-  // header 를 dependency에 넣지 않고, prev 값 비교해서 필요할 때만 업데이트
-  React.useEffect(() => {
-    if (!autoTotals) return;
-
-    setHeader((prev) => {
-      if (!prev) return prev;
-
-      const same =
-        (prev.total_cartons ?? 0) === autoTotalsValue.cartons &&
-        (prev.total_gw ?? 0) === autoTotalsValue.gw &&
-        (prev.total_nw ?? 0) === autoTotalsValue.nw;
-
-      if (same) return prev;
-
-      return {
-        ...prev,
-        total_cartons: autoTotalsValue.cartons,
-        total_gw: autoTotalsValue.gw,
-        total_nw: autoTotalsValue.nw,
-      };
-    });
-  }, [autoTotals, autoTotalsValue]);
-
-  const handleSave = async () => {
-    if (!header) return;
-    if (effectiveLines.length === 0) {
-      alert("선적 수량이 0인 스타일만 있어서 저장할 수 없습니다.");
+  const save = async () => {
+    const po_ids = selectedHeaders.map((h) => h.id).filter(Boolean);
+    if (po_ids.length === 0) {
+      alert("PO를 선택하세요.");
       return;
     }
 
+    const lines = allocs
+      .filter((r) => r.include && num(r.shipped_qty, 0) > 0)
+      .map((r) => ({
+        po_id: r.po_id,
+        po_line_id: r.po_line_id,
+        shipped_qty: num(r.shipped_qty, 0),
+        ship_mode: r.ship_mode,
+        carrier: safe(r.carrier),
+        tracking_no: safe(r.tracking_no),
+      }));
+
+    if (lines.length === 0) {
+      alert("출고할 라인이 없습니다. (Shipped Qty > 0 필요)");
+      return;
+    }
+
+    setSaving(true);
     try {
-      setSaving(true);
-      setShipmentError(null);
-
-      const payload = {
-        shipmentHeader: header,
-        shipmentLines: effectiveLines,
-      };
-
-      const res = await fetch("/api/shipments", {
+      const res = await fetch("/api/shipments/create-from-po", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ po_ids, lines }),
       });
-
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        throw new Error(json.error || "Shipment 저장 중 오류 발생");
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `HTTP ${res.status}`);
       }
 
-      alert(`Shipment 저장 완료\nNo: ${json.shipmentNo}`);
-      router.push("/shipments");
-    } catch (err: any) {
-      console.error("[ShipmentCreate] save error:", err);
-      setShipmentError(err.message || "Shipment 저장 중 오류가 발생했습니다.");
+      const created = json?.created ?? [];
+      const ids = created.map((x: any) => x.shipment_id).filter(Boolean);
+
+      alert(`Saved. Created Shipment(s): ${created.length}`);
+      // After create, go to first shipment detail if you want:
+      if (ids.length === 1) {
+        window.location.href = `/shipments/${ids[0]}`;
+      } else if (ids.length > 1) {
+        // stay; user can see list
+        // reload PO list maybe
+      }
+    } catch (e: any) {
+      console.error(e);
+      alert(`Save failed: ${e?.message ?? e}`);
     } finally {
       setSaving(false);
     }
   };
 
-  // =========================
-  // 렌더
-  // =========================
+  const header0 = selectedHeaders?.[0] ?? null;
+  const buyerName = safe(pickFirst(header0, ["buyer_name", "buyerName"]));
+  const currency = safe(pickFirst(header0, ["currency"])) || "USD";
+  const shipDate = safe(pickFirst(header0, ["requested_ship_date", "ship_date", "shipDate"]));
+  const incoterm = safe(pickFirst(header0, ["incoterm"]));
+  const paymentTerm = safe(pickFirst(header0, ["payment_term", "paymentTerm"]));
+  const destination = safe(pickFirst(header0, ["final_destination", "destination"]));
+  const shippingOrigin = safe(pickFirst(header0, ["shipping_origin", "origin"]));
+
   return (
-    <AppShell currentRole={role}>
-      <div className="p-6 space-y-6">
-        {/* STEP 1: PO 선택 */}
+    <AppShell role={role} title="Shipments" description="Create Shipment from PO (A-plan: split by mode)">
+      <div className="space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle>1. Select PO for Shipment</CardTitle>
+            <CardTitle>1. Select PO(s)</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="flex flex-col md:flex-row gap-3 items-end">
-              <div className="flex-1">
-                <Label className="block mb-1">Search PO</Label>
-                <Input
-                  placeholder="PO No / Buyer / Status"
-                  value={poKeyword}
-                  onChange={(e) => setPoKeyword(e.target.value)}
-                />
-              </div>
+            <div className="flex items-center gap-2">
+              <Input
+                value={poKeyword}
+                onChange={(e) => setPoKeyword(e.target.value)}
+                placeholder="Search PO / Buyer / Brand..."
+              />
+              <Button variant="secondary" onClick={loadPoList} disabled={loading}>
+                Refresh
+              </Button>
             </div>
 
-            {poLoading ? (
-              <div className="py-4">Loading PO...</div>
-            ) : poError ? (
-              <div className="py-3 text-sm text-red-600 border border-red-300 bg-red-50 rounded-md px-3">
-                {poError}
-              </div>
-            ) : (
-              <div className="overflow-x-auto max-h-80 border rounded-md">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="border px-2 py-1">PO No</th>
-                      <th className="border px-2 py-1">Buyer</th>
-                      <th className="border px-2 py-1">Order Date</th>
-                      <th className="border px-2 py-1">Currency</th>
-                      <th className="border px-2 py-1">Status</th>
-                      <th className="border px-2 py-1 w-24">Select</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredPoItems.length === 0 ? (
-                      <tr>
-                        <td
-                          className="border px-2 py-4 text-center text-gray-500"
-                          colSpan={6}
-                        >
-                          해당 조건의 PO가 없습니다.
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredPoItems.map((po) => (
-                        <tr key={po.id} className="border-t">
-                          <td className="border px-2 py-1">{po.po_no ?? "-"}</td>
-                          <td className="border px-2 py-1">
-                            {po.buyer_name ?? "-"}
-                          </td>
-                          <td className="border px-2 py-1">
-                            {po.order_date
-                              ? new Date(po.order_date).toLocaleDateString()
-                              : "-"}
-                          </td>
-                          <td className="border px-2 py-1">
-                            {po.currency ?? "-"}
-                          </td>
-                          <td className="border px-2 py-1">
-                            {po.status ?? "-"}
-                          </td>
-                          <td className="border px-2 py-1 text-center">
-                            <Button
-                              size="sm"
-                              variant={
-                                selectedPoId === po.id ? "default" : "outline"
-                              }
-                              onClick={() => loadShipmentFromPo(po.id)}
-                            >
-                              {selectedPoId === po.id ? "Selected" : "Select"}
-                            </Button>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <div className="border rounded-md overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[70px]">Select</TableHead>
+                    <TableHead>PO No</TableHead>
+                    <TableHead>Buyer</TableHead>
+                    <TableHead>Order Date</TableHead>
+                    <TableHead>Ship Date</TableHead>
+                    <TableHead>Currency</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredPoHeaders.map((h) => {
+                    const id = h.id;
+                    const checked = selectedPoIds.includes(id);
+                    const poNo = safe(pickFirst(h, ["po_no", "poNo"]));
+                    const buyer = safe(pickFirst(h, ["buyer_name", "buyerName"]));
+                    const od = safe(pickFirst(h, ["order_date", "created_at", "orderDate"])).slice(0, 10);
+                    const sd = safe(pickFirst(h, ["requested_ship_date", "ship_date", "shipDate"])).slice(0, 10);
+                    const cur = safe(pickFirst(h, ["currency"])) || "USD";
+                    const st = safe(pickFirst(h, ["status"])) || "";
+                    return (
+                      <TableRow key={id}>
+                        <TableCell>
+                          <Checkbox
+                            checked={checked}
+                            onCheckedChange={(v) => togglePo(id, Boolean(v))}
+                          />
+                        </TableCell>
+                        <TableCell className="font-medium">{poNo}</TableCell>
+                        <TableCell>{buyer}</TableCell>
+                        <TableCell>{od}</TableCell>
+                        <TableCell>{sd}</TableCell>
+                        <TableCell>{cur}</TableCell>
+                        <TableCell>{st}</TableCell>
+                      </TableRow>
+                    );
+                  })}
+                  {filteredPoHeaders.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-muted-foreground">
+                        No PO found.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            <div className="text-sm text-muted-foreground">
+              * 한 Shipment에는 같은 Buyer의 PO만 선택 가능합니다.
+            </div>
           </CardContent>
         </Card>
 
-        {/* STEP 2: Shipment 상세 */}
-        <Card>
-          <CardHeader>
-            <CardTitle>2. Shipment Details</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {shipmentLoading && <div>Loading shipment draft...</div>}
-            {shipmentError && (
-              <div className="text-sm text-red-600 border border-red-300 bg-red-50 rounded-md px-3 py-2">
-                {shipmentError}
-              </div>
-            )}
+        {selectedPoIds.length > 0 && (
+          <>
+            <Card>
+              <CardHeader>
+                <CardTitle>2. Shipment Details from Selected PO(s)</CardTitle>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <div className="text-sm font-semibold">PO(s)</div>
+                  <div className="text-sm">{selectedHeaders.length} — {selectedHeaders.map(h=>safe(pickFirst(h,["po_no"]))).join(", ")}</div>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">Buyer</div>
+                  <div className="text-sm">{buyerName || "-"}</div>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">Currency</div>
+                  <div className="text-sm">{currency}</div>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">Ship Date</div>
+                  <div className="text-sm">{shipDate ? shipDate.slice(0,10) : "-"}</div>
+                </div>
 
-            {!shipmentLoading && header && (
-              <>
-                {/* Header */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div>
-                    <Label className="block mb-1">PO No</Label>
-                    <Input value={header.po_no ?? ""} readOnly />
-                  </div>
-                  <div>
-                    <Label className="block mb-1">Buyer</Label>
-                    <Input value={header.buyer_name ?? ""} readOnly />
-                  </div>
-                  <div>
-                    <Label className="block mb-1">Currency</Label>
-                    <Input value={header.currency ?? ""} readOnly />
-                  </div>
+                <div>
+                  <div className="text-sm font-semibold">Incoterm</div>
+                  <div className="text-sm">{incoterm || "-"}</div>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">Payment Term</div>
+                  <div className="text-sm">{paymentTerm || "-"}</div>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">Destination</div>
+                  <div className="text-sm">{destination || "-"}</div>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">Shipping Origin</div>
+                  <div className="text-sm">{shippingOrigin || "-"}</div>
+                </div>
 
-                  <div>
-                    <Label className="block mb-1">Incoterm</Label>
-                    <Input
-                      value={header.incoterm ?? ""}
-                      onChange={(e) =>
-                        handleHeaderChange("incoterm", e.target.value)
-                      }
-                    />
+                <div className="md:col-span-4">
+                  <Separator className="my-2" />
+                  <div className="text-sm text-muted-foreground">
+                    ✅ A안: 라인별 Ship Mode(SEA/AIR/COURIER)로 선택 → 저장 시 Mode별 Shipment가 자동 생성됩니다.
+                    (같은 PO 라인도 split 가능)
                   </div>
-                  <div>
-                    <Label className="block mb-1">Payment Term</Label>
-                    <Input
-                      value={header.payment_term ?? ""}
-                      onChange={(e) =>
-                        handleHeaderChange("payment_term", e.target.value)
-                      }
-                    />
-                  </div>
-                  <div>
-                    <Label className="block mb-1">Destination</Label>
-                    <Input
-                      value={header.destination ?? ""}
-                      onChange={(e) =>
-                        handleHeaderChange("destination", e.target.value)
-                      }
-                    />
-                  </div>
+                </div>
+              </CardContent>
+            </Card>
 
+            <Card>
+              <CardHeader>
+                <CardTitle>3. Shipment Lines & Totals (Split by Mode)</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
-                    <Label className="block mb-1">ETD</Label>
-                    <Input
-                      type="date"
-                      value={header.etd ?? ""}
-                      onChange={(e) =>
-                        handleHeaderChange("etd", e.target.value)
-                      }
-                    />
+                    <div className="text-sm font-semibold">Total Cartons</div>
+                    <Input value={String(summary.totalCartons)} readOnly />
                   </div>
                   <div>
-                    <Label className="block mb-1">ETA</Label>
-                    <Input
-                      type="date"
-                      value={header.eta ?? ""}
-                      onChange={(e) =>
-                        handleHeaderChange("eta", e.target.value)
-                      }
-                    />
+                    <div className="text-sm font-semibold">Total G.W. (KGS)</div>
+                    <Input value={summary.totalGW.toFixed(2)} readOnly />
                   </div>
                   <div>
-                    <Label className="block mb-1">Status</Label>
-                    <Input
-                      value={header.status ?? "DRAFT"}
-                      onChange={(e) =>
-                        handleHeaderChange("status", e.target.value)
-                      }
-                    />
+                    <div className="text-sm font-semibold">Total N.W. (KGS)</div>
+                    <Input value={summary.totalNW.toFixed(2)} readOnly />
                   </div>
                 </div>
 
-                <Separator />
-
-                {/* 합계 영역: Auto/Manual 토글 */}
-                <div className="flex items-center justify-between max-w-xl">
-                  <div className="text-sm text-gray-600">
-                    <span className="font-medium">Totals Mode:</span>{" "}
-                    {autoTotals ? "라인 합계 자동 계산" : "수동 입력"}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="text-sm">
+                    <span className="font-semibold">SEA</span>{" "}
+                    <span className="text-muted-foreground">
+                      Qty {summary.byMode.SEA.qty.toLocaleString()} / {money(summary.byMode.SEA.amount, summary.currency)}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500">Manual</span>
-                    <Switch
-                      checked={autoTotals}
-                      onCheckedChange={(v) => setAutoTotals(v)}
-                    />
-                    <span className="text-xs text-gray-500">Auto</span>
+                  <div className="text-sm">
+                    <span className="font-semibold">AIR</span>{" "}
+                    <span className="text-muted-foreground">
+                      Qty {summary.byMode.AIR.qty.toLocaleString()} / {money(summary.byMode.AIR.amount, summary.currency)}
+                    </span>
                   </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-4 max-w-xl mt-2">
-                  <div>
-                    <Label className="block mb-1">Total Cartons</Label>
-                    <Input
-                      type="number"
-                      value={
-                        autoTotals
-                          ? autoTotalsValue.cartons
-                          : header.total_cartons ?? 0
-                      }
-                      readOnly={autoTotals}
-                      onChange={(e) =>
-                        !autoTotals &&
-                        handleHeaderChange(
-                          "total_cartons",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </div>
-                  <div>
-                    <Label className="block mb-1">Total G.W.</Label>
-                    <Input
-                      type="number"
-                      value={
-                        autoTotals
-                          ? autoTotalsValue.gw
-                          : header.total_gw ?? 0
-                      }
-                      readOnly={autoTotals}
-                      onChange={(e) =>
-                        !autoTotals &&
-                        handleHeaderChange("total_gw", e.target.value)
-                      }
-                    />
-                  </div>
-                  <div>
-                    <Label className="block mb-1">Total N.W.</Label>
-                    <Input
-                      type="number"
-                      value={
-                        autoTotals
-                          ? autoTotalsValue.nw
-                          : header.total_nw ?? 0
-                      }
-                      readOnly={autoTotals}
-                      onChange={(e) =>
-                        !autoTotals &&
-                        handleHeaderChange("total_nw", e.target.value)
-                      }
-                    />
+                  <div className="text-sm">
+                    <span className="font-semibold">COURIER</span>{" "}
+                    <span className="text-muted-foreground">
+                      Qty {summary.byMode.COURIER.qty.toLocaleString()} / {money(summary.byMode.COURIER.amount, summary.currency)}
+                    </span>
                   </div>
                 </div>
 
-                {/* Lines */}
-                <div className="mt-4">
-                  <Label className="block mb-2">
-                    Shipment Lines (shipped qty 0 =&gt; 이번 선적에서 제외)
-                  </Label>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-sm border">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="border px-2 py-1">Line</th>
-                          <th className="border px-2 py-1">Style No</th>
-                          <th className="border px-2 py-1">Description</th>
-                          <th className="border px-2 py-1">Color</th>
-                          <th className="border px-2 py-1">Size</th>
-                          <th className="border px-2 py-1">
-                            Remaining Qty
-                          </th>
-                          <th className="border px-2 py-1">
-                            Shipped Qty (this)
-                          </th>
-                          <th className="border px-2 py-1">Unit Price</th>
-                          <th className="border px-2 py-1">Amount</th>
-                          <th className="border px-2 py-1">Cartons</th>
-                          <th className="border px-2 py-1">G.W.</th>
-                          <th className="border px-2 py-1">N.W.</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {lines.length === 0 ? (
-                          <tr>
-                            <td
-                              className="border px-2 py-4 text-center text-gray-500"
-                              colSpan={12}
+                <div className="border rounded-md overflow-hidden">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-[52px]">Use</TableHead>
+                        <TableHead className="w-[110px]">PO No</TableHead>
+                        <TableHead className="w-[60px]">Line</TableHead>
+                        <TableHead className="w-[110px]">Style No</TableHead>
+                        <TableHead>Description</TableHead>
+                        <TableHead className="w-[90px]">Color</TableHead>
+                        <TableHead className="w-[70px]">Size</TableHead>
+                        <TableHead className="w-[90px] text-right">Order Qty</TableHead>
+                        <TableHead className="w-[120px]">Shipped Qty</TableHead>
+                        <TableHead className="w-[110px] text-right">Unit Price</TableHead>
+                        <TableHead className="w-[120px] text-right">Amount</TableHead>
+                        <TableHead className="w-[120px]">Mode</TableHead>
+                        <TableHead className="w-[120px]">Carrier</TableHead>
+                        <TableHead className="w-[140px]">Tracking</TableHead>
+                        <TableHead className="w-[80px]">Split</TableHead>
+                        <TableHead className="w-[70px]">Del</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {allocs.map((r) => (
+                        <TableRow key={r.id}>
+                          <TableCell>
+                            <Checkbox
+                              checked={r.include}
+                              onCheckedChange={(v) => updateAlloc(r.id, { include: Boolean(v) })}
+                            />
+                          </TableCell>
+                          <TableCell>{r.po_no}</TableCell>
+                          <TableCell>{r.line_no ?? "-"}</TableCell>
+                          <TableCell className="font-medium">{r.style_no}</TableCell>
+                          <TableCell className="whitespace-pre-wrap">{r.description}</TableCell>
+                          <TableCell>{r.color || "-"}</TableCell>
+                          <TableCell>{r.size || "-"}</TableCell>
+                          <TableCell className="text-right">{r.order_qty.toLocaleString()}</TableCell>
+                          <TableCell>
+                            <Input
+                              value={String(r.shipped_qty)}
+                              onChange={(e) => updateAlloc(r.id, { shipped_qty: num(e.target.value, 0) })}
+                              disabled={!r.include}
+                            />
+                          </TableCell>
+                          <TableCell className="text-right">{money(r.unit_price, summary.currency)}</TableCell>
+                          <TableCell className="text-right">
+                            {money(num(r.shipped_qty, 0) * num(r.unit_price, 0), summary.currency)}
+                          </TableCell>
+                          <TableCell>
+                            <Select
+                              value={r.ship_mode}
+                              onValueChange={(v) => updateAlloc(r.id, { ship_mode: v as ShipMode })}
+                              disabled={!r.include}
                             >
-                              남은 수량이 있는 스타일이 없습니다.
-                            </td>
-                          </tr>
-                        ) : (
-                          lines.map((line, idx) => (
-                            <tr key={idx} className="border-t">
-                              <td className="border px-2 py-1 text-center">
-                                {line.line_no}
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  value={line.style_no ?? ""}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "style_no",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                                {line.ordered_total_qty !== undefined && (
-                                  <div className="mt-1 text-[10px] text-gray-500">
-                                    Ordered: {line.ordered_total_qty} / Shipped
-                                    so far: {line.shipped_so_far ?? 0}
-                                  </div>
-                                )}
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  value={line.description ?? ""}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "description",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  value={line.color ?? ""}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "color",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  value={line.size ?? ""}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "size",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  type="number"
-                                  value={line.order_qty}
-                                  readOnly
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  type="number"
-                                  value={line.shipped_qty}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "shipped_qty",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  type="number"
-                                  value={line.unit_price}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "unit_price",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  type="number"
-                                  value={line.amount}
-                                  readOnly
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  type="number"
-                                  value={line.cartons}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "cartons",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  type="number"
-                                  value={line.gw}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "gw",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                              <td className="border px-2 py-1">
-                                <Input
-                                  type="number"
-                                  value={line.nw}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      "nw",
-                                      e.target.value
-                                    )
-                                  }
-                                />
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                              <SelectTrigger>
+                                <SelectValue placeholder="Mode" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="SEA">SEA</SelectItem>
+                                <SelectItem value="AIR">AIR</SelectItem>
+                                <SelectItem value="COURIER">COURIER</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              value={r.carrier}
+                              onChange={(e) => updateAlloc(r.id, { carrier: e.target.value })}
+                              placeholder={r.ship_mode === "COURIER" ? "DHL/UPS/..." : ""}
+                              disabled={!r.include}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              value={r.tracking_no}
+                              onChange={(e) => updateAlloc(r.id, { tracking_no: e.target.value })}
+                              disabled={!r.include}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => splitRow(r.id)}
+                              disabled={!r.include || num(r.shipped_qty, 0) <= 0}
+                            >
+                              Split
+                            </Button>
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => removeRow(r.id)}
+                            >
+                              ✕
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {allocs.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={16} className="text-muted-foreground">
+                            No lines.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
                 </div>
 
-                <div className="flex justify-end mt-4">
-                  <Button onClick={handleSave} disabled={saving}>
+                <div className="flex justify-end">
+                  <Button onClick={save} disabled={saving || loading}>
                     {saving ? "Saving..." : "Save Shipment"}
                   </Button>
                 </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
     </AppShell>
   );

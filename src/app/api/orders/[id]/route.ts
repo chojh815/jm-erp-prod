@@ -181,6 +181,23 @@ export async function PUT(
       );
     }
 
+    // ✅ 안전장치: 기존 PO의 po_no는 일반 저장(수정)에서 절대 변경하지 않는다.
+    // (예: 4400003848 → 4400003848S 로 바뀌는 사고 방지)
+    // PO 번호 변경이 필요하면 "Copy as New PO"(duplicate) 기능으로 새 PO를 만들도록 한다.
+    const existingPoNo = safeTrim(existing?.po_no);
+    const incomingPoNo = headerIn?.po_no !== undefined ? safeTrim(headerIn?.po_no) : "";
+    if (!isEmpty(incomingPoNo) && !isEmpty(existingPoNo) && incomingPoNo !== existingPoNo) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            `PO No cannot be changed (existing: ${existingPoNo}, incoming: ${incomingPoNo}). ` +
+            `Use "Copy as New PO" to create a new PO instead.`,
+        },
+        { status: 409 }
+      );
+    }
+
     const now = new Date().toISOString();
 
     // 1) buyer_id 확정 (payload 우선, 없으면 기존값)
@@ -230,7 +247,6 @@ export async function PUT(
     // - 여기서 프로젝트에 있는 컬럼들만 넣어주세요.
     // - 아래는 “대표적인 PO 헤더 필드”들만 안전하게 처리
     const allow = [
-      "po_no",
       "buyer_id",
       "buyer_name",
       "buyer_code",
