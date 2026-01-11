@@ -177,8 +177,8 @@ export async function POST(req: NextRequest) {
       // header insert - keep minimal & tolerant to schema differences
       const insertHeader: any = {
         ship_mode: mode,
-        carrier: ls.find((x) => x.carrier)?.carrier ?? null,
-        tracking_no: ls.find((x) => x.tracking_no)?.tracking_no ?? null,
+        carrier: ls.find((x: any) => x?.carrier)?.carrier ?? null,
+tracking_no: ls.find((x: any) => x?.tracking_no)?.tracking_no ?? null,
         status: "DRAFT",
       };
 

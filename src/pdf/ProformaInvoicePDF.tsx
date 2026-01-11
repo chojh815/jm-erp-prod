@@ -10,12 +10,15 @@ export interface ProformaHeaderPDF {
   invoice_no?: string | null;
   issue_date?: string | null;
 
+  po_no?: string | null;
   shipper_name?: string | null;
   shipper_address?: string | null;
 
   consignee_text?: string | null;
   notify_party_text?: string | null;
 
+
+  remarks?: string | null;
   port_of_loading?: string | null;
   final_destination?: string | null;
 
@@ -25,6 +28,9 @@ export interface ProformaHeaderPDF {
   payment_term?: string | null;
 
   coo_text?: string | null;
+
+  // allow additional fields without breaking builds
+  [key: string]: any;
 }
 
 export interface ProformaLinePDF {

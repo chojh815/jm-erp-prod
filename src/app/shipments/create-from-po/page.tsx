@@ -61,6 +61,13 @@ function safeNumber(v: any, fallback = 0): number {
   if (Number.isNaN(n)) return fallback;
   return n;
 }
+
+
+function safeStr(v: any): string {
+  if (v === null || v === undefined) return "";
+  return String(v);
+}
+
 function fmt2(n: number) {
   return (Number(n) || 0).toLocaleString(undefined, {
     minimumFractionDigits: 2,

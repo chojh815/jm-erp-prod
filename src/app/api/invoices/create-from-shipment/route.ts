@@ -164,6 +164,27 @@ async function getShipperSiteByOrigin(shippingOriginCode: string | null) {
   return null;
 }
 
+/** line/PO line에서 style_no를 최대한 안전하게 뽑아오는 헬퍼 */
+function pickStyleNo(line: any): string | null {
+  const cands = [
+    line?.style_no,
+    line?.styleNo,
+    line?.po_lines?.style_no,
+    line?.po_lines?.styleNo,
+    line?.po_lines?.style_no_text,
+    line?.po_lines?.style,
+    line?.po_line?.style_no,
+    line?.po_line?.styleNo,
+    line?.style_no_text,
+    line?.style,
+  ];
+  for (const v of cands) {
+    const s = v == null ? "" : String(v).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
