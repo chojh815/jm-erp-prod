@@ -52,17 +52,22 @@ function safe(v: any) {
   return (v ?? "").toString().trim();
 }
 
-function asArray(v: any): string[] {
-  if (!v) return [];
-  if (Array.isArray(v)) return v.map((x: unknown) => safe(x)).filter(Boolean);
+function asArray(v: unknown): string[] {
+  if (v === null || v === undefined) return [];
+  // If already an array, normalize each item to string
+  if (Array.isArray(v)) return (v as unknown[]).map((x: unknown) => safe(x)).filter(Boolean);
+
   const s = safe(v);
   if (!s) return [];
+
+  // Try JSON array first (e.g. '["A","B"]')
   try {
-    const j = JSON.parse(s);
-    if (Array.isArray(j)) return j.map((x: unknown) => safe(x)).filter(Boolean);
+    const j: unknown = JSON.parse(s);
+    if (Array.isArray(j)) return (j as unknown[]).map((x: unknown) => safe(x)).filter(Boolean);
   } catch {}
-  const parts = String(s).split(/[,\s]+/g);
-return parts.map((x) => x.trim()).filter(Boolean);
+
+  // Fallback: comma/space separated string
+  return s.split(/[,\s]+/g).map((x: string) => x.trim()).filter(Boolean);
 }
 
 function fmtDate(s?: string | null) {
@@ -127,7 +132,7 @@ export default function ShipmentsListPage() {
         throw new Error(j?.error || `Failed to load shipments (HTTP ${res.status})`);
       }
       const list = (j?.items ?? j?.data ?? j?.rows ?? []) as any[];
-      const normalized: ShipmentListItem[] = (Array.isArray(list) ? list : []).map((r: any) => ({
+      const normalized: ShipmentListItem[] = (Array.isArray(list) ? list : []).map((r) => ({
         id: safe(r?.id),
         shipment_no: r?.shipment_no ?? r?.shipmentNo ?? null,
         buyer_name: r?.buyer_name ?? r?.buyerName ?? r?.buyer ?? null,
@@ -277,7 +282,7 @@ export default function ShipmentsListPage() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    items.map((r: ShipmentListItem) => {
+                    items.map((r) => {
                       const pos = asArray(r.po_nos).length ? asArray(r.po_nos) : asArray(r.po_no);
                       const dest = safe(r.final_destination) || safe(r.destination) || "-";
                       return (
