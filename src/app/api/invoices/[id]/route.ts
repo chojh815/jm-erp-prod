@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { randomUUID } from "crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,7 +44,7 @@ async function loadInvoiceHeader(invoiceId: string) {
   return data ?? null;
 }
 
-async function loadInvoiceLines(invoiceId: string) {
+async function loadInvoiceLines(invoiceId: string, invoiceNo?: string | null) {
   // 1) invoice_id 우선
   const { data: a, error: e1 } = await supabaseAdmin
     .from("invoice_lines")
@@ -55,7 +56,7 @@ async function loadInvoiceLines(invoiceId: string) {
 
   if (!e1 && Array.isArray(a) && a.length > 0) return a;
 
-  // 2) fallback: invoice_header_id
+  // 2) fallback: invoice_header_id (과거 데이터)
   const { data: b, error: e2 } = await supabaseAdmin
     .from("invoice_lines")
     .select(`*, po_lines:po_lines ( buyer_style_no, buyer_style_code, jm_style_no, jm_style_code )`)
@@ -64,8 +65,30 @@ async function loadInvoiceLines(invoiceId: string) {
     .order("style_no", { ascending: true })
     .order("line_no", { ascending: true });
 
+  if (!e2 && Array.isArray(b) && b.length > 0) return b;
+
+  // 3) 최종 fallback: invoice_no 컬럼이 있는 경우 (일부 구버전 스키마)
+  const invNo = (invoiceNo ?? "").toString().trim();
+  if (invNo) {
+    try {
+      const { data: c, error: e3 } = await supabaseAdmin
+        .from("invoice_lines")
+        .select(`*, po_lines:po_lines ( buyer_style_no, buyer_style_code, jm_style_no, jm_style_code )`)
+        // @ts-ignore - invoice_no 컬럼이 없을 수 있음
+        .eq("invoice_no", invNo)
+        .order("po_no", { ascending: true })
+        .order("style_no", { ascending: true })
+        .order("line_no", { ascending: true });
+
+      if (!e3 && Array.isArray(c) && c.length > 0) return c;
+    } catch {
+      // ignore (invoice_no 컬럼이 없는 경우)
+    }
+  }
+
+  // 여기까지면 진짜 없음
   if (e2) throw new Error(e2.message);
-  return b ?? [];
+  return [];
 }
 
 function computeTotalAmount(lines: any[]) {
@@ -99,7 +122,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     const header = await loadInvoiceHeader(id);
     if (!header) return bad("Invoice not found", 404);
 
-    let lines = await loadInvoiceLines(id);
+    let lines = await loadInvoiceLines(id, header?.invoice_no);
 
     // ✅ display용 Style No = Buyer Style No 우선
     lines = (lines || []).map((l: any) => ({
@@ -198,7 +221,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     // --- lines upsert (삭제는 is_deleted=true로)
     if (linesIn.length > 0) {
       const toUpsert = linesIn
-        .filter((x) => x && x.id) // page는 id 항상 보냄
+        .filter((x) => x) // id 없으면 서버에서 생성
         .map((x) => {
           const qty = x.qty === "" || x.qty == null ? null : n(x.qty, 0);
           const unit_price =
@@ -211,7 +234,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
               : n(x.amount, n(qty) * n(unit_price));
 
           return {
-            id: x.id,
+            id: x.id ?? randomUUID(),
             invoice_id: x.invoice_id ?? id, // 안전
             invoice_header_id: x.invoice_header_id ?? null,
             shipment_id: x.shipment_id ?? null,
@@ -242,7 +265,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
     // --- 재조회 + total 확정 업데이트
     const newHeader = await loadInvoiceHeader(id);
-    const newLines = await loadInvoiceLines(id);
+    const newLines = await loadInvoiceLines(id, newHeader?.invoice_no);
 
     const total = computeTotalAmount(newLines);
 

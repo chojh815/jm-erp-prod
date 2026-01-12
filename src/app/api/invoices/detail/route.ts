@@ -96,20 +96,50 @@ export async function GET(req: NextRequest) {
     // 만약 환경에 따라 다를 수 있으니, 실패 시 빈 배열로라도 반환
     let lines: any[] = [];
     try {
-      const { data, error } = await supabaseAdmin
-        .from("invoice_lines")
-        .select("*")
-        .eq("invoice_id", header.id)
-        .order("line_no", { ascending: true });
+      // ✅ 1) invoice_id로 조회
+      {
+        const { data, error } = await supabaseAdmin
+          .from("invoice_lines")
+          .select("*")
+          .eq("invoice_id", header.id)
+          .order("line_no", { ascending: true });
 
-      if (!error && Array.isArray(data)) {
-        lines = data;
+        if (!error && Array.isArray(data) && data.length) {
+          lines = data;
+        }
+      }
+
+      // ✅ 2) (fallback) invoice_header_id로 조회 (구버전/저장 꼬임 대비)
+      if (!lines.length) {
+        const { data, error } = await supabaseAdmin
+          .from("invoice_lines")
+          .select("*")
+          .eq("invoice_header_id", header.id)
+          .order("line_no", { ascending: true });
+
+        if (!error && Array.isArray(data) && data.length) {
+          lines = data;
+        }
+      }
+
+      // ✅ 3) (fallback) invoice_no로 조회 (아주 구버전/백필용)
+      // invoice_lines에 invoice_no 컬럼이 없으면 이 단계는 자연스럽게 실패하고 무시됨
+      if (!lines.length && header.invoice_no) {
+        const { data, error } = await supabaseAdmin
+          .from("invoice_lines")
+          .select("*")
+          .eq("invoice_no", header.invoice_no)
+          .order("line_no", { ascending: true });
+
+        if (!error && Array.isArray(data) && data.length) {
+          lines = data;
+        }
       }
     } catch {
       // ignore
     }
 
-    // 3) (선택) buyer/company 정보 같이 붙이기 - 있으면 좋고 없어도 OK
+// 3) (선택) buyer/company 정보 같이 붙이기 - 있으면 좋고 없어도 OK
     let buyer: any = null;
     try {
       const buyerId = header.buyer_id;

@@ -674,6 +674,7 @@ export default function InvoiceDetailPage() {
     if (autoPdfRanRef.current) return;
     if (loading) return;
     if (!header) return;
+    if (!lines || lines.length === 0) return;
     if (exporting) return;
 
     autoPdfRanRef.current = true;
@@ -690,7 +691,7 @@ export default function InvoiceDetailPage() {
     };
 
     run();
-  }, [autoPdfRequested, loading, header, exporting, invoiceId, router, handlePdf]);
+  }, [autoPdfRequested, loading, header, lines, exporting, invoiceId, router, handlePdf]);
 
   if (loading) {
     return (

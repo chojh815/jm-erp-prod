@@ -164,25 +164,27 @@ async function getShipperSiteByOrigin(shippingOriginCode: string | null) {
   return null;
 }
 
-/** line/PO line에서 style_no를 최대한 안전하게 뽑아오는 헬퍼 */
-function pickStyleNo(line: any): string | null {
-  const cands = [
-    line?.style_no,
-    line?.styleNo,
-    line?.po_lines?.style_no,
-    line?.po_lines?.styleNo,
-    line?.po_lines?.style_no_text,
-    line?.po_lines?.style,
-    line?.po_line?.style_no,
-    line?.po_line?.styleNo,
-    line?.style_no_text,
-    line?.style,
-  ];
-  for (const v of cands) {
-    const s = v == null ? "" : String(v).trim();
-    if (s) return s;
-  }
-  return null;
+
+function safeStr(v: any) {
+  return (v ?? "").toString().trim();
+}
+
+/**
+ * style_no 후보 우선순위:
+ * 1) shipment_lines.style_no
+ * 2) join된 po_lines의 buyer_style_no / buyer_style_code / jm_style_no / jm_style_code
+ */
+function pickStyleNo(l: any) {
+  if (safeStr(l?.style_no)) return safeStr(l.style_no);
+
+  const p = l?.po_lines ?? {};
+  return (
+    safeStr(p?.buyer_style_no) ||
+    safeStr(p?.buyer_style_code) ||
+    safeStr(p?.jm_style_no) ||
+    safeStr(p?.jm_style_code) ||
+    null
+  );
 }
 
 export async function POST(req: Request) {
@@ -262,6 +264,13 @@ export async function POST(req: Request) {
       .order("line_no", { ascending: true });
 
     if (slErr) throw new Error(slErr.message);
+
+    // ✅ 라인이 없으면 invoice_lines가 생성되지 않아서 하단 테이블이 비게 됨
+    if (!shipLines || shipLines.length === 0) {
+      return bad("No shipment lines found for this shipment.", 400, { shipment_id: shipmentId });
+    }
+
+    console.log("[create-from-shipment] shipLines:", shipLines.length, "shipment:", shipmentId);
 
     const totalAmount = (shipLines ?? []).reduce((s, l) => s + safeNumber((l as any).amount), 0);
 

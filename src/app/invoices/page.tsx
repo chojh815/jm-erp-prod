@@ -625,7 +625,7 @@ export default function InvoicesPage() {
                                 >
                                   Detail
                                 </Button>
-                                <Button size="sm" onClick={() => handleExportCIPdf(r)} disabled={busy}>
+                                <Button size="sm" onClick={() => window.open(`/invoices/${r.id}?autoPdf=1`, "_blank")} disabled={busy}>
                                   {busy ? "PDF..." : "PDF"}
                                 </Button>
                               </td>

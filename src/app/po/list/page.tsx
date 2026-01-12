@@ -478,9 +478,25 @@ export default function PurchaseOrderListPage() {
     return multiSortItems(items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
   }, [items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir]);
 
-  // ---------- export excel ----------
-  const handleExportExcel = () => {
+    // ---------- export excel ----------
+  const handleExportExcel = async () => {
     if (sortedItems.length === 0) return alert("No data to export.");
+
+    // 각 PO별 라인 전체를 다시 받아서 "라인 단위"로 export
+    async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
+      const params = new URLSearchParams();
+      params.set("detailFor", headerId);
+
+      const res = await fetch(`/api/orders/list?${params.toString()}`);
+      const json = await safeJson<any>(res);
+
+      if (!res.ok) {
+        throw new Error(json?.error ?? "Failed to load PO lines.");
+      }
+
+      const rawLines = json?.lines ?? [];
+      return rawLines.map(normalizeLine);
+    }
 
     const header = [
       "PO No",
@@ -497,59 +513,193 @@ export default function PurchaseOrderListPage() {
       "Status",
     ];
 
-    const rows = sortedItems.map((it) => {
-      const styleLabel = it.mainBuyerStyleNo
-        ? it.lineCount > 1
-          ? `${it.mainBuyerStyleNo} 외 ${it.lineCount - 1}건`
-          : it.mainBuyerStyleNo
-        : "-";
+    const rows: string[][] = [];
 
-      const qtyLabel = typeof it.mainQty === "number" ? String(it.mainQty) : "-";
-      const unitPriceLabel =
-        typeof it.mainUnitPrice === "number" ? it.mainUnitPrice.toFixed(2) : "-";
-      const subtotalLabel =
-        typeof it.subtotal === "number" ? it.subtotal.toFixed(2) : "-";
+    // ✅ number formatters (used in CSV cells)
+    const nf0 = new Intl.NumberFormat("en-US");
+    const nf2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-      return [
-        it.poNo,
-        it.buyerName ?? "-",
-        it.mainBuyerBrand ?? "-",
-        styleLabel,
-        it.orderDate ?? "-",
-        it.reqShipDate ?? "-",
-        it.shipMode ?? "-",
-        it.currency ?? "-",
-        qtyLabel,
-        unitPriceLabel,
-        subtotalLabel,
-        it.status ?? "-",
-      ];
-    });
+    try {
+      let grandSum = 0;
+
+      for (const it of sortedItems) {
+        const lines = await fetchLinesForHeaderId(it.id);
+
+        // PO별 합계(라인 기반)
+        let poSum = 0;
+
+        // 라인이 없으면(데이터 비정상/삭제 등) 헤더 정보만 1줄로 남김
+        if (!lines || lines.length === 0) {
+          const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
+          poSum = headerSubtotal;
+          grandSum += headerSubtotal;
+
+          rows.push([
+            it.poNo,
+            it.buyerName ?? "-",
+            it.mainBuyerBrand ?? "-",
+            "-",
+            it.orderDate ?? "-",
+            it.reqShipDate ?? "-",
+            it.shipMode ?? "-",
+            it.currency ?? "-",
+            "-",
+            "-",
+            nf2.format(headerSubtotal),
+            it.status ?? "-",
+          ]);
+
+          // PO Subtotal row
+          rows.push([
+            it.poNo,
+            "",
+            "",
+            "PO Subtotal",
+            "",
+            "",
+            "",
+            it.currency ?? "-",
+            "",
+            "",
+            nf2.format(headerSubtotal),
+            "",
+          ]);
+
+          // blank separator
+          rows.push(["", "", "", "", "", "", "", "", "", "", "", ""]);
+          continue;
+        }
+
+        lines.forEach((ln) => {
+          const style =
+            (ln.buyerStyleNo ?? "").trim() ||
+            (ln.jmStyleNo ?? "").trim() ||
+            "-";
+
+          const qtyNum = typeof ln.qty === "number" ? ln.qty : null;
+          const qty = typeof qtyNum === "number" ? nf0.format(qtyNum) : "-";
+
+          const priceNum =
+            typeof ln.price === "number"
+              ? ln.price
+              : typeof ln.unitPrice === "number"
+                ? ln.unitPrice
+                : null;
+
+          const unitPrice = typeof priceNum === "number" ? nf2.format(priceNum) : "-";
+
+          let amount: number | null = null;
+          if (typeof ln.amount === "number") amount = ln.amount;
+          else if (typeof qtyNum === "number" && typeof priceNum === "number")
+            amount = qtyNum * priceNum;
+
+          if (typeof amount === "number") poSum += amount;
+
+          rows.push([
+            // Excel은 필터/정렬을 위해 PO 정보는 매 라인마다 반복 표기
+            it.poNo,
+            it.buyerName ?? "-",
+            it.mainBuyerBrand ?? "-",
+            style,
+            it.orderDate ?? "-",
+            it.reqShipDate ?? "-",
+            it.shipMode ?? "-",
+            it.currency ?? "-",
+            qty,
+            unitPrice,
+            typeof amount === "number" ? nf2.format(amount) : "-",
+            it.status ?? "-",
+          ]);
+        });
+
+        grandSum += poSum;
+
+        // ✅ PO Subtotal row (라인 아래 1줄)
+        rows.push([
+          it.poNo,
+          "",
+          "",
+          "PO Subtotal",
+          "",
+          "",
+          "",
+          it.currency ?? "-",
+          "",
+          "",
+          nf2.format(poSum),
+          "",
+        ]);
+
+        // blank separator
+        rows.push(["", "", "", "", "", "", "", "", "", "", "", ""]);
+      }
+
+      // ✅ Grand Total row (맨 마지막 1줄)
+      const curSet = new Set(sortedItems.map((x) => (x.currency ?? "").trim()).filter(Boolean));
+      const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
+      rows.push([
+        "",
+        "",
+        "",
+        "Grand Total",
+        "",
+        "",
+        "",
+        curLabel,
+        "",
+        "",
+        nf2.format(grandSum),
+        "",
+      ]);
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message ?? "Failed to export.");
+      return;
+    }
 
     const csvLines = [header, ...rows]
-      .map((r) =>
-        r
-          .map((c) => {
-            const v = String(c ?? "");
-            if (v.includes(",") || v.includes('"')) return `"${v.replace(/"/g, '""')}"`;
+      .map((arr) =>
+        arr
+          .map((cell) => {
+            const v = (cell ?? "").toString();
+            // CSV 안전 처리: 쉼표/따옴표/개행 포함 시 "..."로 감싸고 내부 "는 ""로 이스케이프
+            if (/[,"\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
             return v;
           })
           .join(",")
       )
-      .join("\r\n");
+      .join("\n");
 
-    const blob = new Blob(["\uFEFF" + csvLines], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob(["﻿" + csvLines], {
+      type: "text/csv;charset=utf-8;",
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "po_list.csv";
+    a.download = "po_list_lines.csv";
     a.click();
     URL.revokeObjectURL(url);
   };
 
   // ---------- export pdf (jsPDF + autoTable + print) ----------
-  const handleExportPdf = () => {
+  const handleExportPdf = async () => {
     if (sortedItems.length === 0) return alert("No data to export.");
+
+    // 각 PO별 라인 전체를 다시 받아서 "라인 단위"로 export
+    async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
+      const params = new URLSearchParams();
+      params.set("detailFor", headerId);
+
+      const res = await fetch(`/api/orders/list?${params.toString()}`);
+      const json = await safeJson<any>(res);
+
+      if (!res.ok) {
+        throw new Error(json?.error ?? "Failed to load PO lines.");
+      }
+
+      const rawLines = json?.lines ?? [];
+      return rawLines.map(normalizeLine);
+    }
 
     const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
 
@@ -557,69 +707,229 @@ export default function PurchaseOrderListPage() {
     doc.text("Purchase Order List", 40, 40);
 
     const sortLabel = `1) ${s1Field} ${s1Dir}  2) ${s2Field} ${s2Dir}  3) ${s3Field} ${s3Dir}`;
+
+    // 라인 단위 테이블 바디 생성
+    const body: any[] = [];
+
+    const nf0 = new Intl.NumberFormat("en-US");
+    const nf2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    let totalLines = 0;
+
+    try {
+      let grandSum = 0;
+
+      for (const it of sortedItems) {
+        const lines = await fetchLinesForHeaderId(it.id);
+
+        let poSum = 0;
+
+        if (!lines || lines.length === 0) {
+          totalLines += 1;
+          const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
+          poSum = headerSubtotal;
+
+          body.push([
+            it.poNo,
+            it.buyerName ?? "-",
+            it.mainBuyerBrand ?? "-",
+            "-",
+            it.orderDate ?? "-",
+            it.reqShipDate ?? "-",
+            it.shipMode ?? "-",
+            it.currency ?? "-",
+            "-",
+            "-",
+            nf2.format(headerSubtotal),
+            it.status ?? "-",
+          ]);
+
+          // PO Subtotal row (marker)
+          body.push([
+            "__PO_SUBTOTAL__",
+            it.poNo,
+            "",
+            "PO Subtotal",
+            "",
+            "",
+            "",
+            it.currency ?? "-",
+            "",
+            "",
+            nf2.format(headerSubtotal),
+            "",
+          ]);
+
+          grandSum += headerSubtotal;
+          continue;
+        }
+
+        lines.forEach((ln, idx) => {
+          totalLines += 1;
+
+          const style =
+            (ln.buyerStyleNo ?? "").trim() ||
+            (ln.jmStyleNo ?? "").trim() ||
+            "-";
+
+          const qtyNum = typeof ln.qty === "number" ? ln.qty : null;
+          const qty = typeof qtyNum === "number" ? nf0.format(qtyNum) : "-";
+
+          const priceNum =
+            typeof ln.price === "number"
+              ? ln.price
+              : typeof ln.unitPrice === "number"
+                ? ln.unitPrice
+                : null;
+
+          const unitPrice = typeof priceNum === "number" ? nf2.format(priceNum) : "-";
+
+          let amount: number | null = null;
+          if (typeof ln.amount === "number") amount = ln.amount;
+          else if (typeof qtyNum === "number" && typeof priceNum === "number")
+            amount = qtyNum * priceNum;
+
+          if (typeof amount === "number") poSum += amount;
+
+          // PDF는 같은 PO가 연속으로 나오니 2번째 라인부터는 헤더 컬럼은 공백 처리(가독성)
+          const showHeaderCols = idx === 0;
+
+          body.push([
+            showHeaderCols ? it.poNo : "",
+            showHeaderCols ? (it.buyerName ?? "-") : "",
+            showHeaderCols ? (it.mainBuyerBrand ?? "-") : "",
+            style,
+            showHeaderCols ? (it.orderDate ?? "-") : "",
+            showHeaderCols ? (it.reqShipDate ?? "-") : "",
+            showHeaderCols ? (it.shipMode ?? "-") : "",
+            showHeaderCols ? (it.currency ?? "-") : "",
+            qty,
+            unitPrice,
+            typeof amount === "number" ? nf2.format(amount) : "-",
+            showHeaderCols ? (it.status ?? "-") : "",
+          ]);
+        });
+
+        // PO Subtotal row (marker)
+        body.push([
+          "__PO_SUBTOTAL__",
+          it.poNo,
+          "",
+          "PO Subtotal",
+          "",
+          "",
+          "",
+          it.currency ?? "-",
+          "",
+          "",
+          nf2.format(poSum),
+          "",
+        ]);
+
+        grandSum += poSum;
+      }
+
+      // Grand Total row (marker)
+      const curSet = new Set(sortedItems.map((x) => (x.currency ?? "").trim()).filter(Boolean));
+      const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
+      body.push([
+        "__GRAND_TOTAL__",
+        "",
+        "",
+        "Grand Total",
+        "",
+        "",
+        "",
+        curLabel,
+        "",
+        "",
+        nf2.format(grandSum),
+        "",
+      ]);
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message ?? "Failed to export.");
+      return;
+    }
+
     doc.setFontSize(9);
-    doc.text(`Sort: ${sortLabel} | Total: ${sortedItems.length} POs`, 40, 58);
+    doc.text(
+      `Sort: ${sortLabel} | Total: ${sortedItems.length} POs / ${totalLines} Lines`,
+      40,
+      58
+    );
 
     autoTable(doc, {
-  startY: 70,
-  head: [[
-    "PO No",
-    "Buyer",
-    "Brand",
-    "Buyer Style No",
-    "Order Date",
-    "Req. Ship Date",
-    "Ship Mode",
-    "Cur.",
-    "Qty",
-    "Unit Price",
-    "Subtotal",
-    "Status",
-  ]],
-  body: sortedItems.map((it) => {
-    const styleLabel = it.mainBuyerStyleNo
-      ? it.lineCount > 1
-        ? `${it.mainBuyerStyleNo} (+${it.lineCount - 1})`
-        : it.mainBuyerStyleNo
-      : "-";
+      startY: 70,
+      head: [[
+        "PO No",
+        "Buyer",
+        "Brand",
+        "Buyer Style No",
+        "Order Date",
+        "Req. Ship Date",
+        "Ship Mode",
+        "Cur.",
+        "Qty",
+        "Unit Price",
+        "Subtotal",
+        "Status",
+      ]],
+      body,
+      styles: { fontSize: 8, cellPadding: 3, overflow: "linebreak" },
+      margin: { left: 24, right: 24 },
+      headStyles: { fillColor: [40, 130, 180], textColor: 255 },
+      columnStyles: {
+        0: { cellWidth: 68 },   // PO No
+        1: { cellWidth: 95 },   // Buyer
+        2: { cellWidth: 68 },   // Brand
+        3: { cellWidth: 95 },   // Buyer Style No
+        4: { cellWidth: 60 },   // Order Date
+        5: { cellWidth: 66 },   // Req. Ship Date
+        6: { cellWidth: 52 },   // Ship Mode
+        7: { cellWidth: 34 },   // Cur.
+        8: { cellWidth: 46, halign: "right" }, // Qty
+        9: { cellWidth: 52, halign: "right" }, // Unit Price
+        10: { cellWidth: 62, halign: "right" }, // Subtotal
+        11: { cellWidth: 60, halign: "center", overflow: "ellipsize" },  // Status
+      },
+      didParseCell: (data) => {
+        // Marker rows styling for PO Subtotal / Grand Total
+        const rawRow = (data.row as any)?.raw as any[];
+        const marker = rawRow?.[0];
+        if (data.section === "body" && (marker === "__PO_SUBTOTAL__" || marker === "__GRAND_TOTAL__")) {
+          // Clear all cells by default
+          data.cell.text = [""];
+          // Put labels and values in specific columns
+          if (data.column.index === 3) data.cell.text = [marker === "__GRAND_TOTAL__" ? "Grand Total" : "PO Subtotal"];
+          if (data.column.index === 10) data.cell.text = [String(rawRow?.[10] ?? "")];
+          if (data.column.index === 7) data.cell.text = [String(rawRow?.[7] ?? "")];
 
-    return [
-      it.poNo ?? "",
-      it.buyerName ?? "",
-      it.mainBuyerBrand ?? "",
-      styleLabel,
-      it.orderDate ?? "",
-      it.reqShipDate ?? "",
-      it.shipMode ?? "",
-      it.currency ?? "",
-      typeof it.mainQty === "number" ? String(it.mainQty) : "",
-      typeof it.mainUnitPrice === "number" ? Number(it.mainUnitPrice).toFixed(2) : "",
-      typeof it.subtotal === "number" ? Number(it.subtotal).toFixed(2) : "0.00",
-      it.status ?? "",
-    ];
-  }),
-  styles: { fontSize: 9, cellPadding: 4, overflow: "linebreak" },
-  columnStyles: {
-    8: { halign: "right" },
-    9: { halign: "right" },
-    10: { halign: "right" },
-  },
-  margin: { left: 40, right: 40, top: 70, bottom: 50 }, // ✅ bottom 여유(페이지번호 자리)
-  didDrawPage: function () {
-    // ✅ 하단 중앙 페이지 번호
-    const pageCount = (doc as any).internal.getNumberOfPages?.() || 1;
-    const pageNum = (doc as any).internal.getCurrentPageInfo?.().pageNumber || 1;
+          // Style
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.fillColor = marker === "__GRAND_TOTAL__" ? [230, 230, 230] : [245, 245, 245];
+        }
 
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
+        // Hide marker text in first column (safety)
+        if (data.section === "body" && data.column.index === 0) {
+          const v = String((data.cell.raw as any) ?? "");
+          if (v === "__PO_SUBTOTAL__" || v === "__GRAND_TOTAL__") data.cell.text = [""];
+        }
+      },
+      didDrawPage: function () {
+        const pageCount = (doc as any).internal.getNumberOfPages?.() || 1;
+        const pageNum = (doc as any).internal.getCurrentPageInfo?.().pageNumber || 1;
 
-    doc.setFontSize(9);
-    const text = `Page ${pageNum} / ${pageCount}`;
-    doc.text(text, pageW / 2, pageH - 20, { align: "center" }); // ✅ 하단 중앙
-  },
-});
+        const pageW = doc.internal.pageSize.getWidth();
+        const pageH = doc.internal.pageSize.getHeight();
 
-       const blobUrl = doc.output("bloburl");
+        doc.setFontSize(9);
+        const text = `Page ${pageNum} / ${pageCount}`;
+        doc.text(text, pageW / 2, pageH - 20, { align: "center" });
+      },
+    });
+
+    const blobUrl = doc.output("bloburl");
     window.open(blobUrl, "_blank");
   };
 
@@ -951,6 +1261,20 @@ export default function PurchaseOrderListPage() {
               <div className="flex flex-col md:flex-row items-center justify-between gap-3 px-4 py-3 border-t bg-slate-50">
                 <div className="text-sm text-slate-600">
                   Total: <span className="font-semibold">{total}</span> POs
+                </div>
+                <div className="text-sm text-slate-600">
+                  Grand Total:{" "}
+                  <span className="font-semibold">
+                    {(() => {
+                      const nums = sortedItems
+                        .map((x) => (typeof x.subtotal === "number" ? x.subtotal : 0))
+                        .filter((n) => Number.isFinite(n));
+                      const sum = nums.reduce((a, b) => a + b, 0);
+                      const curSet = new Set(sortedItems.map((x) => (x.currency ?? "").trim()).filter(Boolean));
+                      const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
+                      return (curLabel ? `${curLabel} ` : "") + fmtMoney2(sum);
+                    })()}
+                  </span>
                 </div>
 
                 <div className="flex gap-2">
