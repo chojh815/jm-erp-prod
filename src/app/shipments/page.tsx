@@ -61,7 +61,8 @@ function asArray(v: any): string[] {
     const j = JSON.parse(s);
     if (Array.isArray(j)) return j.map((x: unknown) => safe(x)).filter(Boolean);
   } catch {}
-  return s.split(/[,\s]+/g).map((x: string) => x.trim()).filter(Boolean);
+  const parts = String(s).split(/[,\s]+/g);
+return parts.map((x) => x.trim()).filter(Boolean);
 }
 
 function fmtDate(s?: string | null) {
