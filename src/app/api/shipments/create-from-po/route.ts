@@ -77,6 +77,42 @@ async function insertWithAutoDrop(table: string, rowOrRows: any, returning = "*"
   return { data: null, error: new Error("insert retry exceeded") as any };
 }
 
+async function updateWithAutoDrop(
+  table: string,
+  id: string,
+  patch: Record<string, any>,
+  returning = "*"
+): Promise<{ data: any; dropped: string[]; error?: any }> {
+  const dropped: string[] = [];
+  let payload: Record<string, any> = { ...(patch ?? {}) };
+
+  let tries = 0;
+  while (tries < 6) {
+    tries++;
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .update(payload)
+      .eq("id", id)
+      .select(returning)
+      .maybeSingle();
+
+    if (!error) return { data, dropped, error: null };
+
+    const msg = error.message || "";
+    const col = extractMissingColumn(msg);
+    if (!col) return { data: null, dropped, error };
+
+    if (Object.prototype.hasOwnProperty.call(payload, col)) {
+      delete payload[col];
+      dropped.push(col);
+      continue;
+    }
+    return { data: null, dropped, error };
+  }
+  return { data: null, dropped, error: new Error("Too many retries") };
+}
+
+
 type IncomingLine = {
   po_line_id?: string | null;
   shipped_qty?: any;
@@ -202,13 +238,52 @@ export async function POST(req: NextRequest) {
         is_deleted: false,
       };
 
-      // Header insert
-      const insHeader = await insertWithAutoDrop("shipments", headerInsert, "*");
-      if ((insHeader as any).error) {
-        const e = (insHeader as any).error;
-        return bad(`Save failed: ${e?.message ?? e}`, 400);
+      // Header insert (idempotent: reuse existing DRAFT per PO+buyer+mode)
+      let shipment: any = null;
+
+      const poHeaderId = base?.id ?? null;
+      // Try to reuse an existing DRAFT shipment instead of creating a new one
+      const { data: existingShipment, error: existingErr } = await supabaseAdmin
+        .from("shipments")
+        .select("*")
+        .eq("is_deleted", false)
+        .eq("status", "DRAFT")
+        .eq("buyer_id", buyerId)
+        .eq("ship_mode", mode)
+        .eq("po_header_id", poHeaderId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existingErr) {
+        // If there's an unexpected error, fail fast (prevents silent duplicates)
+        return bad(`Load existing shipment failed: ${existingErr.message ?? existingErr}`, 500);
       }
-      const shipment = (insHeader.data as any[])?.[0];
+
+      if (existingShipment?.id) {
+        // Update header fields to the latest values (auto-drop missing columns)
+        const up = await updateWithAutoDrop("shipments", existingShipment.id, headerInsert, "*");
+        if ((up as any).error) {
+          const e = (up as any).error;
+          return bad(`Update failed: ${e?.message ?? e}`, 400);
+        }
+        shipment = up.data ?? existingShipment;
+
+        // Soft-delete previous lines so re-running create doesn't duplicate lines
+        await supabaseAdmin
+          .from("shipment_lines")
+          .update({ is_deleted: true })
+          .eq("shipment_id", existingShipment.id)
+          .eq("is_deleted", false);
+      } else {
+        const insHeader = await insertWithAutoDrop("shipments", headerInsert, "*");
+        if ((insHeader as any).error) {
+          const e = (insHeader as any).error;
+          return bad(`Save failed: ${e?.message ?? e}`, 400);
+        }
+        shipment = (insHeader.data as any[])?.[0];
+      }
+
       if (!shipment?.id) return bad("Save failed: could not create shipment.", 500);
 
       // Lines insert
@@ -280,3 +355,6 @@ export async function POST(req: NextRequest) {
     return bad(e?.message ?? "Unknown error", 500);
   }
 }
+
+
+// NOTE: Patched to be idempotent: reuse existing DRAFT shipment per buyer+mode+POs

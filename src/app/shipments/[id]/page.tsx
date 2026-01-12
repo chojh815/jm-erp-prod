@@ -8,6 +8,17 @@ import type { AppRole } from "@/config/menuConfig";
 
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogTrigger,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from "@/components/ui/alert-dialog";
 import { Separator } from "@/components/ui/separator";
 
 type DevRole = AppRole;
@@ -138,6 +149,28 @@ export default function ShipmentDetailPage() {
   const [loading, setLoading] = React.useState(false);
   const [shipment, setShipment] = React.useState<any>(null);
   const [lines, setLines] = React.useState<ShipmentLine[]>([]);
+
+const [cancelling, setCancelling] = React.useState(false);
+
+async function cancelShipment() {
+  const id = shipmentId;
+  if (!id) return;
+  try {
+    setCancelling(true);
+    const res = await fetch(`/api/shipments/${id}/cancel`, { method: "POST" });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j?.success) {
+      alert(j?.error || `Cancel failed (HTTP ${res.status})`);
+      return;
+    }
+    // go back to list so user doesn't re-create duplicates
+    router.push("/shipments/list");
+  } catch (e: any) {
+    alert(e?.message || "Cancel failed");
+  } finally {
+    setCancelling(false);
+  }
+}
 
   // Edit Mode (partial / split)
   const [editMode, setEditMode] = React.useState(false);
@@ -484,10 +517,33 @@ export default function ShipmentDetailPage() {
   return (
     <AppShell role={role} title="Shipment Detail">
       <div className="flex items-center justify-end gap-2 mb-4">
-        <Button variant="outline" onClick={() => router.back()}>
+        <Button variant="outline" onClick={() => router.push("/shipments/list")}>Back to Shipments List</Button>
+
+      <Button variant="outline" onClick={() => router.back()}>
           Back
         </Button>
-        <Button onClick={load} disabled={loading}>
+
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button variant="destructive" disabled={cancelling}>
+            {cancelling ? "Cancelling..." : "Cancel Shipment"}
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel this shipment?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will mark the shipment as CANCELLED (soft delete). Only DRAFT shipments can be cancelled.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep</AlertDialogCancel>
+            <AlertDialogAction onClick={cancelShipment}>Cancel Shipment</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Button onClick={load} disabled={loading}>
           Refresh
         </Button>
       </div>

@@ -73,6 +73,9 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "proforma.view",
       },
       { label: "Shipments", href: "/shipments", perm: "shipment.view" },
+      { label: "Shipments List", href: "/shipments/list",
+      },
+
       {
         label: "Invoices & Packing",
         href: "/invoices",
