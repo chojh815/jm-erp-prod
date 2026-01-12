@@ -126,7 +126,7 @@ export default function ShipmentsListPage() {
         throw new Error(j?.error || `Failed to load shipments (HTTP ${res.status})`);
       }
       const list = (j?.items ?? j?.data ?? j?.rows ?? []) as any[];
-      const normalized: ShipmentListItem[] = (Array.isArray(list) ? list : []).map((r) => ({
+      const normalized: ShipmentListItem[] = (Array.isArray(list) ? list : []).map((r: any) => ({
         id: safe(r?.id),
         shipment_no: r?.shipment_no ?? r?.shipmentNo ?? null,
         buyer_name: r?.buyer_name ?? r?.buyerName ?? r?.buyer ?? null,
@@ -276,7 +276,7 @@ export default function ShipmentsListPage() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    items.map((r) => {
+                    items.map((r: ShipmentListItem) => {
                       const pos = asArray(r.po_nos).length ? asArray(r.po_nos) : asArray(r.po_no);
                       const dest = safe(r.final_destination) || safe(r.destination) || "-";
                       return (
