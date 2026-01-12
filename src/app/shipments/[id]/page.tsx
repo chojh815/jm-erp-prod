@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useParams } from "next/navigation";
+import Link from "next/link";
 
 import AppShell from "@/components/layout/AppShell";
 import type { AppRole } from "@/config/menuConfig";
@@ -164,7 +165,7 @@ async function cancelShipment() {
       return;
     }
     // go back to list so user doesn't re-create duplicates
-    router.push("/shipments/list");
+    router.push("/shipments");
   } catch (e: any) {
     alert(e?.message || "Cancel failed");
   } finally {
@@ -517,7 +518,9 @@ async function cancelShipment() {
   return (
     <AppShell role={role} title="Shipment Detail">
       <div className="flex items-center justify-end gap-2 mb-4">
-        <Button variant="outline" onClick={() => router.push("/shipments/list")}>Back to Shipments List</Button>
+        <Button variant="outline" asChild>
+                <Link href="/shipments">Back to Shipments List</Link>
+              </Button>
 
       <Button variant="outline" onClick={() => router.back()}>
           Back

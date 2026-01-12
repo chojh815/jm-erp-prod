@@ -54,7 +54,35 @@ export async function GET(req: Request) {
 
     if (keyword) {
       const k = `%${keyword}%`;
-      q = q.or(`invoice_no.ilike.${k},buyer_name.ilike.${k},buyer_code.ilike.${k}`);
+
+      // 1) Basic keyword search on invoice header fields
+      const orParts: string[] = [
+        `invoice_no.ilike.${k}`,
+        `buyer_name.ilike.${k}`,
+        `buyer_code.ilike.${k}`,
+      ];
+
+      // 2) Also match buyer company name/code (companies table) -> then filter by buyer_id
+      // This fixes cases where buyer_name on invoice headers might be empty or not matching.
+      try {
+        const { data: buyers, error: buyerErr } = await supabaseAdmin
+          .from("companies")
+          .select("id")
+          .or(`company_name.ilike.${k},code.ilike.${k}`)
+          .limit(50);
+
+        if (!buyerErr && buyers && buyers.length) {
+          const ids = buyers.map((b: any) => b.id).filter(Boolean);
+          if (ids.length) {
+            // PostgREST "in" filter supports UUID list
+            orParts.push(`buyer_id.in.(${ids.join(",")})`);
+          }
+        }
+      } catch {
+        // ignore (do not block invoice list)
+      }
+
+      q = q.or(orParts.join(","));
     }
 
     if (buyerId) q = q.eq("buyer_id", buyerId);
