@@ -54,7 +54,7 @@ function safe(v: any) {
 
 function asArray(v: any): string[] {
   if (!v) return [];
-  if (Array.isArray(v)) return v.map((x) => safe(x)).filter(Boolean);
+  if (Array.isArray(v)) return v.map((x: unknown) => safe(x)).filter(Boolean);
   const s = safe(v);
   if (!s) return [];
   try {
