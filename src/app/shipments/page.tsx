@@ -59,7 +59,7 @@ function asArray(v: any): string[] {
   if (!s) return [];
   try {
     const j = JSON.parse(s);
-    if (Array.isArray(j)) return j.map((x) => safe(x)).filter(Boolean);
+    if (Array.isArray(j)) return j.map((x: unknown) => safe(x)).filter(Boolean);
   } catch {}
   return s.split(/[,\s]+/g).map((x: string) => x.trim()).filter(Boolean);
 }
