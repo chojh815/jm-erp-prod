@@ -52,21 +52,29 @@ function safe(v: any) {
   return (v ?? "").toString().trim();
 }
 
+/**
+ * 에러 수정 부분: map 함수의 인자 x에 명시적 타입을 지정했습니다.
+ */
 function asArray(v: unknown): string[] {
   if (v === null || v === undefined) return [];
-  // If already an array, normalize each item to string
-  if (Array.isArray(v)) return (v as unknown[]).map((x: unknown) => safe(x)).filter(Boolean);
+  
+  // 이미 배열인 경우 처리
+  if (Array.isArray(v)) {
+    return (v as unknown[]).map((x: any) => safe(x)).filter(Boolean);
+  }
 
   const s = safe(v);
   if (!s) return [];
 
-  // Try JSON array first (e.g. '["A","B"]')
+  // JSON 배열 형태인 경우 처리 (예: '["A","B"]')
   try {
     const j: unknown = JSON.parse(s);
-    if (Array.isArray(j)) return (j as unknown[]).map((x: unknown) => safe(x)).filter(Boolean);
+    if (Array.isArray(j)) {
+      return (j as unknown[]).map((x: any) => safe(x)).filter(Boolean);
+    }
   } catch {}
 
-  // Fallback: comma/space separated string
+  // 콤마나 공백으로 구분된 문자열 처리
   return s.split(/[,\s]+/g).map((x: string) => x.trim()).filter(Boolean);
 }
 
@@ -122,7 +130,6 @@ export default function ShipmentsListPage() {
       if (buyer) params.set("buyer", buyer);
       if (status && status !== "ALL") params.set("status", status);
 
-      // URL은 /shipments?... 만 사용 (절대 /shipments/list 사용 X)
       const qs = params.toString();
       router.replace(qs ? `/shipments?${qs}` : "/shipments");
 
@@ -131,6 +138,7 @@ export default function ShipmentsListPage() {
       if (!res.ok || j?.success === false) {
         throw new Error(j?.error || `Failed to load shipments (HTTP ${res.status})`);
       }
+      
       const list = (j?.items ?? j?.data ?? j?.rows ?? []) as any[];
       const normalized: ShipmentListItem[] = (Array.isArray(list) ? list : []).map((r) => ({
         id: safe(r?.id),
