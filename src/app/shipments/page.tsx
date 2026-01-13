@@ -60,7 +60,7 @@ function asArray(v: unknown): string[] {
   
   // 이미 배열인 경우 처리
   if (Array.isArray(v)) {
-    return (v as unknown[]).map((x: any) => safe(x)).filter(Boolean);
+    return (v as unknown[]).map((x: unknown) => safe(x)).filter(Boolean);
   }
 
   const s = safe(v);
@@ -70,7 +70,7 @@ function asArray(v: unknown): string[] {
   try {
     const j: unknown = JSON.parse(s);
     if (Array.isArray(j)) {
-      return (j as unknown[]).map((x: any) => safe(x)).filter(Boolean);
+      return (j as unknown[]).map((x: unknown) => safe(x)).filter(Boolean);
     }
   } catch {}
 
