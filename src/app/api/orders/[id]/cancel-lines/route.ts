@@ -1,4 +1,4 @@
-// src/app/api/orders/[po_no]/cancel-lines/route.ts
+// src/app/api/orders/[id]/cancel-lines/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { assertApiPermission } from "@/lib/api-guard";
@@ -7,43 +7,46 @@ function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
 }
 function bad(message: string, status = 400, extra?: any) {
-  return NextResponse.json(
-    { success: false, error: message, ...(extra ?? {}) },
-    { status }
-  );
+  return NextResponse.json({ success: false, error: message, ...(extra ?? {}) }, { status });
 }
 
-function toInt(v: any): number | null {
+function toInt(v: any, fallback = 0) {
   const n = Number(v);
-  if (!Number.isFinite(n)) return null;
-  if (!Number.isInteger(n)) return null;
-  return n;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.trunc(n);
+}
+
+function isNonNegInt(v: any) {
+  if (v === null || v === undefined || v === "") return false;
+  const n = Number(v);
+  return Number.isFinite(n) && Math.trunc(n) === n && n >= 0;
 }
 
 export async function PUT(
   req: NextRequest,
-  { params }: { params: { po_no: string } }
+  { params }: { params: { id?: string; po_no?: string } }
 ) {
   try {
     const guard = await assertApiPermission("po.edit");
     if (guard) return guard;
 
-    const poNo = String(params?.po_no ?? "").trim();
-    if (!poNo) return bad("po_no is required", 400);
+    const poNo = String((params as any)?.id ?? (params as any)?.po_no ?? "").trim();
+    if (!poNo) return bad("id/po_no is required", 400);
 
     const body = await req.json().catch(() => null);
-    const lines = body?.lines;
+    const reqLines = body?.lines;
     const cancel_reason = String(body?.cancel_reason ?? "").trim();
     const cancel_note = String(body?.cancel_note ?? "").trim();
     const cancel_date = String(body?.cancel_date ?? "").trim();
-    if (!Array.isArray(lines) || lines.length === 0) {
+
+    if (!Array.isArray(reqLines) || reqLines.length === 0) {
       return bad("lines[] is required", 400);
     }
 
-    // 1) PO header 찾기
+    // 1) header
     const { data: header, error: hErr } = await supabaseAdmin
       .from("po_headers")
-      .select("id, po_no, status, cancel_date")
+      .select("id, po_no, status, cancel_date, cancel_reason, cancel_note, cancelled_at, cancelled_by")
       .eq("po_no", poNo)
       .eq("is_deleted", false)
       .maybeSingle();
@@ -53,147 +56,123 @@ export async function PUT(
 
     const poHeaderId = header.id as string;
 
-    const lineIds: string[] = lines
-      .map((x: any) => String(x?.po_line_id ?? "").trim())
+    // 2) normalize request lines
+    const lineIds: string[] = reqLines
+      .map((x: any) => String(x?.po_line_id ?? x?.id ?? "").trim())
       .filter(Boolean);
 
-    if (lineIds.length === 0) return bad("po_line_id is required", 400);
+    if (lineIds.length === 0) return bad("lines[].po_line_id is required", 400);
 
-    // 2) 주문 라인 로드 (ordered qty)
-    const { data: poLines, error: lErr } = await supabaseAdmin
+    // client wants to set absolute cancelled qty per line (0..remaining)
+    const desiredCancelMap = new Map<string, number>();
+    for (const x of reqLines) {
+      const id = String(x?.po_line_id ?? x?.id ?? "").trim();
+      if (!id) continue;
+      const v = x?.qty_cancelled ?? x?.cancel_qty ?? x?.qtyCancelled;
+      if (!isNonNegInt(v)) return bad("qty_cancelled must be a non-negative integer", 400, { po_line_id: id });
+      desiredCancelMap.set(id, toInt(v, 0));
+    }
+
+    // 3) load po_lines
+    const { data: poLines, error: plErr } = await supabaseAdmin
       .from("po_lines")
       .select("id, qty, qty_cancelled")
       .eq("po_header_id", poHeaderId)
-      .in("id", lineIds);
+      .in("id", lineIds)
+      .eq("is_deleted", false);
 
-    if (lErr) return bad("Failed to load po_lines", 500, { detail: lErr.message });
-    if (!poLines?.length) return bad("No matching po_lines", 404);
+    if (plErr) return bad("Failed to load po_lines", 500, { detail: plErr.message });
+    if (!poLines || poLines.length === 0) return bad("No matching po_lines", 404);
 
-    const lineMap = new Map<string, any>(poLines.map((r: any) => [String(r.id), r]));
-
-    // 3) shipped 합산 (shipment_lines: po_line_id, shipped_qty)
-    const shippedMap = new Map<string, number>();
-    const { data: shipRows, error: sErr } = await supabaseAdmin
+    // 4) shipped qty map (shipment_lines)
+    const { data: shippedRows, error: shErr } = await supabaseAdmin
       .from("shipment_lines")
       .select("po_line_id, shipped_qty")
-      .in("po_line_id", lineIds);
+      .eq("po_header_id", poHeaderId)
+      .in("po_line_id", lineIds)
+      .eq("is_deleted", false);
 
-    if (sErr) return bad("Failed to load shipment_lines", 500, { detail: sErr.message });
+    if (shErr) return bad("Failed to load shipment_lines", 500, { detail: shErr.message });
 
-    for (const r of shipRows ?? []) {
-      const id = String((r as any).po_line_id || "");
-      const q = Number((r as any).shipped_qty ?? 0);
-      if (!id) continue;
-      shippedMap.set(id, (shippedMap.get(id) ?? 0) + (Number.isFinite(q) ? q : 0));
+    const shippedMap = new Map<string, number>();
+    for (const r of shippedRows ?? []) {
+      const id = String((r as any).po_line_id ?? "");
+      const q = Number((r as any).shipped_qty ?? 0) || 0;
+      shippedMap.set(id, (shippedMap.get(id) ?? 0) + q);
     }
 
-    // 4) 라인별 검증 + qty_cancelled 업데이트
-    for (const x of lines) {
-      const id = String(x?.po_line_id ?? "").trim();
-      const n = toInt(x?.qty_cancelled);
-      if (!id) return bad("po_line_id missing", 400);
-      if (n === null) return bad(`qty_cancelled must be integer for line ${id}`, 400);
-      if (n < 0) return bad(`qty_cancelled cannot be negative for line ${id}`, 400);
+    // 5) validate & update lines
+    const updates: { id: string; qty_cancelled: number }[] = [];
 
-      const row = lineMap.get(id);
-      if (!row) return bad(`Line not found: ${id}`, 404);
-
-      const ordered = Number(row.qty ?? 0) || 0;
+    for (const r of poLines as any[]) {
+      const id = String(r.id);
+      const ordered = Number(r.qty ?? 0) || 0;
       const shipped = shippedMap.get(id) ?? 0;
 
-      const maxCancel = Math.max(0, ordered - shipped);
-      if (n > maxCancel) {
-        return bad(`Cancel exceeds available qty for line ${id}`, 409, {
-          ordered,
-          shipped,
-          maxCancel,
-          requested: n,
+      // server-side safety: if shipped exists, do not allow CANCELLED workflow via this endpoint
+      if (shipped > 0) {
+        return bad("Cannot cancel lines that have shipped_qty > 0", 409, { po_line_id: id, shipped_qty: shipped });
+      }
+
+      const desired = desiredCancelMap.get(id) ?? (Number(r.qty_cancelled ?? 0) || 0);
+      const maxCancelable = Math.max(0, ordered - shipped);
+
+      if (!Number.isFinite(desired) || Math.trunc(desired) !== desired || desired < 0) {
+        return bad("qty_cancelled must be a non-negative integer", 400, { po_line_id: id });
+      }
+      if (desired > maxCancelable) {
+        return bad("qty_cancelled exceeds cancellable qty", 409, {
+          po_line_id: id,
+          qty: ordered,
+          shipped_qty: shipped,
+          max_cancelled: maxCancelable,
+          requested_cancelled: desired,
         });
       }
 
-      const { error: uErr } = await supabaseAdmin
+      updates.push({ id, qty_cancelled: desired });
+    }
+
+    // apply updates
+    for (const u of updates) {
+      const { error } = await supabaseAdmin
         .from("po_lines")
-        .update({ qty_cancelled: n })
-        .eq("id", id);
-
-      if (uErr) return bad(`Failed to update line ${id}`, 500, { detail: uErr.message });
+        .update({ qty_cancelled: u.qty_cancelled, updated_at: new Date().toISOString() })
+        .eq("id", u.id);
+      if (error) return bad("Failed to update po_lines", 500, { detail: error.message, po_line_id: u.id });
     }
 
-    // 5) 전체 라인 재계산해서 po_headers.status 자동 업데이트
-    const { data: allLines, error: alErr } = await supabaseAdmin
-      .from("po_lines")
-      .select("id, qty, qty_cancelled")
-      .eq("po_header_id", poHeaderId);
-
-    if (alErr) return bad("Failed to reload po_lines", 500, { detail: alErr.message });
-
-    const allIds = (allLines ?? []).map((r: any) => String(r.id)).filter(Boolean);
-
-    const shippedAllMap = new Map<string, number>();
-    if (allIds.length > 0) {
-      const { data: shipAll, error: saErr } = await supabaseAdmin
-        .from("shipment_lines")
-        .select("po_line_id, shipped_qty")
-        .in("po_line_id", allIds);
-
-      if (saErr) return bad("Failed to reload shipment_lines", 500, { detail: saErr.message });
-
-      for (const r of shipAll ?? []) {
-        const id = String((r as any).po_line_id || "");
-        const q = Number((r as any).shipped_qty ?? 0);
-        if (!id) continue;
-        shippedAllMap.set(id, (shippedAllMap.get(id) ?? 0) + (Number.isFinite(q) ? q : 0));
-      }
-    }
-
-    let sumShipped = 0;
+    // 6) recompute status using po_lines + shipped(=0 here)
     let allRemainingZero = true;
-
-    for (const r of allLines ?? []) {
-      const id = String((r as any).id || "");
-      const ordered = Number((r as any).qty ?? 0) || 0;
-      const cancelled = Number((r as any).qty_cancelled ?? 0) || 0;
-      const shipped = shippedAllMap.get(id) ?? 0;
-      sumShipped += shipped;
-
-      const remaining = ordered - shipped - cancelled;
+    for (const r of poLines as any[]) {
+      const ordered = Number(r.qty ?? 0) || 0;
+      const cancelled = updates.find((u) => u.id === String(r.id))?.qty_cancelled ?? (Number(r.qty_cancelled ?? 0) || 0);
+      const remaining = ordered - cancelled; // shipped is 0 here
       if (remaining !== 0) allRemainingZero = false;
     }
 
     let newStatus: string | null = null;
-    if (allRemainingZero) {
-      newStatus = sumShipped > 0 ? "SHIPPED" : "CANCELLED";
-    } else if (sumShipped > 0) {
-      newStatus = "PARTIALLY_SHIPPED";
-    }
+    if (allRemainingZero) newStatus = "CANCELLED";
 
-    if (newStatus && newStatus !== String(header.status ?? "")) {
+    if (newStatus && newStatus !== String((header as any).status ?? "")) {
       const patch: any = { status: newStatus, updated_at: new Date().toISOString() };
 
-      // If client provided cancel meta, store it (do not overwrite existing unless empty)
-      if (cancel_reason && !header.cancel_reason) patch.cancel_reason = cancel_reason;
-      if (cancel_note && !header.cancel_note) patch.cancel_note = cancel_note;
-      if (cancel_date && !header.cancel_date) patch.cancel_date = cancel_date;
-
+      // store cancel meta if provided and existing empty
+      if (cancel_reason && !(header as any).cancel_reason) patch.cancel_reason = cancel_reason;
+      if (cancel_note && !(header as any).cancel_note) patch.cancel_note = cancel_note;
+      if (cancel_date && !(header as any).cancel_date) patch.cancel_date = cancel_date;
 
       if (newStatus === "CANCELLED") {
-        // cancel_date가 비어있으면 오늘로
-        if (!header.cancel_date) {
-          patch.cancel_date = new Date().toISOString().slice(0, 10);
-        }
+        if (!(header as any).cancel_date) patch.cancel_date = new Date().toISOString().slice(0, 10);
+        if (!(header as any).cancelled_at) patch.cancelled_at = new Date().toISOString();
       }
 
-      const { error: phErr } = await supabaseAdmin
-        .from("po_headers")
-        .update(patch)
-        .eq("id", poHeaderId);
-
-      if (phErr) return bad("Failed to update po_headers.status", 500, { detail: phErr.message });
+      const { error: phErr } = await supabaseAdmin.from("po_headers").update(patch).eq("id", poHeaderId);
+      if (phErr) return bad("Failed to update po_headers", 500, { detail: phErr.message });
     }
 
-    return ok({ po_no: poNo, po_header_id: poHeaderId, status: newStatus ?? header.status });
-  } catch (err: any) {
-    console.error("cancel-lines fatal:", err);
-    return bad(err?.message || "Unknown error", 500);
+    return ok({ po_no: poNo, po_header_id: poHeaderId, status: newStatus ?? (header as any).status, updated_lines: updates.length });
+  } catch (e: any) {
+    return bad("Unexpected error", 500, { detail: e?.message ?? String(e) });
   }
 }

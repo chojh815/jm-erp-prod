@@ -1959,13 +1959,6 @@ if (!buyerId) {
       );
       return;
     }
-// Policy (v3): after any shipping happened, do NOT allow full PO status = CANCELLED.
-if (targetStatus === "CANCELLED" && hasAnyShipped) {
-  alert(
-    "You cannot set the whole PO status to CANCELLED after shipping.\n\nPlease cancel only the remaining quantity using Cancel Qty per line."
-  );
-  return;
-}
     const nowIso = new Date().toISOString();
     const audit = {
       created_by: currentUserId,
@@ -1984,7 +1977,7 @@ if (targetStatus === "CANCELLED" && hasAnyShipped) {
         destination: destination || undefined,
         incoterm: undefined as string | undefined,
       },
-      lines: linesToSave.map((l) => ({
+      lines: (lines || []).map((l) => ({
         buyerStyleNo: l.buyerStyleNo || null,
         jmStyleNo: l.jmStyleNo || null,
         description: l.description || null,
