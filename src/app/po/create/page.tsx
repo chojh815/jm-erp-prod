@@ -34,7 +34,7 @@ type ShippingOriginCode =
   | "VN_BACNINH";
 
 type OrderType = "NEW" | "REORDER";
-type POStatus = "DRAFT" | "CONFIRMED";
+type POStatus = "DRAFT" | "CONFIRMED" | "CANCELLED" | "PARTIALLY_SHIPPED" | "SHIPPED";
 type DevRole = AppRole;
 
 const ORIGIN_LABEL: Record<ShippingOriginCode, string> = {
@@ -59,6 +59,9 @@ interface POLine {
   imageUrl?: string;
   images?: string[];
   qty: number;
+  qty_cancelled?: number;
+  shipped_qty?: number;
+  remaining_qty?: number;
   uom: string;
   unitPrice: number;
   unitPriceInput?: string; // 입력 중인 문자열 (소수점 포함)
@@ -322,6 +325,36 @@ React.useEffect(() => {
   const [orderDate, setOrderDate] = React.useState("");
   const [reqShipDate, setReqShipDate] = React.useState("");
   const [cancelDate, setCancelDate] = React.useState("");
+  const [cancelReason, setCancelReason] = React.useState("");
+
+  const [lines, setLines] = React.useState<POLine[]>([
+    {
+      id:
+        typeof crypto !== "undefined"
+          ? crypto.randomUUID()
+          : String(Date.now()),
+      buyerStyleNo: "",
+      jmStyleNo: "",
+      qty: 0,
+      shipped_qty: 0,
+      qty_cancelled: 0,
+      uom: "PCS",
+      unitPrice: 0,
+      currency: "USD",
+      upc: "",
+      amount: 0,
+    },
+  ]);
+  
+const hasAnyShipped = React.useMemo(() => {
+  try {
+    return (lines || []).some(
+      (l) => (Number((l as any).shipped_qty ?? 0) || 0) > 0
+    );
+  } catch {
+    return false;
+  }
+}, [lines]);
   const [selectedOrigin, setSelectedOrigin] =
     React.useState<ShippingOriginCode | undefined>(undefined);
 
@@ -339,6 +372,8 @@ React.useEffect(() => {
       buyerStyleNo: "",
       jmStyleNo: "",
       qty: 0,
+      shipped_qty: 0,
+      qty_cancelled: 0,
       uom: "PCS",
       unitPrice: 0,
       currency: "USD",
@@ -348,30 +383,17 @@ React.useEffect(() => {
     []
   );
 
-  const [lines, setLines] = React.useState<POLine[]>([
-    {
-      id:
-        typeof crypto !== "undefined"
-          ? crypto.randomUUID()
-          : String(Date.now()),
-      buyerStyleNo: "",
-      jmStyleNo: "",
-      qty: 0,
-      uom: "PCS",
-      unitPrice: 0,
-      currency: "USD",
-      upc: "",
-      amount: 0,
-    },
-  ]);
-
+  
   const [saving, setSaving] = React.useState(false);
 
   // ----------------------
   // 수량 / 금액 계산 헬퍼
   // ----------------------
-  const clampQty = (v: number) =>
-    Number.isFinite(v) ? Math.max(0, v) : 0;
+  const clampQty = (v: number) => {
+    if (!Number.isFinite(v)) return 0;
+    // qty/cancel qty는 반드시 0 이상의 정수
+    return Math.max(0, Math.trunc(v));
+  };
 
   const computeAmount = (l: POLine): POLine => {
     const qtyNum =
@@ -411,13 +433,38 @@ React.useEffect(() => {
       prev.map((l) => {
         if (l.id !== id) return l;
         const merged = { ...l, ...patch } as POLine;
+
+        // shipped_qty / qty / qty_cancelled 모두 정수(>=0)로 강제
+        merged.shipped_qty = clampQty(Number(merged.shipped_qty ?? 0));
+
         if (patch.qty !== undefined) {
           merged.qty = clampQty(
             typeof patch.qty === "number"
               ? patch.qty
-              : Number(patch.qty ?? 0) || 0
+              : Number((patch as any).qty ?? 0) || 0
           );
         }
+
+        if ((patch as any).qty_cancelled !== undefined) {
+          merged.qty_cancelled = clampQty(
+            typeof (patch as any).qty_cancelled === "number"
+              ? (patch as any).qty_cancelled
+              : Number((patch as any).qty_cancelled ?? 0) || 0
+          );
+        }
+
+        const ordered = clampQty(Number(merged.qty ?? 0));
+        const shipped = clampQty(Number(merged.shipped_qty ?? 0));
+        const maxCancel = Math.max(0, ordered - shipped);
+
+        const cancelled = clampQty(Number(merged.qty_cancelled ?? 0));
+        if (cancelled > maxCancel) merged.qty_cancelled = maxCancel;
+
+        merged.remaining_qty = Math.max(
+          0,
+          ordered - shipped - clampQty(Number(merged.qty_cancelled ?? 0))
+        );
+
         return computeAmount(merged);
       })
     );
@@ -1136,6 +1183,7 @@ const fetchPoList = React.useCallback(
     setOrderDate("");
     setReqShipDate("");
     setCancelDate("");
+    setCancelReason("");
     setSelectedOrigin(undefined);
     setApprovalTarget("");
     setPPTarget("");
@@ -1293,6 +1341,10 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
             imageUrl: row.image_url || undefined,
             images: normalizeImageUrls((row as any).image_urls ?? (row as any).images ?? (row as any).imageUrls, (row as any).image_url ?? (row as any).imageUrl),
             qty: row.qty ?? 0,
+            shipped_qty:
+              (row.shipped_qty ?? (row as any).shippedQty ?? 0) as any,
+            qty_cancelled:
+              (row.qty_cancelled ?? (row as any).cancel_qty ?? (row as any).cancelQty ?? 0) as any,
             uom: row.uom || "PCS",
             unitPrice: row.unit_price ?? 0,
             currency: row.currency || header.currency || "USD",
@@ -1364,6 +1416,8 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
         setReqShipDate(draft.reqShipDate);
       if (typeof draft.cancelDate === "string")
         setCancelDate(draft.cancelDate);
+      if (typeof (draft as any).cancelReason === "string")
+        setCancelReason((draft as any).cancelReason);
       if (draft.selectedOrigin)
         setSelectedOrigin(draft.selectedOrigin);
       if (typeof draft.approvalTarget === "string")
@@ -1440,6 +1494,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
       orderDate,
       reqShipDate,
       cancelDate,
+      cancelReason,
       selectedOrigin,
       approvalTarget,
       ppTarget,
@@ -1493,7 +1548,52 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
   // - Keeps current header fields + lines
   // - Clears poHeaderId so backend creates a NEW header row
   // ----------------------
-  const handleDuplicateAsNew = async () => {
+  
+  const handleSaveAsCancelled = async () => {
+    if (!String(cancelReason || "").trim()) {
+      alert("Cancel Reason is required.");
+      return;
+    }
+
+    // Policy: full CANCELLED is only allowed when NOTHING has been shipped.
+    const totalShipped = (lines || []).reduce(
+      (sum, l) => sum + Math.trunc(Number((l as any).shipped_qty ?? 0) || 0),
+      0
+    );
+
+    if (totalShipped > 0) {
+      const ok = window.confirm(
+        `⚠️ This PO already has shipped quantity (total shipped: ${totalShipped}).\n\n` +
+          `You cannot set the whole PO status to CANCELLED after shipping.\n\n` +
+          `Do you want to CANCEL ONLY the remaining quantity instead?`
+      );
+      if (!ok) return;
+
+      const todayStr = new Date().toISOString().slice(0, 10);
+      if (!cancelDate) setCancelDate(todayStr);
+
+      const newLines = (lines || []).map((l) => {
+        const ordered = Math.trunc(Number(l.qty ?? 0) || 0);
+        const shipped = Math.trunc(Number((l as any).shipped_qty ?? 0) || 0);
+        const maxCancel = Math.max(0, ordered - shipped);
+        return {
+          ...l,
+          qty_cancelled: maxCancel,
+        };
+      });
+
+      setLines(newLines);
+      // Save header (keep current status), then save cancel qty (cancel-lines API will auto-update status)
+      await onSavePO(status, { overrideLines: newLines });
+      return;
+    }
+
+    // No shipment yet => full cancel is allowed
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (!cancelDate) setCancelDate(todayStr);
+    await onSavePO("CANCELLED");
+  };
+const handleDuplicateAsNew = async () => {
     const base = (poNo || "").toString().trim();
     const suggested =
       base && !base.toUpperCase().endsWith("S") ? `${base}S` : `${base}-COPY`;
@@ -1572,7 +1672,7 @@ if (!poNo) {
   // ----------------------
   const onSavePO = async (
     targetStatus: POStatus,
-    options?: { silent?: boolean }
+    options?: { silent?: boolean; overrideLines?: POLine[] }
   ) => {
     if (saving) return;
 
@@ -1600,6 +1700,7 @@ if (!poNo) {
       alert("PO No is required.");
       return;
     }
+    const linesToSave = options?.overrideLines ?? lines;
 
     // ✅ Safety: if this page loaded an existing PO and user changed PO No,
     //    saving would RENAME the existing PO (overwrite). Block unless confirmed.
@@ -1671,8 +1772,25 @@ if (!poNo) {
         }
       }
     }
-
+// Policy (v3): after any shipping happened, do NOT allow full PO status = CANCELLED.
+if (targetStatus === "CANCELLED" && hasAnyShipped) {
+  alert(
+    "You cannot set the whole PO status to CANCELLED after shipping.\n\nPlease cancel only the remaining quantity using Cancel Qty per line."
+  );
+  return;
+}
     const nowIso = new Date().toISOString();
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const cancelDateToSave =
+      targetStatus === "CANCELLED"
+        ? (cancelDate || todayStr)
+        : (cancelDate || null);
+
+    // 전량취소 저장 시 cancel date가 비어있으면 오늘로 자동 세팅
+    if (targetStatus === "CANCELLED" && !cancelDate) {
+      setCancelDate(todayStr);
+    }
 
     const headerPayload = {
       id: poHeaderId || undefined,
@@ -1697,7 +1815,8 @@ if (!poNo) {
       payment_term: paymentTermName || null,
       ship_mode: shipMode || null,
       destination: destination || null,
-      cancel_date: cancelDate || null,
+      cancel_date: cancelDateToSave,
+      cancel_reason: (cancelReason || null),
       requested_ship_date: reqShipDate || null,
       shipping_origin_code: selectedOrigin || null,
       approval_sample_target_date:
@@ -1747,6 +1866,46 @@ if (!poNo) {
       if (!poNo && data?.po_no) {
         setPoNo(data.po_no);
       }
+
+
+// ✅ qty_cancelled 저장(별도 API): /api/orders/{po_no}/cancel-lines
+// - /api/orders POST가 라인에 qty_cancelled를 저장하지 않는 환경에서도 안정적으로 동작하게 분리
+const resolvedPoNo = String(poNo || data?.po_no || "").trim();
+if (resolvedPoNo) {
+  const payloadCancel = {
+    cancel_reason: cancelReason || null,
+    cancel_date: cancelDateToSave || null,
+    lines: (linesToSave || []).map((l) => ({
+      po_line_id: l.id,
+      qty_cancelled: Number(l.qty_cancelled ?? 0) || 0,
+    })),
+  };
+
+  // qty_cancelled가 하나라도 있거나, 취소 저장/검증이 필요할 때 호출
+  const shouldCallCancel =
+    payloadCancel.lines.some((x: any) => (Number(x.qty_cancelled) || 0) > 0) ||
+    targetStatus === "CANCELLED";
+
+  if (shouldCallCancel) {
+    const resCancel = await fetch(
+      `/api/orders/${encodeURIComponent(resolvedPoNo)}/cancel-lines`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payloadCancel),
+      }
+    );
+    const dataCancel = await resCancel.json().catch(() => null);
+    if (!resCancel.ok) {
+      console.error("cancel-lines error:", dataCancel);
+      alert(
+        (dataCancel && (dataCancel.error || dataCancel.message)) ||
+          `Failed to save cancel qty (status ${resCancel.status}).`
+      );
+      // cancel qty 저장 실패해도 PO 자체 저장은 성공했으니 여기서 return은 하지 않음
+    }
+  }
+}
 
       // keep header id (create/update)
       if (data?.headerId || data?.header_id) {
@@ -1800,7 +1959,13 @@ if (!buyerId) {
       );
       return;
     }
-
+// Policy (v3): after any shipping happened, do NOT allow full PO status = CANCELLED.
+if (targetStatus === "CANCELLED" && hasAnyShipped) {
+  alert(
+    "You cannot set the whole PO status to CANCELLED after shipping.\n\nPlease cancel only the remaining quantity using Cancel Qty per line."
+  );
+  return;
+}
     const nowIso = new Date().toISOString();
     const audit = {
       created_by: currentUserId,
@@ -1819,7 +1984,7 @@ if (!buyerId) {
         destination: destination || undefined,
         incoterm: undefined as string | undefined,
       },
-      lines: lines.map((l) => ({
+      lines: linesToSave.map((l) => ({
         buyerStyleNo: l.buyerStyleNo || null,
         jmStyleNo: l.jmStyleNo || null,
         description: l.description || null,
@@ -2165,6 +2330,20 @@ const canCreateProforma =
                             <div className="text-xs px-2 py-1 rounded border border-dashed border-slate-300 text-slate-600 bg-slate-50">
                               {status}
                             </div>
+
+                          {/* Cancel Reason */}
+                          <div className="space-y-2">
+                            <Label className="text-xs text-slate-600">
+                              Cancel Reason
+                            </Label>
+                            <Input
+                              value={cancelReason}
+                              onChange={(e) => setCancelReason(e.target.value)}
+                              placeholder="e.g., Buyer cancelled / revised order"
+                              className="h-9 text-sm"
+                            />
+                          </div>
+
                           </div>
                         </div>
 
@@ -2789,7 +2968,7 @@ const canCreateProforma =
                             </div>
 
                             {/* Qty / UOM / Unit Price / Amount / UPC */}
-                            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                            <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
                               {/* Qty */}
                               <div className="space-y-1.5">
                                 <Label className="text-[11px] text-slate-600">
@@ -2819,6 +2998,66 @@ const canCreateProforma =
                                     updateLine(line.id, { qty: n });
                                   }}
                                 />
+                              </div>
+
+                              {/* Shipped Qty (read only) */}
+                              <div className="space-y-1.5">
+                                <Label className="text-[11px] text-slate-600">
+                                  Shipped
+                                </Label>
+                                <div className="h-8 text-xs flex items-center justify-end px-2 rounded border border-slate-200 bg-slate-50 text-slate-700">
+                                  {line.shipped_qty ? formatIntWithComma(line.shipped_qty) : "0"}
+                                </div>
+                              </div>
+
+                              {/* Cancel Qty */}
+                              <div className="space-y-1.5">
+                                <Label className="text-[11px] text-slate-600">
+                                  Cancel Qty
+                                </Label>
+                                <Input
+                                  type="text"
+                                  inputMode="numeric"
+                                  className="h-8 text-xs text-right"
+                                  value={
+                                    line.qty_cancelled
+                                      ? formatIntWithComma(line.qty_cancelled)
+                                      : ""
+                                  }
+                                  onChange={(e) => {
+                                    const raw = e.target.value.replace(/,/g, "").trim();
+                                    if (!/^\d*$/.test(raw)) return;
+                                    const n = Number(raw || "0");
+                                    if (Number.isNaN(n)) return;
+                                    updateLine(line.id, { qty_cancelled: n } as any);
+                                  }}
+                                />
+                                <div className="text-[10px] text-slate-500">
+                                  Max:{" "}
+                                  {formatIntWithComma(
+                                    Math.max(
+                                      0,
+                                      (line.qty || 0) - (line.shipped_qty || 0)
+                                    )
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Remaining (computed) */}
+                              <div className="space-y-1.5">
+                                <Label className="text-[11px] text-slate-600">
+                                  Remaining
+                                </Label>
+                                <div className="h-8 text-xs flex items-center justify-end px-2 rounded border border-slate-200 bg-slate-50 text-slate-700">
+                                  {formatIntWithComma(
+                                    Math.max(
+                                      0,
+                                      (line.qty || 0) -
+                                        (line.shipped_qty || 0) -
+                                        (line.qty_cancelled || 0)
+                                    )
+                                  )}
+                                </div>
                               </div>
 
                               {/* UOM */}
@@ -3130,6 +3369,26 @@ const canCreateProforma =
                             ? "Creating Proforma..."
                             : "Create Proforma Invoice"}
                         </Button>
+                        <Button
+                          type="button"
+                          className="w-full bg-rose-600 hover:bg-rose-700"
+                          disabled={saving || !poNo || hasAnyShipped}
+                          title={
+                            !poNo
+                              ? "Save PO first to get PO No."
+                              : hasAnyShipped
+                              ? "Shipping exists: use Cancel Qty per line"
+                              : !String(cancelReason || "").trim()
+                              ? "Cancel Reason is required"
+                              : "Cancel this PO (buyer cancelled)"
+                          }
+                          onClick={handleSaveAsCancelled}
+                        >
+                          {saving && status === "CANCELLED"
+                            ? "Saving..."
+                            : "Save as Cancelled"}
+                        </Button>
+
                       </div>
 
                       <Separator />

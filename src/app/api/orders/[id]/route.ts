@@ -112,7 +112,48 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ success: true, header, lines: lines ?? [] });
+
+// ✅ shipped_qty(출하수량) 합산해서 라인에 붙여 내려줌
+// - shipment_lines: po_line_id, shipped_qty
+const baseLines = (lines ?? []) as any[];
+const lineIds = baseLines
+  .map((r) => String(r?.id || ""))
+  .filter((v) => isUuid(v));
+
+const shippedMap = new Map<string, number>();
+if (lineIds.length > 0) {
+  const { data: shipRows, error: shipErr } = await supabaseAdmin
+    .from("shipment_lines")
+    .select("po_line_id, shipped_qty")
+    .in("po_line_id", lineIds);
+
+  if (shipErr) {
+    console.error("Load shipment_lines error:", shipErr);
+  } else {
+    for (const r of shipRows ?? []) {
+      const id = String((r as any).po_line_id || "");
+      const q = Number((r as any).shipped_qty ?? 0);
+      if (!id) continue;
+      shippedMap.set(id, (shippedMap.get(id) ?? 0) + (Number.isFinite(q) ? q : 0));
+    }
+  }
+}
+
+const enrichedLines = baseLines.map((r) => {
+  const ordered = Number((r as any).qty ?? 0) || 0;
+  const cancelled = Number((r as any).qty_cancelled ?? (r as any).cancel_qty ?? 0) || 0;
+  const shipped = shippedMap.get(String((r as any).id)) ?? 0;
+  const remaining = Math.max(0, ordered - shipped - cancelled);
+
+  return {
+    ...r,
+    shipped_qty: shipped,
+    qty_cancelled: cancelled,
+    remaining_qty: remaining,
+  };
+});
+
+    return NextResponse.json({ success: true, header, lines: enrichedLines });
   } catch (err: any) {
     console.error("Get PO Fatal:", err);
     return NextResponse.json(
@@ -260,6 +301,8 @@ export async function PUT(
       "ship_mode",
       "carrier",
       "remarks",
+      "cancel_date",
+      "cancel_reason",
       "status",
     ];
 
