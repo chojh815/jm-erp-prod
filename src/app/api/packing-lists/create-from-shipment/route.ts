@@ -220,6 +220,36 @@ export async function POST(req: Request) {
     });
     if (slErr) throw new Error(slErr.message);
 
+    // ✅ Buyer Style lookup (po_line_id -> po_lines.buyer_style_no)
+    const buyerStyleByPoLineId = new Map<string, string>();
+    try {
+      const poLineIds = Array.from(
+        new Set(
+          (sLines || [])
+            .map((x: any) => x?.po_line_id)
+            .filter((v: any) => v && typeof v === "string")
+        )
+      );
+
+      if (poLineIds.length > 0) {
+        const { data: poLines, error: poErr } = await supabaseAdmin
+          .from("po_lines")
+          .select("id, buyer_style_no")
+          .in("id", poLineIds);
+
+        if (poErr) {
+          console.warn("[PL create-from-shipment] buyer_style lookup failed:", poErr);
+        } else {
+          (poLines || []).forEach((p: any) => {
+            const bs = (p?.buyer_style_no ?? "").toString().trim();
+            if (p?.id && bs) buyerStyleByPoLineId.set(p.id, bs);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("[PL create-from-shipment] buyer_style lookup exception:", e);
+    }
+
     // ------------------------------------------------------------
     // 4) header 생성 (Shipment → PL Header 복사)
     //    ✅ 핵심: invoice_id / invoice_no 저장!
@@ -294,7 +324,8 @@ export async function POST(req: Request) {
           packing_list_id: header.id,
 
           po_no: r.po_no ?? shipment.po_no ?? null,
-          style_no: r.style_no ?? null,
+          // ✅ 바이어 스타일만 표시: po_line_id 기반 buyer_style_no 우선
+          style_no: (buyerStyleByPoLineId.get(r.po_line_id) ?? r.style_no) ?? null,
           description: r.description ?? null,
 
           // carton range는 PL에서 직접 입력하는 게 맞음 → 초기 null

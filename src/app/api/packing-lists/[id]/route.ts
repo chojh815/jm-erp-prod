@@ -38,6 +38,19 @@ function pickTextIfEmpty(cur: any, fallback: any) {
   return isBlankText(cur) ? fallback : cur;
 }
 
+
+function pickBuyerStyleNo(row: any): string | null {
+  const v =
+    row?.buyer_style_no ??
+    row?.buyerStyleNo ??
+    row?.buyer_style ??
+    row?.buyer_style_r ??
+    row?.buyer_style_number ??
+    row?.buyer_style_no_text ??
+    null;
+  return isBlankText(v) ? null : String(v).trim();
+}
+
 function calcPerCtn(total: any, cartons: any): number | null {
   const c = num(cartons, 0);
   const t = num(total, 0);
@@ -157,8 +170,18 @@ function normalizeLine(row: any) {
       ? num(row.ct_no_to, 0)
       : null;
 
-  return {
+  
+  // ✅ JM-ERP 정책: Packing List에서는 "Style No" = "Buyer Style No"
+  // - buyer_style_no가 있으면 style_no도 동일하게 맞춘다.
+  // - buyer_style_no가 없고 style_no만 있으면, 그 값을 buyer_style_no로도 사용한다.
+  const buyerStyleNo = pickBuyerStyleNo(row);
+  const styleNoText = buyerStyleNo ?? (isBlankText(row?.style_no) ? null : String(row.style_no).trim());
+  const finalBuyerStyleNo = buyerStyleNo ?? styleNoText;
+
+return {
     ...row,
+    buyer_style_no: finalBuyerStyleNo,
+    style_no: styleNoText,
     cartons,
     qty,
 
@@ -191,14 +214,16 @@ function enrichFromShipment(lines: any[], shipmentLines: any[]) {
   const mapFull = new Map<string, any>();
   const mapLite = new Map<string, any>();
   for (const sl of shipmentLines) {
-    mapFull.set(keyFull(sl.po_no, sl.style_no, sl.description), sl);
-    mapLite.set(keyLite(sl.po_no, sl.style_no), sl);
+    const slStyleKey = pickBuyerStyleNo(sl) ?? (isBlankText(sl?.style_no) ? null : String(sl.style_no).trim());
+    mapFull.set(keyFull(sl.po_no, slStyleKey, sl.description), sl);
+    mapLite.set(keyLite(sl.po_no, slStyleKey), sl);
   }
 
   return lines.map((l) => {
+    const lStyleKey = pickBuyerStyleNo(l) ?? (isBlankText(l?.style_no) ? null : String(l.style_no).trim());
     const sl =
-      mapFull.get(keyFull(l.po_no, l.style_no, l.description)) ??
-      mapLite.get(keyLite(l.po_no, l.style_no));
+      mapFull.get(keyFull(l.po_no, lStyleKey, l.description)) ??
+      mapLite.get(keyLite(l.po_no, lStyleKey));
 
     if (!sl) return l;
 
@@ -207,6 +232,8 @@ function enrichFromShipment(lines: any[], shipmentLines: any[]) {
 
     return {
       ...l,
+      buyer_style_no: (pickBuyerStyleNo(l) ?? pickBuyerStyleNo(sl) ?? lStyleKey) ?? null,
+      style_no: (pickBuyerStyleNo(l) ?? pickBuyerStyleNo(sl) ?? lStyleKey) ?? null,
       shipped_qty: l.shipped_qty ?? sl.shipped_qty ?? null,
       order_qty: l.order_qty ?? sl.order_qty ?? null,
       qty: pickIfEmpty(l.qty, sl.shipped_qty ?? sl.order_qty ?? l.qty),
@@ -331,7 +358,7 @@ export async function GET(
         const { data: invRow } = await supabaseAdmin
           .from("invoice_headers")
           .select(
-            "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+            "id, invoice_no, invoice_date, created_at, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
           )
           .eq("id", invId)
           .maybeSingle();
@@ -350,7 +377,7 @@ export async function GET(
           const { data: invRow } = await supabaseAdmin
             .from("invoice_headers")
             .select(
-              "id, invoice_no, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
+              "id, invoice_no, invoice_date, created_at, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
             )
             .eq("invoice_no", invNoText)
             .maybeSingle();
@@ -359,6 +386,14 @@ export async function GET(
       }
 
       if (inv) {
+        // ✅ Packing List PDF에서 Invoice Date를 표시할 수 있도록 invoice_date를 헤더에 주입
+        // - invoice_headers.invoice_date가 있으면 우선 사용
+        // - 없으면 invoice_headers.created_at을 폴백으로 사용
+        const invDate = (inv.invoice_date ?? inv.created_at ?? null) as any;
+        if (!(H as any).invoice_date && invDate) (H as any).invoice_date = invDate;
+        // 프론트/기존 코드 호환용(혹시 invoiceDate를 쓰는 경우)
+        if (!(H as any).invoiceDate && invDate) (H as any).invoiceDate = invDate;
+
         const patch: any = {};
         patch.shipper_name = pickTextIfEmpty(H.shipper_name, inv.shipper_name);
         patch.shipper_address = pickTextIfEmpty(H.shipper_address, inv.shipper_address);
@@ -421,7 +456,8 @@ export async function GET(
 
         return {
           po_no: sl.po_no ?? null,
-          style_no: sl.style_no ?? null,
+          buyer_style_no: sl.buyer_style_no ?? sl.buyerStyleNo ?? sl.style_no ?? null,
+          style_no: sl.buyer_style_no ?? sl.buyerStyleNo ?? sl.style_no ?? null,
           description: sl.description ?? null,
           cartons,
 
@@ -528,7 +564,8 @@ export async function PUT(
           packing_list_id: plId,
 
           po_no: x.po_no ?? null,
-          style_no: x.style_no ?? null,
+          buyer_style_no: pickBuyerStyleNo(x) ?? (isBlankText(x?.style_no) ? null : String(x.style_no).trim()),
+          style_no: pickBuyerStyleNo(x) ?? (isBlankText(x?.style_no) ? null : String(x.style_no).trim()),
           description: x.description ?? null,
 
           cartons,

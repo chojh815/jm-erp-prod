@@ -214,7 +214,7 @@ export default function PackingListPdfPage() {
               <div> Packing List No: {(header?.packing_list_no ?? "").toString() || "-"}</div>
               <div> Packing Date: {fmtDate(header?.packing_date)}</div>
               <div> Invoice No: {(header?.invoice_no ?? "").toString() || "-"}</div>
-              <div> Invoice Date: {fmtDate(header?.invoice_date)}</div>
+              <div> Invoice Date: {fmtDate(header?.invoice_date ?? header?.invoice_created_at ?? header?.invoice_created ?? header?.created_at)}</div>
             </td>
           </tr>
           <tr>
@@ -241,7 +241,7 @@ export default function PackingListPdfPage() {
           <tr>
             <th style={{ width: "8%" }}>C/T No</th>
             <th style={{ width: "14%" }}>PO #</th>
-            <th style={{ width: "11%" }}>Style #</th>
+            <th style={{ width: "11%" }}>Buyer Style #</th>
             <th style={{ width: "24%" }}>Description</th>
             <th style={{ width: "8%" }}>Cartons</th>
             <th style={{ width: "12%" }}>Qty/CTN</th>
@@ -277,7 +277,7 @@ export default function PackingListPdfPage() {
                       <tr key={`${poNo}-${idx}`}>
                         <td className="center">{(r?.ct_range ?? r?.ct_no ?? r?.ct_from_to ?? "").toString() || "-"}</td>
                         <td className="center">{(r?.po_no ?? "").toString() || "-"}</td>
-                        <td className="center">{(r?.style_no ?? r?.style ?? "").toString() || "-"}</td>
+                        <td className="center">{(r?.buyer_style_no ?? r?.buyer_style ?? "").toString() || "-"}</td>
                         <td>{(r?.description ?? "").toString() || ""}</td>
                         <td className="right">{fmt0(cartons)}</td>
                         <td className="right">{fmt0(qtyPerCtn)}</td>
