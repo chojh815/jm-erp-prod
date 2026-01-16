@@ -44,6 +44,59 @@ function n(v: any, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
+// ---- image helpers ----
+function firstNonEmptyString(arr: any[]): string | null {
+  for (const v of arr) {
+    if (v === null || v === undefined) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
+function asStringArray(v: any): string[] {
+  if (v === null || v === undefined) return [];
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return [];
+    // json string like ["url1","url2"]
+    if (s.startsWith("[") && s.endsWith("]")) {
+      try {
+        const j = JSON.parse(s);
+        if (Array.isArray(j)) return j.map((x) => String(x).trim()).filter(Boolean);
+      } catch {}
+    }
+    if (s.includes(",")) return s.split(",").map((x) => x.trim()).filter(Boolean);
+    return [s];
+  }
+  // jsonb may come as object in some cases; best-effort stringify
+  try {
+    const s = JSON.stringify(v);
+    if (s && s.startsWith("[") && s.endsWith("]")) {
+      const j = JSON.parse(s);
+      if (Array.isArray(j)) return j.map((x) => String(x).trim()).filter(Boolean);
+    }
+  } catch {}
+  return [];
+}
+
+function pickLineImages(line: any, preferred: string[] | undefined): string[] {
+  const fromJoin = Array.isArray(preferred) ? preferred : [];
+  if (fromJoin.length > 0) return fromJoin;
+
+  const main = firstNonEmptyString([line?.main_image_url, line?.mainImageUrl]);
+  const single = firstNonEmptyString([line?.image_url, line?.imageUrl]);
+  const arr = asStringArray(line?.image_urls ?? line?.imageUrls);
+
+  const out: string[] = [];
+  if (main) out.push(main);
+  if (single) out.push(single);
+  for (const u of arr) out.push(u);
+
+  return uniq(out);
+}
+
 /** ---- row types (casting only) ---- */
 type PoHeaderRow = {
   id: string;
@@ -82,6 +135,10 @@ type PoLineRow = {
   line_no: number | null;
   buyer_style_no: string | null;
   jm_style_no: string | null;
+  // ✅ image columns (some deployments store URLs directly on po_lines)
+  image_url?: string | null;
+  image_urls?: any | null; // jsonb (usually string[])
+  main_image_url?: string | null;
   description: string | null;
   color: string | null;
   size: string | null;
@@ -162,6 +219,9 @@ export async function GET(req: Request) {
             "line_no",
             "buyer_style_no",
             "jm_style_no",
+            "image_url",
+            "image_urls",
+            "main_image_url",
             "description",
             "color",
             "size",
@@ -289,7 +349,7 @@ export async function GET(req: Request) {
         shipmentNo: shipmentByLine[r.id]?.shipmentNo ?? null,
         shipmentStatus: shipmentByLine[r.id]?.status ?? null,
 
-        images: imagesByLine[r.id] ?? [],
+        images: pickLineImages(r, imagesByLine[r.id]),
         createdAt: r.created_at,
         updatedAt: r.updated_at,
       }));

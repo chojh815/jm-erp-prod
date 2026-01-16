@@ -165,6 +165,7 @@ function normalizeHeader(raw: any): PoHeaderItem {
 }
 
 function normalizeLine(raw: any): PoLineItem {
+  const imageCandidate = extractFirstImageLike(raw);
   return {
     id: raw?.id,
     headerId: raw?.headerId ?? raw?.poHeaderId ?? raw?.po_header_id ?? "",
@@ -201,9 +202,134 @@ function normalizeLine(raw: any): PoLineItem {
     brand: raw?.brand ?? null,
     shipment_mode: raw?.shipment_mode ?? null,
     delivery_date: raw?.delivery_date ?? null,
-    imageUrl: raw?.imageUrl ?? raw?.image_url ?? null,
+    imageUrl: imageCandidate,
     work_sheet_id: raw?.work_sheet_id ?? raw?.workSheetId ?? null,
   };
+}
+
+function isNonEmptyString(v: any): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+// --------- Image URL resolver (supports images[] / storage paths) ---------
+// If your API already returns a full https URL, it will be used as-is.
+// If your API returns an array (images[]) or a Storage object path, we try to convert it.
+const IMAGE_BUCKET_CANDIDATES = [
+  "po-line-images",
+  "po_line_images",
+  "po-images",
+  "po_images",
+  "images",
+];
+
+function firstStringInArray(arr: any[]): string | null {
+  for (const it of arr) {
+    if (isNonEmptyString(it)) return it.trim();
+    const u = it?.url ?? it?.publicUrl ?? it?.public_url ?? it?.imageUrl ?? it?.image_url;
+    if (isNonEmptyString(u)) return u.trim();
+  }
+  return null;
+}
+
+function tryParseMaybeJsonArray(v: any): any[] | null {
+  if (!isNonEmptyString(v)) return null;
+  const s = v.trim();
+  if (!(s.startsWith("[") && s.endsWith("]"))) return null;
+  try {
+    const j = JSON.parse(s);
+    return Array.isArray(j) ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractFirstImageLike(raw: any): string | null {
+  const direct =
+    raw?.mainImageUrl ??
+    raw?.main_image_url ??
+    raw?.main_image ??
+    raw?.imageUrl ??
+    raw?.image_url ??
+    raw?.thumbnailUrl ??
+    raw?.thumbnail_url ??
+    raw?.thumbUrl ??
+    raw?.thumb_url ??
+    null;
+  if (isNonEmptyString(direct)) return direct.trim();
+
+  const arrLike =
+    raw?.images ??
+    raw?.imageUrls ??
+    raw?.image_urls ??
+    raw?.poLineImages ??
+    raw?.po_line_images ??
+    null;
+
+  if (Array.isArray(arrLike)) {
+    const s = firstStringInArray(arrLike);
+    if (s) return s;
+  }
+
+  const maybeJsonArr = tryParseMaybeJsonArray(arrLike);
+  if (maybeJsonArr) {
+    const s = firstStringInArray(maybeJsonArr);
+    if (s) return s;
+  }
+
+  // comma separated string like "url1, url2"
+  if (isNonEmptyString(arrLike) && arrLike.includes(",")) {
+    const first = arrLike
+      .split(",")
+      .map((x: string) => x.trim())
+      .find((x: string) => x.length > 0);
+    if (first) return first;
+  }
+
+  return null;
+}
+
+function looksLikeHttpUrl(v: string) {
+  return /^https?:\/\//i.test(v);
+}
+
+function cleanStoragePath(p: string) {
+  let s = p.trim();
+  if (s.startsWith("/")) s = s.slice(1);
+  // remove common prefixes
+  s = s.replace(/^public\//i, "");
+  return s;
+}
+
+/**
+ * Convert a storage-like path to a public URL.
+ * - If input is already a full URL, return as-is.
+ * - If input looks like "bucket/path/to/file.jpg", use that bucket.
+ * - Otherwise, fall back to the first candidate bucket.
+ */
+function resolveImageUrlFromStorage(
+  supabase: ReturnType<typeof createSupabaseBrowserClient>,
+  maybeUrl: string | null
+): string | null {
+  if (!isNonEmptyString(maybeUrl)) return null;
+  const raw = maybeUrl.trim();
+  if (!raw) return null;
+  if (looksLikeHttpUrl(raw)) return raw;
+
+  const cleaned = cleanStoragePath(raw);
+  const parts = cleaned.split("/").filter(Boolean);
+  if (parts.length >= 2) {
+    const maybeBucket = parts[0];
+    const objectPath = parts.slice(1).join("/");
+    if (IMAGE_BUCKET_CANDIDATES.includes(maybeBucket)) {
+      const { data } = supabase.storage.from(maybeBucket).getPublicUrl(objectPath);
+      return data?.publicUrl ?? null;
+    }
+  }
+
+  // fallback: assume first candidate bucket
+  const fallbackBucket = IMAGE_BUCKET_CANDIDATES[0];
+  const { data } = supabase.storage.from(fallbackBucket).getPublicUrl(cleaned);
+  return data?.publicUrl ?? null;
 }
 
 /** ------------------ ✅ Multi-sort ------------------ */
@@ -342,6 +468,10 @@ export default function PurchaseOrderListPage() {
 
   // po_line_id -> work_sheet_id
   const [wsMap, setWsMap] = useState<Record<string, string>>({});
+
+  // Line detail drawer (Row click -> Right Drawer)
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [selectedLine, setSelectedLine] = useState<PoLineItem | null>(null);
 
   // ---------- Auth ----------
   useEffect(() => {
@@ -1238,16 +1368,6 @@ export default function PurchaseOrderListPage() {
                               <Button type="button" variant="outline" size="sm" onClick={() => handleView(it)}>
                                 View
                               </Button>
-                              <Button
-                                type="button"
-                                size="sm"
-                                onClick={() => {
-                                  loadLinesForPo(it);
-                                  alert("아래 Line Details에서 라인(스타일)별로 Create/Open WS를 눌러주세요.");
-                                }}
-                              >
-                                Work Sheets
-                              </Button>
                             </div>
                           </td>
                         </tr>
@@ -1303,8 +1423,8 @@ export default function PurchaseOrderListPage() {
             {/* Lines */}
             <Separator className="my-4" />
 
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-              <Card className="xl:col-span-2">
+            <div className="grid grid-cols-1 gap-4">
+              <Card>
                 <CardHeader>
                   <CardTitle className="text-lg">Line Details (Styles in selected PO)</CardTitle>
                 </CardHeader>
@@ -1326,6 +1446,7 @@ export default function PurchaseOrderListPage() {
                               <th className="px-3 py-2 border-b">Line</th>
                               <th className="px-3 py-2 border-b">JM No</th>
                               <th className="px-3 py-2 border-b">Buyer Style</th>
+                              <th className="px-3 py-2 border-b">Img</th>
                               <th className="px-3 py-2 border-b">Brand</th>
                               <th className="px-3 py-2 border-b text-right">Qty</th>
                               <th className="px-3 py-2 border-b text-right">Price</th>
@@ -1338,14 +1459,14 @@ export default function PurchaseOrderListPage() {
                           <tbody>
                             {linesLoading && (
                               <tr>
-                                <td colSpan={10} className="px-3 py-4 text-center text-slate-400">
+                                <td colSpan={11} className="px-3 py-4 text-center text-slate-400">
                                   Loading...
                                 </td>
                               </tr>
                             )}
                             {!linesLoading && lines.length === 0 && (
                               <tr>
-                                <td colSpan={10} className="px-3 py-4 text-center text-slate-400">
+                                <td colSpan={11} className="px-3 py-4 text-center text-slate-400">
                                   No lines for this PO.
                                 </td>
                               </tr>
@@ -1375,11 +1496,43 @@ export default function PurchaseOrderListPage() {
                                     ? (ln.qty || 0) * priceVal
                                     : null;
 
+                              const imgSrc = resolveImageUrlFromStorage(supabase, ln.imageUrl);
+
                               return (
-                                <tr key={ln.id} className="border-t">
+                                <tr
+                                  key={ln.id}
+                                  className="border-t hover:bg-sky-50 cursor-pointer"
+                                  onClick={() => {
+                                    setSelectedLine({ ...ln, work_sheet_id: hasWs ? (existing as any) : ln.work_sheet_id });
+                                    setDrawerOpen(true);
+                                  }}
+                                >
                                   <td className="px-3 py-2">{ln.lineNo ?? "-"}</td>
                                   <td className="px-3 py-2">{ln.jmStyleNo ?? "-"}</td>
                                   <td className="px-3 py-2">{ln.buyerStyleNo ?? "-"}</td>
+                                  <td className="px-3 py-2">
+                                    <button
+                                      type="button"
+                                      className="w-10 h-10 rounded-md border bg-white overflow-hidden flex items-center justify-center hover:ring-2 hover:ring-sky-200"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedLine({ ...ln, work_sheet_id: hasWs ? (existing as any) : ln.work_sheet_id });
+                                        setDrawerOpen(true);
+                                      }}
+                                      title={imgSrc ? imgSrc : "Open detail"}
+                                    >
+                                      {isNonEmptyString(imgSrc) ? (
+                                        // eslint-disable-next-line @next/next/no-img-element
+                                        <img
+                                          src={imgSrc}
+                                          alt="Style"
+                                          className="w-full h-full object-cover"
+                                        />
+                                      ) : (
+                                        <span className="text-[10px] text-slate-400">No</span>
+                                      )}
+                                    </button>
+                                  </td>
                                   <td className="px-3 py-2">{brandLabel}</td>
                                   <td className="px-3 py-2 text-right">
                                     {ln.qty ?? "-"} {ln.unit ?? ""}
@@ -1395,7 +1548,10 @@ export default function PurchaseOrderListPage() {
                                   <td className="px-3 py-2">
                                     <Button
                                       size="sm"
-                                      onClick={() => onClickWorkSheet(selectedPo, ln)}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onClickWorkSheet(selectedPo, ln);
+                                      }}
                                       disabled={creatingLineId === ln.id}
                                     >
                                       {creatingLineId === ln.id ? "Working..." : hasWs ? "Open WS" : "Create WS"}
@@ -1415,28 +1571,142 @@ export default function PurchaseOrderListPage() {
                   )}
                 </CardContent>
               </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-lg">Style Image Preview</CardTitle>
-                </CardHeader>
-                <CardContent className="flex items-center justify-center h-[360px]">
-                  {selectedPo && lines.length > 0 ? (
-                    <div className="text-center text-sm text-slate-500">
-                      <div className="mb-2">(이미지 URL 매핑은 다음 단계에서 연결 가능)</div>
-                      <div className="border rounded-lg w-60 h-60 flex items-center justify-center bg-slate-50">
-                        <span className="text-xs text-slate-400">No image mapped yet</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-sm text-slate-500">Select a PO and line to preview.</div>
-                  )}
-                </CardContent>
-              </Card>
             </div>
           </CardContent>
         </Card>
       </div>
+
+      {/* Right Drawer: Line Detail */}
+      {drawerOpen && selectedPo && selectedLine && (
+        <div className="fixed inset-0 z-50">
+          {/* backdrop */}
+          <div
+            className="absolute inset-0 bg-black/30"
+            onClick={() => {
+              setDrawerOpen(false);
+              setSelectedLine(null);
+            }}
+          />
+
+          {/* panel */}
+          <div className="absolute right-0 top-0 h-full w-full sm:w-[420px] bg-white shadow-xl flex flex-col">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
+              <div>
+                <div className="text-sm text-slate-500">Line Detail</div>
+                <div className="font-semibold text-slate-900">
+                  {selectedLine.buyerStyleNo ?? selectedLine.jmStyleNo ?? "-"}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setDrawerOpen(false);
+                  setSelectedLine(null);
+                }}
+              >
+                Close
+              </Button>
+            </div>
+
+            <div className="p-4 space-y-4 overflow-y-auto">
+              <div className="text-xs text-slate-500">
+                <span className="font-semibold">PO:</span> {selectedPo.poNo} / {selectedPo.buyerName ?? "-"}
+              </div>
+
+              {/* Image (placeholder for now) */}
+              <div className="border rounded-xl bg-slate-50 p-3">
+                <div className="text-xs text-slate-500 mb-2">Style Image</div>
+                {(() => {
+                  const imgSrc = resolveImageUrlFromStorage(supabase, selectedLine.imageUrl);
+                  return isNonEmptyString(imgSrc) ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={imgSrc}
+                    alt="Style"
+                    className="w-full h-64 object-contain bg-white rounded-lg"
+                  />
+                  ) : (
+                  <div className="w-full h-64 flex items-center justify-center rounded-lg border bg-white">
+                    <span className="text-xs text-slate-400">No image mapped yet</span>
+                  </div>
+                  );
+                })()}
+                <div className="text-[11px] text-slate-400 mt-2">
+                  (이미지 URL 매핑은 다음 단계에서 연결)
+                </div>
+              </div>
+
+              {/* Info */}
+              <div className="border rounded-xl p-3">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <div className="text-xs text-slate-500">Line</div>
+                    <div className="font-medium">{selectedLine.lineNo ?? "-"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">Shipment</div>
+                    <div className="font-medium">
+                      {selectedLine.shipmentMode ?? selectedPo.shipMode ?? "-"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">JM No</div>
+                    <div className="font-medium">{selectedLine.jmStyleNo ?? "-"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">Buyer Style</div>
+                    <div className="font-medium">{selectedLine.buyerStyleNo ?? "-"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">Brand</div>
+                    <div className="font-medium">
+                      {selectedLine.buyerBrand ?? selectedPo.mainBuyerBrand ?? "-"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">Delivery</div>
+                    <div className="font-medium">
+                      {selectedLine.deliveryDate ?? selectedPo.reqShipDate ?? "-"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2">
+                {(() => {
+                  const existing = wsMap[selectedLine.id] || selectedLine.work_sheet_id || null;
+                  const hasWs = existing && isUuid(existing);
+                  return (
+                    <Button
+                      className="flex-1"
+                      onClick={() => onClickWorkSheet(selectedPo, selectedLine)}
+                      disabled={creatingLineId === selectedLine.id}
+                    >
+                      {creatingLineId === selectedLine.id
+                        ? "Working..."
+                        : hasWs
+                          ? "Open WS"
+                          : "Create WS"}
+                    </Button>
+                  );
+                })()}
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => {
+                    setDrawerOpen(false);
+                    setSelectedLine(null);
+                  }}
+                >
+                  Back
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </AppShell>
   );
 }
