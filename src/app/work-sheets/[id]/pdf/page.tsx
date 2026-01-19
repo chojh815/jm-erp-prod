@@ -641,6 +641,11 @@ function normalizeMultiline(v: any): string {
 async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   const L = t(lang, mode);
 
+  // jspdf-autotable head expects a mutable RowInput; i18n literals are readonly tuples.
+  const tableHead: string[] = Array.isArray((L as any).TABLE_HEAD)
+    ? Array.from((L as any).TABLE_HEAD as any[]).map((x) => String(x))
+    : [];
+
   const doc = new jsPDF({ unit: "mm", format: "a4" });
 
   // ✅ CJK 폰트 내장(외부 fetch 의존 제거)
@@ -883,7 +888,7 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
     startY: y,
     margin: { left: tableX, right: margin, top: margin, bottom: margin },
     tableWidth: tableW,
-    head: [L.TABLE_HEAD],
+    head: [tableHead],
     body: bodyRows,
     showHead: "everyPage",
     theme: "grid",
