@@ -158,6 +158,41 @@ function extractRemarksFromNote(note: any): string | null {
 /** ---------- mode / lang from URL ---------- */
 type Lang = "en" | "cn" | "vn";
 
+// Keep labels mutable (string[]), not readonly tuples.
+// jsPDF-AutoTable typings are strict and reject readonly arrays in `head`.
+type Labels = {
+  WORK_SHEET: string;
+  QTY_PREFIX: string;
+  PO: string;
+  WS: string;
+  DATE: string;
+  ORDER: string;
+  BRAND: string;
+  SHIP: string;
+  REQ_SHIP: string;
+  PRODUCT: string;
+  JM: string;
+  STYLE: string;
+  DESC: string;
+  PLATING: string;
+  SCHEDULE: string;
+  APPR: string;
+  PP: string;
+  TOP: string;
+  FINAL: string;
+  LAST: string;
+  MATERIAL_LABOR: string;
+  QTY: string;
+  UNIT_COST: string;
+  AMOUNT: string;
+  REMARKS: string;
+  SPECIAL_INSTR: string;
+  PRODUCT_IMAGE: string;
+  TABLE_HEAD: string[];
+  NO_MATS: string;
+  BOTTOM_TITLES: string[];
+};
+
 function normalizeLang(raw: string | null | undefined): Lang {
   const v = String(raw || "").toLowerCase().trim();
   if (v === "cn" || v === "zh" || v === "zh-cn") return "cn";
@@ -548,7 +583,7 @@ function t(lang: Lang, mode: Mode) {
     vn: ["Vật liệu / Công đoạn", "Số lượng", "Đơn giá", "Thành tiền", "Ghi chú"],
   } as const;
 
-  const dict = {
+  const dict: Record<Lang, Labels> = {
     en: {
       WORK_SHEET: "WORK SHEET",
       QTY_PREFIX: "Qty",
@@ -569,6 +604,12 @@ function t(lang: Lang, mode: Mode) {
       PP: "PP:",
       TOP: "TOP:",
       FINAL: "Final:",
+      LAST: "Last:",
+      MATERIAL_LABOR: "Material / Labor",
+      QTY: "Qty",
+      UNIT_COST: "Unit Cost",
+      AMOUNT: "Amount",
+      REMARKS: "Remarks",
       SPECIAL_INSTR: "Special Instructions",
       PRODUCT_IMAGE: "PRODUCT IMAGE",
       // NOTE: internalHead/vendorHead are defined as readonly tuples (as const).
@@ -597,6 +638,12 @@ function t(lang: Lang, mode: Mode) {
       PP: "PP:",
       TOP: "TOP:",
       FINAL: "最终:",
+      LAST: "最终:",
+      MATERIAL_LABOR: "材料/工序",
+      QTY: "数量",
+      UNIT_COST: "单价",
+      AMOUNT: "金额",
+      REMARKS: "备注",
       SPECIAL_INSTR: "特别说明",
       PRODUCT_IMAGE: "产品图片",
       TABLE_HEAD: [...(mode === "internal" ? internalHead.cn : vendorHead.cn)],
@@ -623,13 +670,19 @@ function t(lang: Lang, mode: Mode) {
       PP: "PP:",
       TOP: "TOP:",
       FINAL: "Final:",
+      LAST: "Final:",
+      MATERIAL_LABOR: "Vật liệu / Công đoạn",
+      QTY: "Số lượng",
+      UNIT_COST: "Đơn giá",
+      AMOUNT: "Thành tiền",
+      REMARKS: "Ghi chú",
       SPECIAL_INSTR: "Hướng dẫn đặc biệt",
       PRODUCT_IMAGE: "HÌNH ẢNH SẢN PHẨM",
       TABLE_HEAD: [...(mode === "internal" ? internalHead.vn : vendorHead.vn)],
       NO_MATS: "Không có danh mục vật liệu",
       BOTTOM_TITLES: ["Work", "QC", "Packing"],
     },
-  } as const;
+  };
 
   return dict[lang];
 }
@@ -640,11 +693,6 @@ function normalizeMultiline(v: any): string {
 
 async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   const L = t(lang, mode);
-
-  // jspdf-autotable head expects a mutable RowInput; i18n literals are readonly tuples.
-  const tableHead: string[] = Array.isArray((L as any).TABLE_HEAD)
-    ? Array.from((L as any).TABLE_HEAD as any[]).map((x) => String(x))
-    : [];
 
   const doc = new jsPDF({ unit: "mm", format: "a4" });
 
@@ -884,11 +932,16 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   // 그 과정에서 CJK(특히 중국어) 헤더 텍스트가 깨져 보일 수 있다.
   // 그래서 lang=cn에서는 테이블 헤더(headStyles)의 fontStyle을 "normal"로 강제해 깨짐을 방지한다.
   doc.setFont(lang === "cn" ? "NotoSansSC" : "NotoSansKR", "normal");
+
+  // `t()` returns arrays as mutable string[], but TS can still widen/retain readonly-ness depending on inference.
+  // Normalize again here to satisfy jsPDF-AutoTable's RowInput typings.
+  const tableHeadRow: string[] = Array.from(L.TABLE_HEAD as unknown as any[]).map((x) => String(x));
+
   autoTable(doc, {
     startY: y,
     margin: { left: tableX, right: margin, top: margin, bottom: margin },
     tableWidth: tableW,
-    head: [tableHead],
+    head: [tableHeadRow],
     body: bodyRows,
     showHead: "everyPage",
     theme: "grid",
