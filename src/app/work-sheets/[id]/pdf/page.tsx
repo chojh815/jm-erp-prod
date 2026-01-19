@@ -575,7 +575,7 @@ function t(lang: Lang, mode: Mode) {
       // jsPDF/autoTable wants a mutable string[] at runtime, so we materialize a new array.
       TABLE_HEAD: [...(mode === "internal" ? internalHead.en : vendorHead.en)],
       NO_MATS: "No material specs",
-      BOTTOM_TITLES: ["Work", "QC", "Packing"] as string[],
+      BOTTOM_TITLES: ["Work", "QC", "Packing"],
     },
     cn: {
       WORK_SHEET: "工作单",
@@ -601,7 +601,7 @@ function t(lang: Lang, mode: Mode) {
       PRODUCT_IMAGE: "产品图片",
       TABLE_HEAD: [...(mode === "internal" ? internalHead.cn : vendorHead.cn)],
       NO_MATS: "无材料明细",
-      BOTTOM_TITLES: ["生产", "质检", "包装"] as string[],
+      BOTTOM_TITLES: ["生产", "质检", "包装"],
     },
     vn: {
       WORK_SHEET: "PHIẾU CÔNG VIỆC",
@@ -627,7 +627,7 @@ function t(lang: Lang, mode: Mode) {
       PRODUCT_IMAGE: "HÌNH ẢNH SẢN PHẨM",
       TABLE_HEAD: [...(mode === "internal" ? internalHead.vn : vendorHead.vn)],
       NO_MATS: "Không có danh mục vật liệu",
-      BOTTOM_TITLES: ["Work", "QC", "Packing"] as string[],
+      BOTTOM_TITLES: ["Work", "QC", "Packing"],
     },
   } as const;
 
