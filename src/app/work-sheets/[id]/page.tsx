@@ -31,9 +31,17 @@ type WorkSheetHeader = {
   currency: string | null;
   status: string;
 
-  // ✅ header에는 이것만
-  notes: string | null; // Internal Notes
-  general_notes?: string | null; // Special Instructions
+  // ✅ header notes
+  // DB/route normalize가 여러 키를 내려줄 수 있어서(프로젝트 이력/호환성),
+  // UI는 아래 우선순위로 읽고 저장 시에는 가능한 키를 함께 갱신한다.
+  // - Special Instructions: special_instructions -> general_notes
+  // - Internal Notes: internal_notes -> internal_memo -> notes
+  special_instructions?: string | null;
+  general_notes?: string | null;
+
+  internal_notes?: string | null;
+  internal_memo?: string | null;
+  notes: string | null;
 
   created_at?: string | null;
   updated_at?: string | null;
@@ -149,6 +157,48 @@ function stableStringify(obj: any): string {
   return JSON.stringify(obj, replacer);
 }
 
+function extractQtyFromNote(note?: string | null): number | null {
+  const s = (note ?? "").toString();
+  const m = s.match(/\bQTY\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\b/i);
+  if (!m?.[1]) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function extractUnitCostFromNote(note?: string | null): number | null {
+  const s = (note ?? "").toString();
+  const m = s.match(/\bUNIT[_\s-]*COST\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\b/i);
+  if (!m?.[1]) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function stripQtyCostTokens(note?: string | null): string {
+  let s = (note ?? "").toString();
+  s = s.replace(/\bQTY\s*[:=]\s*[0-9]+(?:\.[0-9]+)?\b/gi, "");
+  s = s.replace(/\bUNIT[_\s-]*COST\s*[:=]\s*[0-9]+(?:\.[0-9]+)?\b/gi, "");
+  s = s.replace(/^[,\s]+|[,\s]+$/g, "");
+  s = s.replace(/\s*,\s*/g, ", ");
+  return s.trim();
+}
+
+function fmtMoney(v: any): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "";
+  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
+
+function fmtWsRemarks(specText?: string | null, color?: string | null, note?: string | null): string {
+  const parts: string[] = [];
+  const st = (specText ?? "").toString().trim();
+  const c = (color ?? "").toString().trim();
+  const n = stripQtyCostTokens(note);
+  if (st) parts.push(`Spec: ${st}`);
+  if (c) parts.push(`Color: ${c}`);
+  if (n) parts.push(n);
+  return parts.join(" / ");
+}
+
 export default function WorkSheetDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -159,6 +209,9 @@ export default function WorkSheetDetailPage() {
   const [error, setError] = React.useState<string | null>(null);
 
   const [header, setHeader] = React.useState<WorkSheetHeader | null>(null);
+  // ✅ Keep header notes in dedicated state to prevent race-condition overwrites
+  const [specialInstructions, setSpecialInstructions] = React.useState<string>("");
+  const [internalNotes, setInternalNotes] = React.useState<string>("");
   const [po, setPo] = React.useState<any>(null);
 
   const [lines, setLines] = React.useState<WorkSheetLine[]>([]);
@@ -242,6 +295,23 @@ export default function WorkSheetDetailPage() {
   const lastSavedHashRef = React.useRef<string>("");
   const didInitRef = React.useRef(false);
 
+  // ✅ Prevent race conditions: avoid overwriting local edits with late load() responses
+  const savingRef = React.useRef(false);
+  React.useEffect(() => {
+    savingRef.current = saving;
+  }, [saving]);
+
+  const activeLineIdRef = React.useRef<string | null>(null);
+  const masterLineIdRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    activeLineIdRef.current = activeLineId;
+  }, [activeLineId]);
+  React.useEffect(() => {
+    masterLineIdRef.current = masterLineId;
+  }, [masterLineId]);
+
+  const loadSeqRef = React.useRef(0);
+
   const isDirty = React.useMemo(() => {
     if (!didInitRef.current) return false;
     const now = stableStringify({
@@ -266,6 +336,13 @@ export default function WorkSheetDetailPage() {
 
   async function load() {
     if (!id) return;
+
+    // Each call gets a sequence id; only the latest response may update state
+    const seq = ++loadSeqRef.current;
+
+    // If the user is saving, don't reload/overwrite state
+    if (savingRef.current) return;
+
     setLoading(true);
     setError(null);
 
@@ -283,7 +360,26 @@ export default function WorkSheetDetailPage() {
         {}) as Record<string, WorkSheetMaterialSpec[]>;
       const p = (json.po ?? null) as any;
 
+      // Ignore late/out-of-order responses
+      if (seq !== loadSeqRef.current) return;
+      if (savingRef.current) return;
+
+      const prevActive = activeLineIdRef.current;
+      const prevMaster = masterLineIdRef.current;
+
       setHeader(h);
+      // ✅ Load notes from header (authoritative) into dedicated state
+      setSpecialInstructions(
+        ((h as any)?.special_instructions ?? (h as any)?.general_notes ?? "").toString()
+      );
+      setInternalNotes(
+        (
+          (h as any)?.internal_notes ??
+          (h as any)?.internal_memo ??
+          (h as any)?.notes ??
+          ""
+        ).toString()
+      );
       setPo(p);
       setLines(l);
       setMaterialsByLineId(m);
@@ -301,13 +397,13 @@ export default function WorkSheetDetailPage() {
       });
 
       const nextActive =
-        activeLineId && l.some((x) => x.id === activeLineId)
-          ? activeLineId
+        prevActive && l.some((x) => x.id === prevActive)
+          ? prevActive
           : l?.[0]?.id ?? null;
 
       const nextMaster =
-        masterLineId && l.some((x) => x.id === masterLineId)
-          ? masterLineId
+        prevMaster && l.some((x) => x.id === prevMaster)
+          ? prevMaster
           : l?.[0]?.id ?? null;
 
       lastSavedHashRef.current = stableStringify({
@@ -371,8 +467,13 @@ export default function WorkSheetDetailPage() {
         header: {
           id: header.id,
           status: header.status,
-          notes: header.notes ?? null,
-          general_notes: header.general_notes ?? null,
+          // Notes (호환성)
+          special_instructions: specialInstructions || null,
+          general_notes: specialInstructions || null,
+
+          internal_notes: internalNotes || null,
+          internal_memo: internalNotes || null,
+          notes: internalNotes || null,
         },
 
         lines: lines.map((l) => ({
@@ -448,6 +549,38 @@ export default function WorkSheetDetailPage() {
         ? { ...(header as any), ...(incomingHeader as any) }
         : header;
 
+      // ✅ Stabilize Special/Internal notes: keep in dedicated state + force onto header
+      const resolvedSpecial = (
+        (incomingHeader as any)?.special_instructions ??
+        (incomingHeader as any)?.general_notes ??
+        specialInstructions ??
+        (nextHeader as any)?.special_instructions ??
+        (nextHeader as any)?.general_notes ??
+        ""
+      ).toString();
+      const resolvedInternal = (
+        (incomingHeader as any)?.internal_notes ??
+        (incomingHeader as any)?.internal_memo ??
+        (incomingHeader as any)?.notes ??
+        internalNotes ??
+        (nextHeader as any)?.internal_notes ??
+        (nextHeader as any)?.internal_memo ??
+        (nextHeader as any)?.notes ??
+        ""
+      ).toString();
+      setSpecialInstructions(resolvedSpecial);
+      setInternalNotes(resolvedInternal);
+      const nextHeaderFixed: any = nextHeader
+        ? {
+            ...(nextHeader as any),
+            special_instructions: resolvedSpecial,
+            general_notes: resolvedSpecial,
+            internal_notes: resolvedInternal,
+            internal_memo: resolvedInternal,
+            notes: resolvedInternal,
+          }
+        : nextHeader;
+
       // ✅ lines merge: 로컬 값을 "우선" 유지하면서 서버값 덮기
       const incomingMap = new Map(incomingLines.map((x) => [x.id, x]));
       const nextLines =
@@ -460,7 +593,7 @@ export default function WorkSheetDetailPage() {
 
       const nextMaterials = { ...materialsByLineId, ...incomingMaterials };
 
-      setHeader(nextHeader);
+      setHeader(nextHeaderFixed as any);
       setPo(incomingPo ?? po);
       setLines(nextLines);
       setMaterialsByLineId(nextMaterials);
@@ -611,10 +744,13 @@ export default function WorkSheetDetailPage() {
               <div className="space-y-2">
                 <Label>Special Instructions (공통 주의사항)</Label>
                 <Textarea
-                  value={header?.general_notes ?? ""}
-                  onChange={(e) =>
-                    updateHeader({ general_notes: e.target.value })
-                  }
+                  value={specialInstructions}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSpecialInstructions(v);
+                    // ✅ keep header in sync for save payload/other UI
+                    updateHeader({ special_instructions: v, general_notes: v });
+                  }}
                   placeholder="Special instructions..."
                   rows={4}
                   disabled={!header}
@@ -623,8 +759,13 @@ export default function WorkSheetDetailPage() {
               <div className="space-y-2">
                 <Label>Internal Notes (내부 메모)</Label>
                 <Textarea
-                  value={header?.notes ?? ""}
-                  onChange={(e) => updateHeader({ notes: e.target.value })}
+                  value={internalNotes}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setInternalNotes(v);
+                    // ✅ keep header in sync for save payload/other UI
+                    updateHeader({ internal_notes: v, internal_memo: v, notes: v });
+                  }}
                   placeholder="Internal memo..."
                   rows={4}
                   disabled={!header}
@@ -899,10 +1040,10 @@ export default function WorkSheetDetailPage() {
                             <table className="w-full text-sm">
                               <thead className="bg-muted/50">
                                 <tr className="text-left">
-                                  <th className="p-2">Type</th>
-                                  <th className="p-2">Material</th>
-                                  <th className="p-2">Spec</th>
-                                  <th className="p-2">Color</th>
+                                  <th className="p-2">Material / Labor</th>
+                                  <th className="p-2 text-right">Qty</th>
+                                  <th className="p-2 text-right">Unit Cost</th>
+                                  <th className="p-2 text-right">Amount</th>
                                   <th className="p-2">Remarks</th>
                                 </tr>
                               </thead>
@@ -917,19 +1058,61 @@ export default function WorkSheetDetailPage() {
                                   .map((s) => (
                                     <tr key={s.id} className="border-t">
                                       <td className="p-2">
-                                        {s.material_type ?? ""}
-                                      </td>
-                                      <td className="p-2">
                                         {s.material_name ?? ""}
                                       </td>
-                                      <td className="p-2">
-                                        {s.spec_text ?? ""}
+
+                                      <td className="p-2 text-right">
+                                        {(() => {
+                                          const q = extractQtyFromNote(s.note);
+                                          return q === null ? "" : String(q);
+                                        })()}
                                       </td>
-                                      <td className="p-2">{s.color ?? ""}</td>
-                                      <td className="p-2">{s.note ?? ""}</td>
+
+                                      <td className="p-2 text-right">
+                                        {(() => {
+                                          const u = extractUnitCostFromNote(s.note);
+                                          return u === null ? "" : fmtMoney(u);
+                                        })()}
+                                      </td>
+
+                                      <td className="p-2 text-right">
+                                        {(() => {
+                                          const q = extractQtyFromNote(s.note);
+                                          const u = extractUnitCostFromNote(s.note);
+                                          if (q === null || u === null) return "";
+                                          return fmtMoney(q * u);
+                                        })()}
+                                      </td>
+
+                                      <td className="p-2">
+                                        {fmtWsRemarks(s.spec_text, s.color, s.note) || "-"}
+                                      </td>
                                     </tr>
                                   ))}
-                              </tbody>
+                              
+                                  {/* TOTAL row */}
+                                  <tr className="border-t bg-muted/30 font-semibold">
+                                    <td className="p-2">TOTAL</td>
+                                    <td className="p-2 text-right"></td>
+                                    <td className="p-2 text-right"></td>
+                                    <td className="p-2 text-right">
+                                      {(() => {
+                                        const list = (materialsByLineId[activeLine.id] ?? []).filter((s) => !s.is_deleted);
+                                        const total = list
+                                          .filter((s) => !s.is_deleted)
+                                          .reduce((acc, s) => {
+                                            const q = extractQtyFromNote(s.note);
+                                            const u = extractUnitCostFromNote(s.note);
+                                            if (q === null || u === null) return acc;
+                                            return acc + q * u;
+                                          }, 0);
+                                        return fmtMoney(total);
+                                      })()}
+                                    </td>
+                                    <td className="p-2"></td>
+                                  </tr>
+
+</tbody>
                             </table>
                           </div>
                         )}
@@ -995,17 +1178,26 @@ export default function WorkSheetDetailPage() {
                         </div>
 
                         <div className="space-y-2">
-                          <Label>Vendor Currency</Label>
-                          <Input
-                            value={activeLine.vendor_currency ?? ""}
-                            onChange={(e) =>
-                              updateLine(activeLine.id, {
-                                vendor_currency: e.target.value,
-                              })
-                            }
-                            placeholder="CNY / VND / KRW"
-                          />
-                        </div>
+  <Label>Vendor Currency</Label>
+  <Select
+    value={activeLine.vendor_currency ?? ""}
+    onValueChange={(value) =>
+      updateLine(activeLine.id, {
+        vendor_currency: value,
+      })
+    }
+  >
+    <SelectTrigger>
+      <SelectValue placeholder="Select currency" />
+    </SelectTrigger>
+    <SelectContent>
+      <SelectItem value="CNY">CNY</SelectItem>
+      <SelectItem value="VND">VND</SelectItem>
+      <SelectItem value="USD">USD</SelectItem>
+      <SelectItem value="KRW">KRW</SelectItem>
+    </SelectContent>
+  </Select>
+</div>
                         <div className="space-y-2">
                           <Label>Vendor Unit Cost (Local)</Label>
                           <Input

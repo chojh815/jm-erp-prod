@@ -5,6 +5,10 @@
  * - id, company_name, code, company_type
  * - default_currency (priority: vendor_price_defaults.currency -> company_sites.currency -> companies.currency)
  * - default_unit_cost_local (from vendor_price_defaults.unit_cost_local)
+ *
+ * ✅ IMPORTANT:
+ * - Vendor dropdown에는 FACTORY / SUPPLIER만 나오게 "허용 목록(allowlist)"으로 강제한다.
+ * - fallback(useTypeFilter:false)로 조회하더라도, 마지막 out 단계에서 다시 한번 필터하여 BUYER가 절대 섞이지 않게 한다.
  */
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -32,19 +36,42 @@ function isSchemaCacheMissingRelation(err: any) {
   return { ok: !!m, rel: m?.[1] ?? null, msg };
 }
 
+const ALLOWED_TYPES = new Set(["FACTORY", "SUPPLIER"]);
+
+function isAllowedType(v: any) {
+  const t = safeTrim(v).toUpperCase();
+  return ALLOWED_TYPES.has(t);
+}
+
 async function fetchCompanies(opts: { q: string; limit: number; useTypeFilter: boolean }) {
   const q = opts.q;
   const limit = opts.limit;
 
+  // company_type/currency는 여기서 그대로 유지
   let fields = "id, company_name, code, company_type, currency";
 
   const run = async () => {
     let qb: any = supabaseAdmin.from("companies").select(fields).limit(limit);
-    if (opts.useTypeFilter) qb = qb.neq("company_type", "BUYER");
+
+    // ✅ 기존: neq("BUYER") 는 NULL/다른값을 다 통과시켜서 위험
+    // ✅ 수정: FACTORY / SUPPLIER 만 허용
+    if (opts.useTypeFilter) {
+      // supabase-js .in()은 대소문자 민감할 수 있어, DB 데이터가 섞여있을 가능성 대비해서 or로 안전하게 처리
+      qb = qb.or(
+        [
+          "company_type.eq.FACTORY",
+          "company_type.eq.SUPPLIER",
+          "company_type.eq.factory",
+          "company_type.eq.supplier",
+        ].join(",")
+      );
+    }
+
     if (q) {
       const t = escapeIlike(q);
       qb = qb.or(`company_name.ilike.%${t}%,code.ilike.%${t}%`);
     }
+
     qb = qb.order("company_name", { ascending: true });
     return qb;
   };
@@ -132,14 +159,22 @@ export async function GET(req: Request) {
     const limitRaw = safeTrim(url.searchParams.get("limit"));
     const limit = Math.min(Math.max(parseInt(limitRaw || "500", 10) || 500, 1), 2000);
 
+    // 1) 1차: 서버 쿼리 단계에서 allowlist 필터
     const r1 = await fetchCompanies({ q, limit, useTypeFilter: true });
+
     let rows: any[] = [];
-    if (!r1.error) rows = r1.rows;
-    else {
+    if (!r1.error) {
+      rows = r1.rows;
+    } else {
+      // 2) fallback은 유지하되 (스키마 캐시/예외 상황 대비)
+      //    ✅ BUT: 아래 out 단계에서 다시 한번 allowlist 필터로 BUYER가 절대 섞이지 않게 한다.
       const r2 = await fetchCompanies({ q, limit, useTypeFilter: false });
       if (r2.error) throw new Error(r2.error.message);
       rows = r2.rows;
     }
+
+    // ✅ 마지막 안전장치: 어떤 이유로든 BUYER/NULL이 섞여도 여기서 제거
+    rows = (rows ?? []).filter((r) => isAllowedType((r as any)?.company_type));
 
     const ids = rows.map((r) => r.id).filter(Boolean);
     const siteCur = await loadSiteCurrencies(ids);

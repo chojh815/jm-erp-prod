@@ -35,11 +35,19 @@ function isUuid(v: any) {
   return typeof v === "string" && UUID_RE.test(v);
 }
 function safeText(v: any) {
-  if (v === null || v === undefined) return "";
-  return String(v);
+   return (v ?? "").toString().trim();
 }
+ 
 function isBlank(v: any) {
   return !safeText(v).trim();
+}
+
+function pickFirst(obj: any, keys: string[]) {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== null && v !== undefined && !isBlank(v)) return v;
+  }
+  return null;
 }
 
 /** Supabase(PostgREST) schema cache missing-column 에러 감지 */
@@ -276,12 +284,72 @@ async function loadAll(workSheetId: string) {
     .from("work_sheet_lines")
     .select("*")
     .eq("work_sheet_id", workSheetId)
-    .eq("is_deleted", false)
+    .or("is_deleted.is.null,is_deleted.eq.false")
     .order("created_at", { ascending: true });
 
   if (lErr) throw new Error(lErr.message);
   const safeLines = Array.isArray(lines) ? lines : [];
   const lineIds = safeLines.map((l: any) => l.id).filter(isUuid);
+
+  // ✅ Work/QC/Packing notes are stored in work_sheet_lines.
+  // For PDF/UI convenience, copy the master line notes into header aliases.
+  const masterLineId =
+    (header as any)?.master_line_id ??
+    (header as any)?.primary_line_id ??
+    (header as any)?.work_sheet_line_id ??
+    (header as any)?.work_sheet_lineid ??
+    null;
+
+  const line0 =
+    // 1) prefer explicit master/primary line id if present
+    (masterLineId
+      ? safeLines.find((x: any) => isUuid(x?.id) && x.id === masterLineId)
+      : null) ??
+    // 2) otherwise, pick the first line that actually has any notes filled
+    safeLines.find((x: any) => {
+      const w = pickFirst(x, ["work_notes", "work_note", "work_instruction", "work_instructions"]);
+      const q = pickFirst(x, ["qc_points", "qc_note", "qc_notes"]);
+      const p = pickFirst(x, ["packing_notes", "packing_note", "packing_memo"]);
+      const vc = pickFirst(x, ["vendor_currency"]);
+      const vu = pickFirst(x, ["vendor_unit_cost_local"]);
+      // If vendor price fields are present on any line, we also want to treat it as the "master" for PDF/UI.
+      return !isBlank(w) || !isBlank(q) || !isBlank(p) || !isBlank(vc) || !isBlank(vu);
+    }) ??
+    // 3) fallback to the first line (stable)
+    safeLines[0] ??
+    null;
+
+  if (line0) {
+    const w = pickFirst(line0, ["work_notes", "work_note", "work_instruction", "work_instructions"]);
+    const q = pickFirst(line0, ["qc_points", "qc_note", "qc_notes"]);
+    const p = pickFirst(line0, ["packing_notes", "packing_note", "packing_memo"]);
+
+    // ✅ Vendor price fields live in work_sheet_lines. Many screens/PDF read from header,
+    // so we mirror them onto header for convenience.
+    const vc = pickFirst(line0, ["vendor_currency"]);
+    const vu = pickFirst(line0, ["vendor_unit_cost_local"]);
+
+    (header as any).work_notes = w ?? "";
+    (header as any).work_note = w ?? "";
+    (header as any).qc_points = q ?? "";
+    (header as any).qc_note = q ?? "";
+    (header as any).packing_notes = p ?? "";
+    (header as any).packing_note = p ?? "";
+
+    (header as any).vendor_currency = vc ?? (header as any).vendor_currency ?? "";
+    (header as any).vendor_unit_cost_local =
+      vu ?? (header as any).vendor_unit_cost_local ?? null;
+  } else {
+    (header as any).work_notes = (header as any).work_notes ?? (header as any).work_note ?? "";
+    (header as any).work_note = (header as any).work_note ?? (header as any).work_notes ?? "";
+    (header as any).qc_points = (header as any).qc_points ?? (header as any).qc_note ?? "";
+    (header as any).qc_note = (header as any).qc_note ?? (header as any).qc_points ?? "";
+    (header as any).packing_notes = (header as any).packing_notes ?? (header as any).packing_note ?? "";
+    (header as any).packing_note = (header as any).packing_note ?? (header as any).packing_notes ?? "";
+
+    (header as any).vendor_currency = (header as any).vendor_currency ?? "";
+    (header as any).vendor_unit_cost_local = (header as any).vendor_unit_cost_local ?? null;
+  }
 
   // 2) materials snapshot
   const materialsByLineId: Record<string, any[]> = {};
@@ -402,6 +470,32 @@ async function loadAll(workSheetId: string) {
   return { header, lines: safeLines, materialsByLineId, po };
 }
 
+function withNoteAliases(data: any) {
+  const h: any = data?.header ?? {};
+  const special = (h.special_instructions ?? h.general_notes ?? "") as any;
+  const internal = (h.internal_notes ?? h.notes ?? "") as any;
+  const work = (h.work_notes ?? h.work_note ?? "") as any;
+  const qc = (h.qc_points ?? h.qc_note ?? "") as any;
+  const packing = (h.packing_notes ?? h.packing_note ?? "") as any;
+
+  // root-level aliases (some UIs read these directly)
+  return {
+    ...data,
+    special_instructions: special,
+    general_notes: special,
+    internal_notes: internal,
+    notes: internal,
+    work_notes: work,
+    work_note: work,
+    qc_points: qc,
+    qc_note: qc,
+    packing_notes: packing,
+    packing_note: packing,
+    notes_bundle: { special, internal, work, qc, packing },
+  };
+}
+
+
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
   try {
     const id = params?.id;
@@ -410,7 +504,7 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
     const data = await loadAll(id);
     if (!data.header) return bad("Work sheet not found", 404);
 
-    return ok(data);
+    return ok(withNoteAliases(data));
   } catch (e: any) {
     return bad(e?.message ?? "Server error", 500);
   }
@@ -466,6 +560,66 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
         // If even after dropping missing cols it fails, surface the real error
         return bad((r as any).error?.message ?? "Header update error", 500);
       }
+
+    // 1-b) If header carries Work/QC/Packing notes, persist into master line (work_sheet_lines)
+    if (headerPatch && typeof headerPatch === "object") {
+      const h: any = headerPatch as any;
+      const w = h.work_notes ?? h.work_note;
+      const q = h.qc_points ?? h.qc_note;
+      const p = h.packing_notes ?? h.packing_note;
+
+      if (w !== undefined || q !== undefined || p !== undefined) {
+        const { data: hdr0 } = await supabaseAdmin
+          .from("work_sheet_headers")
+          .select("id, master_line_id, primary_line_id, work_sheet_line_id")
+          .eq("id", id)
+          .maybeSingle();
+
+        let masterId: any =
+          (hdr0 as any)?.master_line_id ??
+          (hdr0 as any)?.primary_line_id ??
+          (hdr0 as any)?.work_sheet_line_id ??
+          null;
+
+        if (!isUuid(masterId)) {
+          const { data: l0 } = await supabaseAdmin
+            .from("work_sheet_lines")
+            .select("id")
+            .eq("work_sheet_id", id)
+            .or("is_deleted.is.null,is_deleted.eq.false")
+            .order("created_at", { ascending: true })
+            .limit(1);
+          masterId = Array.isArray(l0) && l0[0] ? (l0[0] as any).id : null;
+        }
+
+        if (isUuid(masterId)) {
+          const patch: any = { updated_at: new Date().toISOString() };
+          if (w !== undefined) patch.work_notes = isBlank(w) ? null : safeText(w);
+          if (q !== undefined) patch.qc_points = isBlank(q) ? null : safeText(q);
+          if (p !== undefined) patch.packing_notes = isBlank(p) ? null : safeText(p);
+
+          let tries = 0;
+          while (true) {
+            const { error } = await supabaseAdmin
+              .from("work_sheet_lines")
+              .update(patch)
+              .eq("id", masterId)
+              .eq("work_sheet_id", id);
+
+            if (!error) break;
+
+            const miss = isSchemaCacheMissingColumn(error);
+            if (miss.ok && miss.col && (miss.col in patch) && tries < 12) {
+              delete (patch as any)[miss.col];
+              tries++;
+              continue;
+            }
+
+            return bad(error.message, 500);
+          }
+        }
+      }
+    }
     }
 
     // 2) lines update (work/qc/packing + plating/spec fields)
@@ -523,7 +677,7 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
     const data = await loadAll(id);
     if (!data.header) return bad("Work sheet not found", 404);
 
-    return ok(data);
+    return ok(withNoteAliases(data));
   } catch (e: any) {
     return bad(e?.message ?? "Server error", 500);
   }
