@@ -654,7 +654,7 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   (doc as any).addFont("NotoSansSC-Regular.ttf", "NotoSansSC", "normal");
 
   // 기본은 한글 폰트로 (노트/라벨/헤더 대부분)
-  doc.setFont("NotoSansKR", "normal");
+  doc.setFont(lang === "cn" ? "NotoSansSC" : "NotoSansKR", "normal");
 
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -875,7 +875,10 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   }
 
   // Material / Labor 테이블은 중국어가 들어가는 경우가 많아서 중국어 폰트로 출력
-  doc.setFont("NotoSansSC", "normal");
+  // ⚠️ jsPDF는 "bold" 스타일에 대해 별도 폰트(굵기)를 등록하지 않으면 내부적으로 다른 폰트로 fallback될 수 있고,
+  // 그 과정에서 CJK(특히 중국어) 헤더 텍스트가 깨져 보일 수 있다.
+  // 그래서 lang=cn에서는 테이블 헤더(headStyles)의 fontStyle을 "normal"로 강제해 깨짐을 방지한다.
+  doc.setFont(lang === "cn" ? "NotoSansSC" : "NotoSansKR", "normal");
   autoTable(doc, {
     startY: y,
     margin: { left: tableX, right: margin, top: margin, bottom: margin },
@@ -896,7 +899,8 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
     headStyles: {
       fillColor: [255, 255, 255],
       textColor: 20,
-      fontStyle: "bold",
+      // 중국어 헤더는 bold 폰트 미등록 시 글자가 깨질 수 있어 normal로 고정
+      fontStyle: lang === "cn" ? "normal" : "bold",
       fontSize: 9.2,
       halign: "center",
       valign: "middle",
@@ -907,7 +911,8 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
       if (mode === "internal" && data.section === "body") {
         const row = data.row?.raw as any[] | undefined;
         if (row && row[0] === "TOTAL") {
-          data.cell.styles.fontStyle = "bold";
+          // 중국어 모드에서는 bold가 깨질 수 있어 TOTAL도 normal 유지
+          data.cell.styles.fontStyle = lang === "cn" ? "normal" : "bold";
           data.cell.styles.fillColor = [245, 245, 245];
           if (data.column.index === 0) data.cell.styles.halign = "left";
           if (data.column.index === 3) data.cell.styles.halign = "right";
@@ -918,7 +923,7 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   });
 
   // 이후 섹션(노트/라벨)은 한글 폰트로 복귀
-  doc.setFont("NotoSansKR", "normal");
+  doc.setFont(lang === "cn" ? "NotoSansSC" : "NotoSansKR", "normal");
 
   const tableEndY = (doc as any).lastAutoTable?.finalY ?? y;
   // ✅ pack bottom boxes closer to table (reduce page break risk)
@@ -1090,7 +1095,6 @@ export default function WorkSheetPdfPage() {
 
       <div style={{ fontSize: 13, opacity: 0.8 }}>{msg}</div>
 
-      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.55 }}>
-        Tip: <b>?lang=en|cn|vn</b> &amp; <b>?mode=vendor|internal</b>
       </div>
-    </div>
+  );
+}
