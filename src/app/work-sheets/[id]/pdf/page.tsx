@@ -571,7 +571,9 @@ function t(lang: Lang, mode: Mode) {
       FINAL: "Final:",
       SPECIAL_INSTR: "Special Instructions",
       PRODUCT_IMAGE: "PRODUCT IMAGE",
-      TABLE_HEAD: (mode === "internal" ? internalHead.en : vendorHead.en) as string[],
+      // NOTE: internalHead/vendorHead are defined as readonly tuples (as const).
+      // jsPDF/autoTable wants a mutable string[] at runtime, so we materialize a new array.
+      TABLE_HEAD: [...(mode === "internal" ? internalHead.en : vendorHead.en)],
       NO_MATS: "No material specs",
       BOTTOM_TITLES: ["Work", "QC", "Packing"] as string[],
     },
@@ -597,7 +599,7 @@ function t(lang: Lang, mode: Mode) {
       FINAL: "最终:",
       SPECIAL_INSTR: "特别说明",
       PRODUCT_IMAGE: "产品图片",
-      TABLE_HEAD: (mode === "internal" ? internalHead.cn : vendorHead.cn) as string[],
+      TABLE_HEAD: [...(mode === "internal" ? internalHead.cn : vendorHead.cn)],
       NO_MATS: "无材料明细",
       BOTTOM_TITLES: ["生产", "质检", "包装"] as string[],
     },
@@ -623,7 +625,7 @@ function t(lang: Lang, mode: Mode) {
       FINAL: "Final:",
       SPECIAL_INSTR: "Hướng dẫn đặc biệt",
       PRODUCT_IMAGE: "HÌNH ẢNH SẢN PHẨM",
-      TABLE_HEAD: (mode === "internal" ? internalHead.vn : vendorHead.vn) as string[],
+      TABLE_HEAD: [...(mode === "internal" ? internalHead.vn : vendorHead.vn)],
       NO_MATS: "Không có danh mục vật liệu",
       BOTTOM_TITLES: ["Work", "QC", "Packing"] as string[],
     },
@@ -1092,5 +1094,3 @@ export default function WorkSheetPdfPage() {
         Tip: <b>?lang=en|cn|vn</b> &amp; <b>?mode=vendor|internal</b>
       </div>
     </div>
-  );
-}
