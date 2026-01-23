@@ -1,5 +1,7 @@
 import React from "react";
-import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
+import fs from "fs";
+import path from "path";
+import { Document, Page, Text, View, Image, StyleSheet } from "@react-pdf/renderer";
 
 /* =========================
    Types
@@ -88,6 +90,26 @@ function chunk<T>(arr: T[], size: number): T[][] {
    Constants
 ========================= */
 const BORDER = 1;
+
+const STAMP_PUBLIC_PATH = "/images/jm_stamp_vn.jpg";
+
+/** Read a public image file and convert to data URI for @react-pdf Image */
+function loadPublicImageAsDataUri(publicPath: string): string | null {
+  try {
+    const clean = publicPath.startsWith("/") ? publicPath.slice(1) : publicPath;
+    const abs = path.join(process.cwd(), "public", clean);
+    const buf = fs.readFileSync(abs);
+    const ext = path.extname(abs).toLowerCase();
+    const mime =
+      ext === ".png" ? "image/png" :
+      ext === ".webp" ? "image/webp" :
+      "image/jpeg";
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
 
 // ✅ 표 숫자가 칸을 넘는 문제 방지: 테이블 글꼴을 더 작게
 const FONT_BASE = 10;
@@ -240,11 +262,16 @@ const styles = StyleSheet.create({
     position: "absolute",
     right: 40,
     bottom: 40,
-    width: 200,
-    borderWidth: BORDER,
-    borderColor: "#000",
-    paddingVertical: 10,
-    paddingHorizontal: 10,
+    width: 160,
+    height: 80,
+  },
+  stampImage: {
+    width: "100%",
+    height: "100%",
+    objectFit: "contain",
+  },
+  stampFallback: {
+    fontSize: 10,
   },
   signedTitle: {
     fontSize: 10,
@@ -280,6 +307,16 @@ function HeaderBlock({ header }: { header: ProformaHeaderPDF }) {
           <Text style={styles.topLine}>
             <Text style={styles.topLabel}>Brand / Dept: </Text>
             {show(header.buyer_brand_name)}
+          </Text>
+        </View>
+        <View>
+          <Text style={styles.topLine}>
+            <Text style={styles.topLabel}>Invoice No: </Text>
+            {show(header.invoice_no)}
+          </Text>
+          <Text style={styles.topLine}>
+            <Text style={styles.topLabel}>Date: </Text>
+            {show(header.issue_date)}
           </Text>
         </View>
       </View>
@@ -359,7 +396,7 @@ function TableHeader() {
     <View style={styles.tr}>
       {/* ✅ PO 폭 확대 + Description 정렬 보정 */}
       <Text style={[styles.th, { width: "16%" }]}>PO #</Text>
-      <Text style={[styles.th, styles.tdCenter, { width: "14%" }]}>Style No</Text>
+      <Text style={[styles.th, styles.tdCenter, { width: "14%" }]}>Buyer Style</Text>
       <Text style={[styles.th, styles.tdCenter, { width: "24%" }]}>Description</Text>
       <Text style={[styles.th, { width: "12%" }]}>HS Code</Text>
       <Text style={[styles.th, { width: "7%" }]}>Qty</Text>
@@ -377,6 +414,7 @@ const ProformaInvoicePDF: React.FC<{
   header: ProformaHeaderPDF;
   lines: ProformaLinePDF[];
 }> = ({ header, lines }) => {
+  const stampSrc = loadPublicImageAsDataUri(STAMP_PUBLIC_PATH);
   const subtotal = lines.reduce((s, l) => s + n(l.amount), 0);
   const pages = chunk(lines, ROWS_PER_PAGE);
 
@@ -395,8 +433,12 @@ const ProformaInvoicePDF: React.FC<{
               <TableHeader />
               {pageLines.map((l, i) => (
                 <View key={`${pageIdx}-${i}`} style={styles.tr}>
-                  <Text style={[styles.td, styles.tdCenter, { width: "16%" }]}>{softWrapToken(l.po_no)}</Text>
-                  <Text style={[styles.td, styles.tdCenter, { width: "14%" }]}>{softWrapToken(l.buyer_style_no)}</Text>
+                  <Text style={[styles.td, { width: "16%" }]}>
+                    {softWrapToken(l.po_no)}
+                  </Text>
+                  <Text style={[styles.td, styles.tdCenter, { width: "14%" }]}>
+                    {softWrapToken(l.buyer_style_no)}
+                  </Text>
                   <Text style={[styles.td, styles.tdCenter, { width: "24%" }]}>
                     {show(l.description)}
                   </Text>
@@ -429,9 +471,11 @@ const ProformaInvoicePDF: React.FC<{
 
                 {/* ✅ Signed by 스탬프 위치 고정 */}
                 <View style={styles.signedBox}>
-                  <Text style={styles.signedTitle}>Authorized Signature</Text>
-                  <View style={styles.signedLine} />
-                  <Text style={styles.signedBy}>Signed by</Text>
+                  {stampSrc ? (
+                    <Image src={stampSrc} style={styles.stampImage} />
+                  ) : (
+                    <Text style={styles.stampFallback}>STAMP IMAGE NOT FOUND</Text>
+                  )}
                 </View>
               </>
             ) : null}

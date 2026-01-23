@@ -22,11 +22,28 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+// ✅ Prod(erp.jm-i.com)에서 저장 후에도 "이전 값"이 보이는 현상은
+// CDN/브라우저 캐시 또는 Next 데이터 캐시가 API 응답을 재사용해서 생길 수 있습니다.
+// 이 route는 항상 최신 DB 값을 내려줘야 하므로, 캐시를 완전히 끕니다.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const NO_STORE_HEADERS: Record<string, string> = {
+  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+  "Surrogate-Control": "no-store",
+};
+
 function ok(data: any = {}) {
-  return NextResponse.json({ success: true, ...data });
+  return NextResponse.json({ success: true, ...data }, { headers: NO_STORE_HEADERS });
 }
 function bad(message: string, status = 400) {
-  return NextResponse.json({ success: false, error: message }, { status });
+  return NextResponse.json(
+    { success: false, error: message },
+    { status, headers: NO_STORE_HEADERS }
+  );
 }
 
 const UUID_RE =

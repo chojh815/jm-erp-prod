@@ -86,6 +86,25 @@ type InvoiceLine = {
   cartons?: number | null;
   gw?: number | null;
   nw?: number | null;
+
+};
+
+type ReceiptRow = {
+  id: string;
+  invoice_id?: string | null;
+  invoice_no?: string | null;
+
+  receipt_date: string | null;
+  received_amount: number | null;
+
+  payment_method?: string | null;
+  reference_no?: string | null;
+  note?: string | null;
+
+  created_at?: string | null;
+  created_by_email?: string | null;
+
+  is_deleted?: boolean | null;
 };
 
 function todayISODate() {
@@ -210,6 +229,234 @@ export default function InvoiceDetailPage() {
   const [header, setHeader] = React.useState<InvoiceHeader | null>(null);
   const [lines, setLines] = React.useState<InvoiceLine[]>([]);
 
+  // ===== Receipts (Invoice-linked)
+  const [receiptsLoading, setReceiptsLoading] = React.useState(false);
+  const [receipts, setReceipts] = React.useState<ReceiptRow[]>([]);
+
+  const [creatingReceipt, setCreatingReceipt] = React.useState(false);
+  const [savingReceipt, setSavingReceipt] = React.useState(false);
+
+  const [editingReceiptId, setEditingReceiptId] = React.useState<string | null>(null);
+  const [editReceipt, setEditReceipt] = React.useState({
+    receipt_date: todayISODate(),
+    received_amount: "",
+    payment_method: "WIRE",
+    reference_no: "",
+    note: "",
+  });
+
+  const [newReceipt, setNewReceipt] = React.useState({
+    receipt_date: todayISODate(),
+    received_amount: "",
+    payment_method: "WIRE",
+    reference_no: "",
+    note: "",
+  });
+
+  const parseAmount = (v: any) => {
+    const x = Number(String(v ?? "").replace(/,/g, "").trim());
+    return Number.isFinite(x) ? x : 0;
+  };
+
+  const loadReceipts = React.useCallback(async () => {
+    if (!invoiceId) return;
+    setReceiptsLoading(true);
+    try {
+      const res = await fetch(
+        `/api/invoices/${encodeURIComponent(invoiceId)}/receipts`,
+        { cache: "no-store" }
+      );
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        console.warn("Failed to load receipts", json);
+        setReceipts([]);
+        return;
+      }
+
+      const rows: ReceiptRow[] =
+        json?.rows ?? json?.data?.rows ?? json?.receipts ?? json?.data ?? [];
+
+      setReceipts((rows || []).filter((r) => !r?.is_deleted));
+    } catch (e) {
+      console.error(e);
+      setReceipts([]);
+    } finally {
+      setReceiptsLoading(false);
+    }
+  }, [invoiceId]);
+
+  React.useEffect(() => {
+    loadReceipts();
+  }, [loadReceipts]);
+
+  const recomputeTotal = React.useMemo(() => {
+    const sum = (lines || []).reduce((acc, l) => acc + Number(l.amount || 0), 0);
+    return sum;
+  }, [lines]);
+
+
+  const receivedTotal = React.useMemo(() => {
+    return (receipts || []).reduce((sum, r) => sum + parseAmount(r.received_amount), 0);
+  }, [receipts]);
+
+  const invoiceTotalForPayment = React.useMemo(() => {
+    const t =
+      header?.total_amount != null && Number(header.total_amount) > 0
+        ? Number(header.total_amount)
+        : Number(recomputeTotal || 0);
+    return Number.isFinite(t) ? t : 0;
+  }, [header?.total_amount, recomputeTotal]);
+
+  const balance = React.useMemo(() => {
+    return invoiceTotalForPayment - receivedTotal;
+  }, [invoiceTotalForPayment, receivedTotal]);
+
+  const paymentStatus = React.useMemo(() => {
+    const inv = Number(invoiceTotalForPayment || 0);
+    const rec = Number(receivedTotal || 0);
+    const tol = 0.005;
+
+    if (rec <= tol) return "UNPAID";
+    if (rec < inv - tol) return "PARTIALLY_PAID";
+    if (Math.abs(rec - inv) <= tol) return "PAID";
+    return "OVERPAID";
+  }, [invoiceTotalForPayment, receivedTotal]);
+
+  const resetNewReceiptDefaults = React.useCallback(() => {
+    setNewReceipt({
+      receipt_date: todayISODate(),
+      received_amount: balance > 0 ? String(Math.round(balance * 100) / 100) : "",
+      payment_method: "WIRE",
+      reference_no: "",
+      note: "",
+    });
+  }, [balance]);
+
+  React.useEffect(() => {
+    // balance가 바뀌면 amount 기본값을 맞춰줌(사용자 입력 있으면 유지하려면 여기서 더 복잡하게 하면 됨)
+    resetNewReceiptDefaults();
+  }, [resetNewReceiptDefaults]);
+
+  const handleCreateReceipt = React.useCallback(async () => {
+    if (!invoiceId) return;
+
+    const amt = parseAmount(newReceipt.received_amount);
+    if (amt <= 0) {
+      alert("Amount must be greater than 0.");
+      return;
+    }
+
+    setCreatingReceipt(true);
+    try {
+      const res = await fetch(
+        `/api/invoices/${encodeURIComponent(invoiceId)}/receipts`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            receipt_date: newReceipt.receipt_date || null,
+            received_amount: amt,
+            payment_method: (newReceipt.payment_method || "WIRE").trim(),
+            reference_no: (newReceipt.reference_no || "").trim() || null,
+            note: (newReceipt.note || "").trim() || null,
+          }),
+        }
+      );
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        alert(json?.error || json?.message || `Create failed (${res.status})`);
+        return;
+      }
+
+      await loadReceipts();
+      resetNewReceiptDefaults();
+    } catch (e) {
+      console.error(e);
+      alert("Create failed.");
+    } finally {
+      setCreatingReceipt(false);
+    }
+  }, [invoiceId, newReceipt, loadReceipts, resetNewReceiptDefaults]);
+
+  const startEditReceipt = React.useCallback((r: ReceiptRow) => {
+    setEditingReceiptId(r.id);
+    setEditReceipt({
+      receipt_date: fmtDate10(r.receipt_date) || todayISODate(),
+      received_amount: r.received_amount == null ? "" : String(r.received_amount),
+      payment_method: (r.payment_method || "WIRE").toString(),
+      reference_no: (r.reference_no || "").toString(),
+      note: (r.note || "").toString(),
+    });
+  }, []);
+
+  const cancelEditReceipt = React.useCallback(() => {
+    setEditingReceiptId(null);
+  }, []);
+
+  const handleUpdateReceipt = React.useCallback(
+    async (receiptId: string) => {
+      const amt = parseAmount(editReceipt.received_amount);
+      if (amt <= 0) {
+        alert("Amount must be greater than 0.");
+        return;
+      }
+
+      setSavingReceipt(true);
+      try {
+        const res = await fetch(`/api/receipts/${encodeURIComponent(receiptId)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            receipt_date: editReceipt.receipt_date || null,
+            received_amount: amt,
+            payment_method: (editReceipt.payment_method || "WIRE").trim(),
+            reference_no: (editReceipt.reference_no || "").trim() || null,
+            note: (editReceipt.note || "").trim() || null,
+          }),
+        });
+
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          alert(json?.error || json?.message || `Update failed (${res.status})`);
+          return;
+        }
+
+        setEditingReceiptId(null);
+        await loadReceipts();
+      } catch (e) {
+        console.error(e);
+        alert("Update failed.");
+      } finally {
+        setSavingReceipt(false);
+      }
+    },
+    [editReceipt, loadReceipts]
+  );
+
+  const handleDeleteReceipt = React.useCallback(
+    async (receiptId: string) => {
+      const ok = confirm("Delete this receipt? (soft delete)");
+      if (!ok) return;
+
+      try {
+        const res = await fetch(`/api/receipts/${encodeURIComponent(receiptId)}`, {
+          method: "DELETE",
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          alert(json?.error || json?.message || `Delete failed (${res.status})`);
+          return;
+        }
+        await loadReceipts();
+      } catch (e) {
+        console.error(e);
+        alert("Delete failed.");
+      }
+    },
+    [loadReceipts]
+  );
+
   // ✅ autoPdf=1 처리 (PDF 버튼 의미 분리)
   // IMPORTANT FIX:
   // - router.replace()를 PDF 실행 "이후"에 호출해야 함.
@@ -278,11 +525,6 @@ export default function InvoiceDetailPage() {
   React.useEffect(() => {
     loadInvoice();
   }, [loadInvoice]);
-
-  const recomputeTotal = React.useMemo(() => {
-    const sum = (lines || []).reduce((acc, l) => acc + Number(l.amount || 0), 0);
-    return sum;
-  }, [lines]);
 
   const currency = header?.currency || "USD";
 
@@ -1031,6 +1273,269 @@ export default function InvoiceDetailPage() {
             <div className="mt-2 text-xs text-muted-foreground">
               * Material / HS Code는 LDC면 항상 표시되고, 다른 바이어는 값이 하나라도 있으면 자동 표시됩니다.
               (빈 값이어도 저장 가능)
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Receipts */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle>Receipts</CardTitle>
+            <div className="flex items-center gap-2">
+              <div className="text-sm text-muted-foreground">
+                Received: {currency} {fmtMoney2(receivedTotal)}
+              </div>
+              <div className="text-sm text-muted-foreground">
+                Balance: {currency} {fmtMoney2(balance)}
+              </div>
+              <div
+                className={[
+                  "text-xs font-semibold px-2 py-1 rounded",
+                  paymentStatus === "PAID"
+                    ? "bg-emerald-100 text-emerald-700"
+                    : paymentStatus === "PARTIALLY_PAID"
+                    ? "bg-amber-100 text-amber-700"
+                    : paymentStatus === "OVERPAID"
+                    ? "bg-red-100 text-red-700"
+                    : "bg-muted text-foreground",
+                ].join(" ")}
+                title={paymentStatus}
+              >
+                {paymentStatus.replace("_", " ")}
+              </div>
+              <Button
+                variant="outline"
+                onClick={loadReceipts}
+                disabled={receiptsLoading}
+              >
+                {receiptsLoading ? "Loading..." : "Refresh"}
+              </Button>
+            </div>
+          </CardHeader>
+
+          <CardContent className="grid gap-4">
+            {/* Add Receipt */}
+            <div className="rounded-md border p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-semibold">Add Receipt</div>
+                <Button
+                  onClick={handleCreateReceipt}
+                  disabled={creatingReceipt || !invoiceId}
+                >
+                  {creatingReceipt ? "Saving..." : "Add"}
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mt-3">
+                <div className="grid gap-2">
+                  <Label>Date</Label>
+                  <Input
+                    type="date"
+                    value={newReceipt.receipt_date}
+                    onChange={(e) =>
+                      setNewReceipt((p) => ({ ...p, receipt_date: e.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-2">
+                  <Label>Amount</Label>
+                  <Input
+                    inputMode="decimal"
+                    value={newReceipt.received_amount}
+                    onChange={(e) =>
+                      setNewReceipt((p) => ({ ...p, received_amount: e.target.value }))
+                    }
+                    placeholder="0.00"
+                  />
+                </div>
+
+                <div className="grid gap-2">
+                  <Label>Method</Label>
+                  <Input
+                    value={newReceipt.payment_method}
+                    onChange={(e) =>
+                      setNewReceipt((p) => ({ ...p, payment_method: e.target.value }))
+                    }
+                    placeholder="WIRE / CHECK / CASH / OTHER"
+                  />
+                </div>
+
+                <div className="grid gap-2">
+                  <Label>Reference No</Label>
+                  <Input
+                    value={newReceipt.reference_no}
+                    onChange={(e) =>
+                      setNewReceipt((p) => ({ ...p, reference_no: e.target.value }))
+                    }
+                    placeholder="Bank ref / transaction id"
+                  />
+                </div>
+
+                <div className="grid gap-2 md:col-span-1">
+                  <Label>Note</Label>
+                  <Input
+                    value={newReceipt.note}
+                    onChange={(e) =>
+                      setNewReceipt((p) => ({ ...p, note: e.target.value }))
+                    }
+                    placeholder="(optional)"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Receipts table */}
+            <div className="w-full overflow-auto rounded-md border">
+              <table className="w-full text-sm">
+                <thead className="bg-muted/40">
+                  <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+                    <th className="min-w-[120px]">Date</th>
+                    <th className="min-w-[140px] text-right">Amount</th>
+                    <th className="min-w-[130px]">Method</th>
+                    <th className="min-w-[200px]">Reference</th>
+                    <th className="min-w-[260px]">Note</th>
+                    <th className="min-w-[140px]">Created By</th>
+                    <th className="min-w-[140px] text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {receipts.length === 0 ? (
+                    <tr className="border-t">
+                      <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={7}>
+                        No receipts.
+                      </td>
+                    </tr>
+                  ) : (
+                    receipts.map((r) => {
+                      const isEditing = editingReceiptId === r.id;
+                      return (
+                        <tr key={r.id} className="border-t [&>td]:px-3 [&>td]:py-2">
+                          <td>
+                            {isEditing ? (
+                              <Input
+                                type="date"
+                                value={editReceipt.receipt_date}
+                                onChange={(e) =>
+                                  setEditReceipt((p) => ({
+                                    ...p,
+                                    receipt_date: e.target.value,
+                                  }))
+                                }
+                              />
+                            ) : (
+                              fmtDate10(r.receipt_date)
+                            )}
+                          </td>
+
+                          <td className="text-right">
+                            {isEditing ? (
+                              <Input
+                                inputMode="decimal"
+                                className="text-right"
+                                value={editReceipt.received_amount}
+                                onChange={(e) =>
+                                  setEditReceipt((p) => ({
+                                    ...p,
+                                    received_amount: e.target.value,
+                                  }))
+                                }
+                              />
+                            ) : (
+                              fmtMoney2(r.received_amount)
+                            )}
+                          </td>
+
+                          <td>
+                            {isEditing ? (
+                              <Input
+                                value={editReceipt.payment_method}
+                                onChange={(e) =>
+                                  setEditReceipt((p) => ({
+                                    ...p,
+                                    payment_method: e.target.value,
+                                  }))
+                                }
+                              />
+                            ) : (
+                              r.payment_method || ""
+                            )}
+                          </td>
+
+                          <td>
+                            {isEditing ? (
+                              <Input
+                                value={editReceipt.reference_no}
+                                onChange={(e) =>
+                                  setEditReceipt((p) => ({
+                                    ...p,
+                                    reference_no: e.target.value,
+                                  }))
+                                }
+                              />
+                            ) : (
+                              r.reference_no || ""
+                            )}
+                          </td>
+
+                          <td>
+                            {isEditing ? (
+                              <Input
+                                value={editReceipt.note}
+                                onChange={(e) =>
+                                  setEditReceipt((p) => ({ ...p, note: e.target.value }))
+                                }
+                              />
+                            ) : (
+                              r.note || ""
+                            )}
+                          </td>
+
+                          <td className="text-xs text-muted-foreground">
+                            {r.created_by_email || ""}
+                          </td>
+
+                          <td className="text-right">
+                            {isEditing ? (
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  variant="outline"
+                                  onClick={cancelEditReceipt}
+                                  disabled={savingReceipt}
+                                >
+                                  Cancel
+                                </Button>
+                                <Button onClick={() => handleUpdateReceipt(r.id)} disabled={savingReceipt}>
+                                  {savingReceipt ? "Saving..." : "Save"}
+                                </Button>
+                              </div>
+                            ) : (
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  variant="outline"
+                                  onClick={() => startEditReceipt(r)}
+                                >
+                                  Edit
+                                </Button>
+                                <Button
+                                  variant="destructive"
+                                  onClick={() => handleDeleteReceipt(r.id)}
+                                >
+                                  Delete
+                                </Button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="text-xs text-muted-foreground">
+              * Receipt는 Invoice에만 연결됩니다. Method 추천: WIRE / CHECK / CASH / OTHER (직접 입력)
             </div>
           </CardContent>
         </Card>

@@ -985,6 +985,12 @@ export default function CompaniesPage() {
                       placeholder="Country"
                     />
 
+                    <Label>State</Label>
+<Input
+  value={form.state ?? ""}
+  onChange={(e) => handleChange("state", e.target.value)}
+  placeholder="State / Province"
+/>
                     <Label>City</Label>
                     <Input
                       value={form.city ?? ""}

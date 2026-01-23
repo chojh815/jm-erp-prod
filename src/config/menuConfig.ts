@@ -79,7 +79,6 @@ export const MENU_SECTIONS: MenuSection[] = [
         href: "/invoices",
         perm: "invoice.view",
       },
-      { label: "Receipts", href: "/receipts", perm: "receipts.view" },
       {
         label: "After Service",
         href: "/after-service",
@@ -88,7 +87,8 @@ export const MENU_SECTIONS: MenuSection[] = [
     ],
   },
 
-  {
+  
+{
     label: "Production",
     items: [
       { label: "Work Sheets", href: "/work-sheets", perm: "work_sheet.view" },
@@ -141,6 +141,16 @@ export const MENU_SECTIONS: MenuSection[] = [
     ],
   },
 
+   {
+    label: "Finance",
+    items: [
+      { label: "Bank Accounts", href: "/bank-accounts", perm: "receipts.view" },
+      { label: "Receipts", href: "/receipts", perm: "receipts.view" },
+      { label: "Credit Notes", href: "/credits", perm: "receipts.view" },
+      { label: "Bank Balance (Monthly)", href: "/reports/bank-balance-monthly", perm: "receipts.view" },
+    ],
+  },
+  
   {
     label: "Admin",
     items: [
