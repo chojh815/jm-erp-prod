@@ -1098,7 +1098,22 @@ export default function WorkSheetPdfPage() {
 
       const blob = doc.output("blob");
       const url = URL.createObjectURL(blob);
-      window.location.href = url;
+      // IMPORTANT: do NOT navigate the current tab to the blob URL.
+// If we unload this document, the blob URL can be revoked automatically by the browser,
+// and Chrome PDF viewer download may show "Failed - 0B".
+const w = window.open(url, "_blank", "noopener,noreferrer");
+if (!w) {
+  // Popup blocked: fall back to an <a download> click
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `work-sheet-${id}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+// Revoke later (keep it alive long enough for viewer download/print)
+window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+
     } catch (e: any) {
       console.error(e);
       setMsg(`PDF ERROR: ${e?.message ?? String(e)}`);
