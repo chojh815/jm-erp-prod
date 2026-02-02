@@ -12,3 +12,9 @@ export function createSupabaseBrowserClient() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   );
 }
+
+/**
+ * ✅ 호환용 alias
+ * 기존 코드들이 createClient()를 호출해도 동작하게
+ */
+export const createClient = createSupabaseBrowserClient;

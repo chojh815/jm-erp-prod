@@ -6,8 +6,13 @@ import AppSidebar from "@/components/layout/AppSidebar";
 import { PermissionsProvider } from "@/hooks/usePermissions";
 
 interface AppShellProps {
+  /**
+   * (Legacy/Optional) page에서 직접 role을 넘겨줄 때만 사용
+   * - 안 넘기면 Sidebar는 /api/me/permissions에서 받은 실제 role을 표시
+   */
   role?: AppRole;
   currentRole?: AppRole;
+
   children: ReactNode;
   title?: string;
   description?: string;
@@ -21,11 +26,14 @@ export default function AppShell({
   description,
 }: AppShellProps) {
   /**
-   * ⚠️ 주의
-   * - Sidebar는 기존처럼 role 기반(menuConfig)으로 유지
-   * - 실제 권한 판단(Allow/Deny)은 usePermissions()에서 permissions 배열 기준
+   * ✅ 핵심 수정
+   * 이전: role/currentRole이 없으면 "viewer"를 강제로 넣어서
+   *       Sidebar 헤더에 roleProp(viewer)이 우선되어 "viewer"로 보이는 문제가 있었음.
+   *
+   * 이제: role을 '넘겨준 경우에만' Sidebar에 전달하고,
+   *      기본은 PermissionsProvider가 fetch한 실제 role을 Sidebar에서 표시하도록 둔다.
    */
-  const resolvedRole = (currentRole ?? role ?? ("viewer" as AppRole));
+  const resolvedRole = currentRole ?? role; // undefined 가능
 
   return (
     <PermissionsProvider>

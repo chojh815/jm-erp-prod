@@ -97,6 +97,7 @@ export default function ReceiptsPage() {
   const [applyAmount, setApplyAmount] = React.useState<Record<string, string>>({});
 
   const [saving, setSaving] = React.useState(false);
+  const [lastSavedReceiptId, setLastSavedReceiptId] = React.useState<string>("");
   const [errorMsg, setErrorMsg] = React.useState("");
   const [okMsg, setOkMsg] = React.useState("");
 
@@ -352,7 +353,93 @@ export default function ReceiptsPage() {
     void loadUnpaid(buyerId);
   }, [buyerId, loadUnpaid]);
 
-  const toggleAll = () => {
+  
+  function csvEscape(v: unknown) {
+    const s = v === null || v === undefined ? "" : String(v);
+    const needs = /[",\n\r]/.test(s);
+    const body = s.replace(/"/g, '""');
+    return needs ? `"${body}"` : body;
+  }
+
+  function downloadText(filename: string, content: string, mime = "text/csv;charset=utf-8") {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 500);
+  }
+
+  const openReceiptPdf = React.useCallback((receiptId: string) => {
+    if (!receiptId) return;
+    window.open(`/receipts/${encodeURIComponent(receiptId)}/pdf`, "_blank", "noopener,noreferrer");
+  }, []);
+
+  const exportExcelCSV = React.useCallback(() => {
+    const buyer = buyers.find((b) => b.id === buyerId);
+    const bank = banks.find((b) => b.id === bankAccountId);
+
+    const buyerLabel = `${buyer?.company_name || ""}${buyer?.code ? ` (${buyer.code})` : ""}`.trim();
+    const bankLabel = `${bank?.account_name || ""}${bank?.currency ? ` (${bank.currency})` : ""}`.trim();
+
+    const lines: string[] = [];
+    lines.push(["Section","Field","Value"].map(csvEscape).join(","));
+    lines.push(["Receipt","Buyer",buyerLabel].map(csvEscape).join(","));
+    lines.push(["Receipt","Deposit Date",depositDate].map(csvEscape).join(","));
+    lines.push(["Receipt","Bank Account",bankLabel].map(csvEscape).join(","));
+    lines.push(["Receipt","Method",method].map(csvEscape).join(","));
+    lines.push(["Receipt","Reference No",referenceNo].map(csvEscape).join(","));
+    lines.push(["Receipt","Note",note].map(csvEscape).join(","));
+    lines.push(["Amounts","Total Received (Gross)",fmt2(totalReceived)].map(csvEscape).join(","));
+    lines.push(["Amounts","Bank Fee (Our Bank)",fmt2(bankFee)].map(csvEscape).join(","));
+    lines.push(["Amounts","Bank Fee (Buyer Bank)",fmt2(buyerBankFee)].map(csvEscape).join(","));
+    lines.push(["Amounts","Claim Deduction",fmt2(claimDeduction)].map(csvEscape).join(","));
+    lines.push(["Amounts","Net Received",fmt2(netReceived)].map(csvEscape).join(","));
+    lines.push(["Summary","Applied Total",fmt2(appliedTotal)].map(csvEscape).join(","));
+    lines.push(["Summary","Diff (Net - Applied)",fmt2(diff)].map(csvEscape).join(","));
+
+    lines.push("");
+    lines.push(["invoice_id","invoice_no","invoice_date","invoice_total","invoice_balance","selected","apply_amount"].map(csvEscape).join(","));
+    for (const inv of unpaid) {
+      lines.push([
+        inv.invoice_id,
+        inv.invoice_no,
+        shortDate(inv.invoice_date),
+        fmt2(inv.total_amount),
+        fmt2(inv.balance),
+        selected[inv.invoice_id] ? "Y" : "",
+        fmt2(toNum(applyAmount[inv.invoice_id])),
+      ].map(csvEscape).join(","));
+    }
+
+    const code = buyer?.code ? String(buyer.code) : "BUYER";
+    const fn = `receipts_${code}_${depositDate || todayISODate()}.csv`;
+    downloadText(fn, lines.join("\n"));
+  }, [
+    buyers,
+    buyerId,
+    banks,
+    bankAccountId,
+    depositDate,
+    method,
+    referenceNo,
+    note,
+    totalReceived,
+    bankFee,
+    buyerBankFee,
+    claimDeduction,
+    netReceived,
+    appliedTotal,
+    diff,
+    unpaid,
+    selected,
+    applyAmount,
+  ]);
+
+const toggleAll = () => {
     const next: Record<string, boolean> = {};
     for (const inv of unpaid) next[inv.invoice_id] = true;
     setSelected(next);
@@ -382,16 +469,29 @@ export default function ReceiptsPage() {
     setApplyAmount(nextApply);
   };
 
-  const canSave = React.useMemo(() => {
+  
+  // Number of selected invoices (used for validation/UX)
+  const selectedCount = React.useMemo(() => {
+    return unpaid.reduce((acc, u) => acc + (selected[u.invoice_id] ? 1 : 0), 0);
+  }, [unpaid, selected]);
+
+const canSave = React.useMemo(() => {
     if (!buyerId) return false;
     if (saving) return false;
     if (totalReceived <= 0) return false;
     if (netReceived <= 0) return false;
-    if (hasMismatch) return false;
+    // NOTE: mismatch is validated at Save click time (so user can still click Save and see message)
+    return selectedCount > 0;
+  }, [buyerId, saving, totalReceived, netReceived, selectedCount]);
 
-    const anyApplied = Object.values(applyAmount).some((v) => toNum(v) > 0);
-    return anyApplied;
-  }, [buyerId, saving, totalReceived, netReceived, hasMismatch, applyAmount]);
+
+  // Clear the mismatch message as soon as user edits values after a failed Save attempt.
+  React.useEffect(() => {
+    if (!errorMsg) return;
+    if (!errorMsg.startsWith("Apply total")) return;
+    setErrorMsg("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buyerId, totalReceivedStr, bankFeeStr, buyerBankFeeStr, claimDeductionStr, appliedTotal, netReceived]);
 
   const onSave = async () => {
     setErrorMsg("");
@@ -400,7 +500,7 @@ export default function ReceiptsPage() {
     if (!buyerId) return setErrorMsg("Please select a buyer.");
     if (totalReceived <= 0) return setErrorMsg("Total Received must be greater than 0.");
     if (netReceived <= 0) return setErrorMsg("Net Received must be greater than 0.");
-    if (hasMismatch) return setErrorMsg(`Applied total must match Net Received (diff ${fmt2(diff)})`);
+    if (hasMismatch) return setErrorMsg(`Apply total (${fmt2(appliedTotal)}) must equal Net Received (${fmt2(netReceived)}).`);
 
     const allocations = unpaid
       .filter((u) => toNum(applyAmount[u.invoice_id]) > 0)
@@ -435,6 +535,22 @@ export default function ReceiptsPage() {
       if (!res.ok) throw new Error(j?.error || `Save failed (${res.status})`);
 
       setOkMsg("Saved.");
+
+      // store last saved receipt id (enables PDF button) + open PDF in new tab
+      const savedId =
+        (j?.receipt_id as string | undefined) ||
+        (j?.receipt_header_id as string | undefined) ||
+        (j?.id as string | undefined) ||
+        (j?.header?.id as string | undefined);
+      if (savedId) {
+        setLastSavedReceiptId(savedId);
+        // open receipt PDF immediately (new tab)
+        try {
+          window.open(`/receipts/${savedId}/pdf`, "_blank", "noopener,noreferrer");
+        } catch {}
+      }
+
+      // Keep buyer selected but reset amounts
       // Keep buyer selected but reset amounts
       setTotalReceivedStr("");
       setBankFeeStr("0.00");
@@ -458,9 +574,23 @@ export default function ReceiptsPage() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-3">
             <CardTitle>Receipts (Bulk Apply)</CardTitle>
-            <Button onClick={onSave} disabled={!canSave}>
-              {saving ? "Saving..." : "Save Deposit"}
-            </Button>
+            <div className="flex items-center gap-2">
+  <Button variant="secondary" onClick={exportExcelCSV} disabled={!buyerId}>
+    Export Excel (CSV)
+  </Button>
+  <Button
+    variant="secondary"
+    onClick={() => openReceiptPdf(lastSavedReceiptId)}
+    disabled={!lastSavedReceiptId}
+    title={lastSavedReceiptId ? "Open last saved receipt PDF" : "Save a receipt first"}
+  >
+    PDF
+  </Button>
+  <Button onClick={onSave} disabled={!canSave}>
+    {saving ? "Saving..." : "Save Deposit"}
+  </Button>
+</div>
+
           </CardHeader>
 
           <CardContent className="space-y-4">

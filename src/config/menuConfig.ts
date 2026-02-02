@@ -45,13 +45,20 @@ export const MENU_SECTIONS: MenuSection[] = [
     label: "Development",
     items: [
       {
-        label: "Sample Requests",
+        label: "Product Development",
         href: "/dev/product-register",
         perm: "dev.samples.view",
       },
       {
         label: "Costings",
-        href: "/dev/costings",
+        href: "/costings",
+        perm: "dev.costings.view",
+      },
+      {
+        label: "Quotations",
+        href: "/quotations",
+        // Quotation은 Costing에서 생성되는 결과물.
+        // 권한명이 아직 확정되지 않았으므로, 우선 Costings와 동일 권한으로 노출.
         perm: "dev.costings.view",
       },
       {
@@ -73,7 +80,6 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "proforma.view",
       },
       { label: "Shipments", href: "/shipments", perm: "shipment.view" },
-      
       {
         label: "Invoices & Packing",
         href: "/invoices",
@@ -87,8 +93,7 @@ export const MENU_SECTIONS: MenuSection[] = [
     ],
   },
 
-  
-{
+  {
     label: "Production",
     items: [
       { label: "Work Sheets", href: "/work-sheets", perm: "work_sheet.view" },
@@ -106,6 +111,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         label: "Production Status",
         href: "/production/status",
         perm: "production_status.view",
+      },
+      {
+        label: "Batches (RED)",
+        href: "/production/batches",
+        perm: "production_batches.view",
       },
     ],
   },
@@ -141,16 +151,20 @@ export const MENU_SECTIONS: MenuSection[] = [
     ],
   },
 
-   {
+  {
     label: "Finance",
     items: [
       { label: "Bank Accounts", href: "/bank-accounts", perm: "receipts.view" },
       { label: "Receipts", href: "/receipts", perm: "receipts.view" },
       { label: "Credit Notes", href: "/credits", perm: "receipts.view" },
-      { label: "Bank Balance (Monthly)", href: "/reports/bank-balance-monthly", perm: "receipts.view" },
+      {
+        label: "Bank Balance (Monthly)",
+        href: "/reports/bank-balance-monthly",
+        perm: "receipts.view",
+      },
     ],
   },
-  
+
   {
     label: "Admin",
     items: [

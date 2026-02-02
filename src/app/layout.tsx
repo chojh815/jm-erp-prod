@@ -1,6 +1,7 @@
 // src/app/layout.tsx
 import type { Metadata } from "next";
 import Header from "@/components/layout/Header";
+import { PermissionsProvider } from "@/components/auth/PermissionsProvider";
 import "./globals.css";
 
 export const dynamic = "force-dynamic";
@@ -18,8 +19,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <Header />
-        <main>{children}</main>
+        <PermissionsProvider>
+          <Header />
+          <main>{children}</main>
+        </PermissionsProvider>
       </body>
     </html>
   );
