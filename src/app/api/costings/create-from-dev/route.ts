@@ -311,9 +311,17 @@ async function copyLinesAndFinalize(args: {
     if (i2) return NextResponse.json({ success: false, error: i2.message, message: i2.message, code: i2.code, detail: i2.detail, hint: i2.hint }, { status: 500 });
   }
 
-  const matTotal = matRows.reduce((s, r) => s + (Number(r.amount_usd ?? 0) || 0), 0);
-  const opTotal = opRows.reduce((s, r) => s + (Number(r.amount_usd ?? 0) || 0), 0);
-  const total = matTotal + opTotal;
+ const matTotal = (matRows as any[]).reduce(
+  (s: number, r: any) => s + (Number(r?.amount_usd ?? 0) || 0),
+  0
+);
+
+const opTotal = (opRows as any[]).reduce(
+  (s: number, r: any) => s + (Number(r?.amount_usd ?? 0) || 0),
+  0
+);
+
+const total = matTotal + opTotal;
 
   // Update totals (ignore if some columns don't exist)
   await supabase

@@ -422,7 +422,10 @@ export default function QuotationDetailPage() {
         (headerRow as any).buyer_brand_name ??
         (headerRow as any).buyer_brand ??
         "";
-      setHeader(headerRow);
+      setHeader({
+  ...(headerRow as any),
+  id: (headerRow as any)?.id ?? (headerRow as any)?.quotation_id ?? id, // id는 반드시 채움
+} as any);
 
       const { data: ls, error: le } = await supabase
         .from("quotation_lines")
@@ -497,10 +500,15 @@ export default function QuotationDetailPage() {
     fk: VariantLinesFkCol,
     variantId: string
   ): Promise<AnyRow[]> {
-    let r = await supabase
+    // NOTE: Supabase JS types can explode ("Type instantiation is excessively deep")
+    // when we use dynamic column names with a strongly typed client. Cast to any
+    // inside this helper to keep TS shallow and make builds stable.
+    const sb: any = supabase as any;
+
+    let r: any = await sb
       .from("quotation_variant_lines")
       .select("*")
-      .eq(fk as any, variantId)
+      .eq(fk, variantId)
       .eq("is_deleted", false);
 
     let data = (r.data as AnyRow[]) || [];
@@ -509,10 +517,10 @@ export default function QuotationDetailPage() {
     if (err) {
       const msg = String(err?.message || "");
       if ((msg.includes("schema cache") || msg.includes("Could not find")) && msg.includes("is_deleted")) {
-        const r2 = await supabase
+        const r2: any = await sb
           .from("quotation_variant_lines")
           .select("*")
-          .eq(fk as any, variantId);
+          .eq(fk, variantId);
         if (r2.error) throw r2.error;
         data = ((r2.data as AnyRow[]) || []).filter((x: any) => (x as any)?.is_deleted !== true);
         return data;
@@ -593,8 +601,8 @@ export default function QuotationDetailPage() {
             msg.includes("Could not find") ||
             msg.includes("does not exist") ||
             // when the table uses the OTHER fk column and enforces NOT NULL
-            (msg.includes("null value") && msg.includes(alt)) ||
-            (msg.includes("violates not-null") && msg.includes(alt))
+            (msg.includes("null value") && msg.includes("quotation_id")) ||
+(msg.includes("violates not-null") && msg.includes("quotation_id"))
           ) {
             return await fetchVariantLinesWithFk("quotation_variant_id", variantId);
           }

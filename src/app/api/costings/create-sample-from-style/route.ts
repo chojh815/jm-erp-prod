@@ -64,12 +64,16 @@ export async function POST(req: Request) {
     .eq("style_no", pd.style_no)
     .order("version", { ascending: false })
     .limit(1);
+
   if (buyerId) exQ = exQ.eq("buyer_id", buyerId);
 
   const { data: ex, error: exErr } = await exQ;
   if (exErr) return NextResponse.json({ success: false, error: exErr.message }, { status: 500 });
 
   if (ex?.[0]) return NextResponse.json({ success: true, existed: true, costing_id: ex[0].id });
+
+  // NOTE: margin_pct는 NOT NULL이면 defaultMargin이 null일 때 대비 필요
+  const marginToUse = Number.isFinite(Number(defaultMargin)) ? Number(defaultMargin) : null;
 
   const { data: created, error: cErr } = await supabase
     .from("costing_headers")
@@ -81,8 +85,8 @@ export async function POST(req: Request) {
       buyer_id: buyerId,
       buyer_code: buyerCode,
       buyer_name: buyerName,
-      buyer_default_margin_pct: defaultMargin,
-      margin_pct: defaultMargin,
+      buyer_default_margin_pct: marginToUse,
+      margin_pct: marginToUse,
       created_by: user.id,
       created_by_email: user.email ?? null,
       updated_by: user.id,
@@ -91,7 +95,9 @@ export async function POST(req: Request) {
     .select("id")
     .single();
 
-  if (cErr) NextResponse.json({ success: false, error: cErr.message }, { status: 500 });
+  if (cErr) return NextResponse.json({ success: false, error: cErr.message }, { status: 500 });
+  if (!created)
+    return NextResponse.json({ success: false, error: "Failed to create costing" }, { status: 500 });
 
   return NextResponse.json({ success: true, existed: false, costing_id: created.id });
 }
