@@ -179,31 +179,40 @@ export default function ReceiptsPage() {
     setBanksLoading(true);
     setErrorMsg("");
     try {
-      // If your bank accounts table differs, adjust here.
-      // This load is optional; the page still works without bank accounts.
-      const { data, error } = await supabase
-        .from("bank_accounts")
-        .select("id, account_name, currency, is_deleted")
-        .eq("is_deleted", false)
-        .order("account_name", { ascending: true });
+      // Use server endpoint so schema differences in bank_accounts table don't break the UI.
+      // UI calls /api/bank-accounts/list?active_only=1&include_any=1 elsewhere as well.
+      const res = await fetch("/api/bank-accounts/list?active_only=1&include_any=1", {
+        method: "GET",
+        cache: "no-store",
+      });
 
-      if (error) {
-        // Table or columns may not exist in some environments; don't hard-fail.
+      if (!res.ok) {
         setBanks([]);
         return;
       }
 
+      const j: any = await res.json();
+      const rows =
+        (Array.isArray(j) ? j : null) ??
+        j.data ??
+        j.rows ??
+        j.items ??
+        [];
+
       setBanks(
-        (data || []).map((r: any) => ({
+        (rows || []).map((r: any) => ({
           id: String(r.id),
-          account_name: r.account_name ?? null,
-          currency: r.currency ?? null,
+          account_name: r.account_name ?? r.accountName ?? null,
+          currency: r.currency ?? r.ccy ?? null,
         }))
       );
+    } catch (e: any) {
+      setBanks([]);
+      setErrorMsg((prev) => prev || e?.message || "Failed to load bank accounts");
     } finally {
       setBanksLoading(false);
     }
-  }, [supabase]);
+  }, []);
 
   const resetApply = React.useCallback(() => {
     setSelected({});

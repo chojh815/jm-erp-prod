@@ -49,6 +49,48 @@ function fmtNum(n: any) {
   return x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+
+
+function pickRows(j: any): any[] {
+  if (!j) return [];
+  if (Array.isArray(j)) return j;
+  return j.rows ?? j.data ?? j.items ?? j.results ?? [];
+}
+
+function normalizeRow(r: any): BankAccountRow {
+  // Make UI resilient to backend key variations
+  const swift = r?.swift_code ?? r?.swift ?? r?.swiftCode ?? null;
+  const accountNo =
+    r?.account_no_masked ??
+    r?.account_no ??
+    r?.accountNo ??
+    r?.account ??
+    null;
+  const isDefault =
+    r?.is_default_for_site ??
+    r?.is_default ??
+    r?.isDefault ??
+    null;
+
+  return {
+    id: r?.id,
+    site_code: r?.site_code ?? r?.siteCode ?? null,
+    account_name: r?.account_name ?? r?.accountName ?? null,
+    bank_name: r?.bank_name ?? r?.bankName ?? null,
+    account_no_masked: accountNo,
+    account_holder_name: r?.account_holder_name ?? r?.accountHolderName ?? null,
+    swift_code: swift,
+    bank_address: r?.bank_address ?? r?.bankAddress ?? null,
+    beneficiary_address: r?.beneficiary_address ?? r?.beneficiaryAddress ?? null,
+    currency: r?.currency ?? null,
+    opening_balance: r?.opening_balance ?? r?.openingBalance ?? 0,
+    is_active: r?.is_active ?? r?.isActive ?? true,
+    is_default_for_site: isDefault,
+    sort_order: r?.sort_order ?? r?.sortOrder ?? 0,
+    updated_at: r?.updated_at ?? r?.updatedAt ?? null,
+  };
+}
+
 export default function BankAccountsPage() {
   const role: DevRole = "admin";
 
@@ -75,8 +117,8 @@ export default function BankAccountsPage() {
 
       const res = await fetch(`/api/bank-accounts/list?${params.toString()}`, { cache: "no-store" });
       const j = await res.json();
-      if (!j?.success) throw new Error(j?.error || "Failed to load bank accounts");
-      setRows(j.rows || []);
+      if (j && typeof j === 'object' && 'success' in j && !j.success) throw new Error(j?.error || 'Failed to load bank accounts');
+      setRows(pickRows(j).map(normalizeRow));
     } catch (e: any) {
       alert(e?.message ?? String(e));
     } finally {
