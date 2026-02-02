@@ -290,8 +290,7 @@ export async function POST(req: Request) {
       await supabase.from("quotation_headers").update(headerPatch).eq("id", quotation_id);
     } catch {}
 
-    return jsonOk(
-return jsonOk({
+    return jsonOk({
       success: true,
       quotation_id,
       quotation_no: header.quotation_no,

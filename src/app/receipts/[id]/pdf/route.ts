@@ -1,9 +1,13 @@
 // src/app/receipts/[id]/pdf/route.ts
+import React from "react";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { renderToBuffer } from "@react-pdf/renderer";
 import ReceiptPDF, { ReceiptPdfData } from "@/components/pdf/ReceiptPDF";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type Ctx = { params: { id: string } };
 
@@ -11,6 +15,7 @@ function num(x: any) {
   const n = Number(x);
   return Number.isFinite(n) ? n : 0;
 }
+
 function pickFirst<T>(...vals: Array<T | null | undefined>): T | null {
   for (const v of vals) if (v !== undefined && v !== null) return v;
   return null;
@@ -26,6 +31,7 @@ function getSupabase() {
         get(name: string) {
           return cookieStore.get(name)?.value;
         },
+        // Route handler에서는 set/remove를 실제로 쓰지 않으므로 no-op
         set() {},
         remove() {},
       },
@@ -35,10 +41,14 @@ function getSupabase() {
 
 export async function GET(_req: Request, ctx: Ctx) {
   try {
-    const id = ctx.params.id;
+    const id = ctx?.params?.id;
+    if (!id) {
+      return NextResponse.json({ error: "Missing receipt id" }, { status: 400 });
+    }
+
     const supabase = getSupabase();
 
-    // receipt header
+    // 1) receipt header
     const { data: rh, error: rhErr } = await supabase
       .from("receipt_headers")
       .select("*")
@@ -46,11 +56,14 @@ export async function GET(_req: Request, ctx: Ctx) {
       .maybeSingle();
 
     if (rhErr) throw rhErr;
-    if (!rh) return NextResponse.json({ error: "Receipt not found" }, { status: 404 });
+    if (!rh) {
+      return NextResponse.json({ error: "Receipt not found" }, { status: 404 });
+    }
 
-    // buyer/company (do NOT assume companies.is_deleted exists)
+    // 2) buyer/company (do NOT assume companies.is_deleted exists)
     let buyerName: string | null = null;
     let buyerCode: string | null = null;
+
     const buyerId = (rh as any).buyer_id ?? (rh as any).company_id ?? null;
     if (buyerId) {
       const { data: buyer, error: bErr } = await supabase
@@ -58,16 +71,18 @@ export async function GET(_req: Request, ctx: Ctx) {
         .select("id, name, company_name, code, buyer_code")
         .eq("id", buyerId)
         .maybeSingle();
+
       if (!bErr && buyer) {
         buyerName = (buyer as any).name ?? (buyer as any).company_name ?? null;
         buyerCode = (buyer as any).buyer_code ?? (buyer as any).code ?? null;
       }
     }
 
-    // bank account (optional)
+    // 3) bank account (optional)
     let bankAccountName: string | null = null;
     let bankAccountNumber: string | null = null;
     let bankSwift: string | null = null;
+
     const bankAccountId = (rh as any).bank_account_id ?? null;
     if (bankAccountId) {
       const { data: ba, error: baErr } = await supabase
@@ -75,29 +90,36 @@ export async function GET(_req: Request, ctx: Ctx) {
         .select("*")
         .eq("id", bankAccountId)
         .maybeSingle();
+
       if (!baErr && ba) {
-        bankAccountName = (ba as any).account_name ?? (ba as any).bank_name ?? (ba as any).name ?? null;
+        bankAccountName =
+          (ba as any).account_name ?? (ba as any).bank_name ?? (ba as any).name ?? null;
         bankAccountNumber = (ba as any).account_no ?? (ba as any).account_number ?? null;
         bankSwift = (ba as any).swift ?? (ba as any).swift_code ?? null;
       }
     }
 
-    // applications
+    // 4) applications (invoice link)
     const { data: apps, error: appErr } = await supabase
       .from("receipt_applications")
       .select("id, invoice_id, applied_amount, is_deleted")
       .eq("receipt_id", id);
+
     if (appErr) throw appErr;
 
     const aliveApps = (apps || []).filter((a: any) => a && a.is_deleted !== true);
-    const invoiceIds = Array.from(new Set(aliveApps.map((a: any) => a.invoice_id).filter(Boolean)));
+    const invoiceIds = Array.from(
+      new Set(aliveApps.map((a: any) => a.invoice_id).filter(Boolean))
+    ) as string[];
 
+    // 5) invoice headers map
     const invoiceMap = new Map<string, any>();
     if (invoiceIds.length > 0) {
       const { data: invs, error: invErr } = await supabase
         .from("invoice_headers")
         .select("id, invoice_no, invoice_date, total_amount")
         .in("id", invoiceIds);
+
       if (invErr) throw invErr;
       (invs || []).forEach((inv: any) => invoiceMap.set(inv.id, inv));
     }
@@ -113,6 +135,7 @@ export async function GET(_req: Request, ctx: Ctx) {
       };
     });
 
+    // 6) build ReceiptPdfData
     const currency = (rh as any).currency ?? "USD";
 
     const data: ReceiptPdfData = {
@@ -141,10 +164,14 @@ export async function GET(_req: Request, ctx: Ctx) {
       invoices,
     };
 
-    const pdf = await renderToBuffer(<ReceiptPDF data={data} />);
+    // 7) render PDF buffer
+    const pdf = await renderToBuffer(React.createElement(ReceiptPDF, { data }));
 
-    const filename = data.receipt_no ? `Receipt-${data.receipt_no}.pdf` : `Receipt-${data.receipt_id}.pdf`;
-    return new NextResponse(pdf, {
+    const filename = data.receipt_no
+      ? `Receipt-${data.receipt_no}.pdf`
+      : `Receipt-${data.receipt_id}.pdf`;
+
+    return new NextResponse(pdf as any, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
