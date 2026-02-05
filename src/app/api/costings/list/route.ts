@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
 
+export const dynamic = "force-dynamic";
+
 function isUndefinedColumnError(e: any) {
   return e?.code === "42703" || /column .* does not exist/i.test(e?.message || "");
 }

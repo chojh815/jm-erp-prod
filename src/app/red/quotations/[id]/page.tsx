@@ -1,11 +1,9 @@
-"use client";
+'use client';
 
-import React, { useEffect, useMemo, useState } from "react";
+import * as React from "react";
 import { useParams, useRouter } from "next/navigation";
-
-// ✅ 실제 파일이 존재하는 RED 탭 경로로 고정
-import MatrixTab from "@/app/red/quotations/[id]/tabs/matrix";
-import CompareDiffTab from "@/app/red/quotations/[id]/tabs/compare-diff";
+import CompareDiffTab from "./tabs/compare-diff";
+import MatrixTab from "./tabs/matrix";
 
 type VersionRow = {
   id: string;
@@ -30,27 +28,29 @@ type Quotation = {
   status: string;
 };
 
-const MOQ_LIST = [1000, 3000, 5000];
-
 export default function RedQuotationDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const id = params.id;
 
-  const [q, setQ] = useState<Quotation | null>(null);
-  const [versions, setVersions] = useState<VersionRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [q, setQ] = React.useState<Quotation | null>(null);
+  const [versions, setVersions] = React.useState<VersionRow[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
 
-  const [tab, setTab] = useState<"matrix" | "compare">("compare");
+  // A안: Costing 없이 RED Quotation 화면에서 Style No를 즉시 입력/저장
+  const [styleNo, setStyleNo] = React.useState<string>("");
+  const [savingStyle, setSavingStyle] = React.useState(false);
 
-  // ✅ Cost states (누락돼서 setXXX 에러가 났던 것들)
-  const [unitPrice, setUnitPrice] = useState<string>("");
-  const [unitCurrency, setUnitCurrency] = useState<string>("USD");
+  const [tab, setTab] = React.useState<"matrix" | "compare">("compare");
 
-  const [packagingCostsByMoq, setPackagingCostsByMoq] = useState<Record<number, string>>({});
-  const [fobByMoq, setFobByMoq] = useState<Record<number, string>>({});
-  const [fobCurrency, setFobCurrency] = useState<string>("USD");
+  // Costs inputs (used by Matrix/Costs APIs)
+  const [unitPrice, setUnitPrice] = React.useState<string>("");
+  const [unitCurrency, setUnitCurrency] = React.useState<string>("USD");
+  const [packagingCostsByMoq, setPackagingCostsByMoq] = React.useState<Record<number, string>>({});
+  const [fobByMoq, setFobByMoq] = React.useState<Record<number, string>>({});
+  const [fobCurrency, setFobCurrency] = React.useState<string>("CNY");
+
 
   async function load() {
     setLoading(true);
@@ -68,40 +68,51 @@ export default function RedQuotationDetailPage() {
     }
   }
 
-  useEffect(() => {
+  React.useEffect(() => { load(); }, [id]);
+
+  // 서버에서 헤더 로딩되면 현재 style_no를 편집 UI에 반영
+  React.useEffect(() => {
+    setStyleNo(q?.style_no || "");
+  }, [q?.style_no]);
+
+  const title = q?.red_quotation_no ? `${q.red_quotation_no}` : "RED Quotation";
+
+  async function saveStyleNo() {
     if (!id) return;
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+    setSavingStyle(true);
+    setErr(null);
+    try {
+      const r = await fetch(`/api/red/quotations/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ style_no: styleNo || null }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error || "Save failed");
+      // 헤더 최신화
+      setQ((prev) => (prev ? { ...prev, style_no: j?.data?.style_no ?? styleNo } : prev));
+    } catch (e: any) {
+      setErr(e?.message || "Save failed");
+    } finally {
+      setSavingStyle(false);
+    }
+  }
 
-  const title = useMemo(() => {
-    return q?.red_quotation_no ? `${q.red_quotation_no}` : "RED Quotation";
-  }, [q?.red_quotation_no]);
-
-  // (선택) 최신 버전 1개 기준으로 cost 자동 로드하고 싶으면 사용
-  const latestVersionId = useMemo(() => {
-    if (!versions?.length) return null;
-    // 최신 updated_at 기준
-    const sorted = [...versions].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
-    return sorted[0]?.id || null;
-  }, [versions]);
-
+  
   async function loadCosts(versionId: string) {
     try {
-      const r = await fetch(`/api/red/quotation-versions/${versionId}/costs?package=A`, { cache: "no-store" });
+      const r = await fetch(`/api/red/quotation-versions/${versionId}/costs?package=A`);
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "Failed to load costs");
 
       const ci = j?.data?.cost_inputs || null;
       if (ci) {
-        setUnitPrice(ci.unit_price_per_piece == null ? "" : String(ci.unit_price_per_piece));
+        setUnitPrice(ci.unit_price_per_piece ?? "");
         setUnitCurrency(ci.unit_price_currency || "USD");
       }
-
       const map: Record<number, string> = {};
       for (const row of (j?.data?.packaging_costs || [])) {
-        map[Number(row.moq_packages)] =
-          row.packaging_cost_per_pkg == null ? "" : String(row.packaging_cost_per_pkg);
+        map[Number(row.moq_packages)] = row.packaging_cost_per_pkg == null ? "" : String(row.packaging_cost_per_pkg);
       }
       setPackagingCostsByMoq(map);
 
@@ -124,17 +135,14 @@ export default function RedQuotationDetailPage() {
         unit_price_per_piece: unitPrice === "" ? null : Number(unitPrice),
         unit_price_currency: unitCurrency,
       },
-      fob_prices: MOQ_LIST.map((moq) => ({
+      fob_prices: [1000, 3000, 5000].map((moq) => ({
         moq_packages: moq,
-        fob_per_pkg: fobByMoq?.[moq] === "" || fobByMoq?.[moq] == null ? null : Number(fobByMoq?.[moq]),
+        fob_per_pkg: fobByMoq?.[moq] === "" ? null : Number(fobByMoq?.[moq]),
         currency: fobCurrency,
       })),
-      packaging_costs: MOQ_LIST.map((moq) => ({
+      packaging_costs: [1000, 3000, 5000].map((moq) => ({
         moq_packages: moq,
-        packaging_cost_per_pkg:
-          packagingCostsByMoq?.[moq] === "" || packagingCostsByMoq?.[moq] == null
-            ? null
-            : Number(packagingCostsByMoq?.[moq]),
+        packaging_cost_per_pkg: packagingCostsByMoq?.[moq] === "" ? null : Number(packagingCostsByMoq?.[moq]),
       })),
     };
 
@@ -145,41 +153,44 @@ export default function RedQuotationDetailPage() {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j?.error || "Failed to save costs");
-    return j;
   }
 
-  // 최신 버전 비용 자동 로드(원하면 유지, 싫으면 이 useEffect 삭제)
-  useEffect(() => {
-    if (!latestVersionId) return;
-    loadCosts(latestVersionId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latestVersionId]);
-
-  return (
+return (
     <div className="p-6 space-y-4">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div className="space-y-1">
           <div className="text-xs text-muted-foreground">RED Quotation</div>
           <h1 className="text-2xl font-semibold">{title}</h1>
           <div className="text-sm text-muted-foreground">
-            Buyer: <span className="text-foreground">{q?.buyer_name || "-"}</span> · Style:{" "}
-            <span className="text-foreground">{q?.style_no || "-"}</span> · Ship From:{" "}
-            <span className="text-foreground">{q?.ship_from_code || "-"}</span>
+            <span>Buyer: <span className="text-foreground">{q?.buyer_name || "-"}</span></span>
+            <span className="mx-2">·</span>
+            <span className="inline-flex items-center gap-2">
+              <span>Style:</span>
+              <input
+                className="h-8 w-[180px] rounded border bg-background px-2 text-foreground"
+                value={styleNo}
+                onChange={(e) => setStyleNo(e.target.value)}
+                placeholder="Style No"
+              />
+              <button
+                className="h-8 rounded border px-2 text-xs hover:bg-muted disabled:opacity-50"
+                onClick={saveStyleNo}
+                disabled={savingStyle}
+                title="Save Style No"
+              >
+                {savingStyle ? "Saving..." : "Save"}
+              </button>
+            </span>
+            <span className="mx-2">·</span>
+            <span>Ship From: <span className="text-foreground">{q?.ship_from_code || "-"}</span></span>
           </div>
         </div>
 
         <div className="flex gap-2">
-          <button
-            className="border rounded px-3 py-1.5 text-sm hover:bg-muted"
-            onClick={() => router.push("/red/quotations")}
-          >
+          <button className="border rounded px-3 py-1.5 text-sm hover:bg-muted" onClick={() => router.push("/red/quotations")}>
             Back
           </button>
-          <button
-            className="border rounded px-3 py-1.5 text-sm hover:bg-muted"
-            onClick={load}
-            disabled={loading}
-          >
+          <button className="border rounded px-3 py-1.5 text-sm hover:bg-muted" onClick={load} disabled={loading}>
             Refresh
           </button>
         </div>
@@ -211,27 +222,9 @@ export default function RedQuotationDetailPage() {
           )}
         </div>
       </div>
-
-      {/* (옵션) costs 저장을 여기서 바로 테스트하고 싶으면 아래 같은 버튼을 붙여도 됨
-      <div className="flex gap-2">
-        <button
-          className="border rounded px-3 py-2 text-sm"
-          onClick={async () => {
-            if (!latestVersionId) return;
-            await saveCosts(latestVersionId);
-            await loadCosts(latestVersionId);
-            alert("Saved");
-          }}
-        >
-          Save Costs (Latest)
-        </button>
-      </div>
-      */}
     </div>
   );
 }
-
-// (현재 파일에서 실제로 쓰진 않지만, 필요하면 사용)
 async function resizeImageFile(file: File, maxDim = 800, quality = 0.82): Promise<File> {
   const img = document.createElement("img");
   const url = URL.createObjectURL(file);
@@ -261,3 +254,4 @@ async function resizeImageFile(file: File, maxDim = 800, quality = 0.82): Promis
   URL.revokeObjectURL(url);
   return new File([blob], "thumbnail.jpg", { type: "image/jpeg" });
 }
+

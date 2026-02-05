@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const dynamic = "force-dynamic";
+
 /**
  * Bank Accounts lookup (A안: site prefix 매칭) - UI shape compatible
  *

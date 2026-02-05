@@ -62,6 +62,13 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "dev.costings.view",
       },
       {
+        label: "RED Quotations",
+        href: "/red/quotations",
+        // RED 전용 견적(기존 Costing/Quotation 플로우와 독립)
+        // 우선 기존 Quotations와 동일 권한으로 노출
+        perm: "dev.costings.view",
+      },
+      {
         label: "BOM Library",
         href: "/dev/bom-library",
         perm: "dev.bom.view",
