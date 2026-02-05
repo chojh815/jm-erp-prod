@@ -428,6 +428,22 @@ function fmtMoney2(v: any) {
   return ok.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+
+function fmtTotalsByCurrency(totals: Record<string, number> | null | undefined) {
+  if (!totals) return "";
+  const entries = Object.entries(totals).filter(([cur, v]) => (cur ?? "").trim() !== "" || Number.isFinite(Number(v)));
+  if (entries.length === 0) return "";
+  // normalize: empty currency => 'N/A'
+  const norm = entries.map(([cur, v]) => [ (cur ?? "").trim() || "N/A", Number(v ?? 0) ] as const);
+  if (norm.length === 1) {
+    const [c, v] = norm[0];
+    return `${c} ${fmtMoney2(v)}`;
+  }
+  // multi-currency: show as "USD 1,000.00 | CNY 2,000.00"
+  return norm.map(([c, v]) => `${c} ${fmtMoney2(v)}`).join(" | ");
+}
+
+
 export default function PurchaseOrderListPage() {
   const router = useRouter();
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
@@ -457,6 +473,11 @@ export default function PurchaseOrderListPage() {
   const [page, setPage] = useState(1);
   const pageSize = 10;
   const [total, setTotal] = useState(0);
+
+  // totals (API-provided, filter-wide)
+  const [grandTotal, setGrandTotal] = useState<number | null>(null);
+  const [grandTotalsByCurrency, setGrandTotalsByCurrency] = useState<Record<string, number> | null>(null);
+  const [pageTotalsByCurrency, setPageTotalsByCurrency] = useState<Record<string, number> | null>(null);
 
   // selected PO + lines
   const [selectedPo, setSelectedPo] = useState<PoHeaderItem | null>(null);
@@ -521,6 +542,14 @@ export default function PurchaseOrderListPage() {
       setItems(normalized);
       setTotal(json?.total ?? 0);
       setPage(json?.page ?? p);
+
+      // totals from API (filter-wide)
+      const gt = json?.grandTotal;
+      const gtc = json?.grandTotalsByCurrency;
+      const ptc = json?.pageTotalsByCurrency;
+      setGrandTotal(typeof gt === "number" ? gt : gt !== null && gt !== undefined ? Number(gt) : null);
+      setGrandTotalsByCurrency(gtc && typeof gtc === "object" ? gtc : null);
+      setPageTotalsByCurrency(ptc && typeof ptc === "object" ? ptc : null);
 
       setSelectedPo(null);
       setLines([]);
@@ -608,9 +637,44 @@ export default function PurchaseOrderListPage() {
     return multiSortItems(items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
   }, [items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir]);
 
-    // ---------- export excel ----------
+    
+  // ---------- fetch ALL headers for export (ignores pagination) ----------
+  async function fetchAllHeadersForExport(): Promise<PoHeaderItem[]> {
+    const all: PoHeaderItem[] = [];
+    const EXPORT_PAGE_SIZE = 200; // API cap
+
+    let p = 1;
+    while (true) {
+      const params = new URLSearchParams();
+      params.set("page", String(p));
+      params.set("pageSize", String(EXPORT_PAGE_SIZE));
+      if (searchText.trim()) params.set("q", searchText.trim());
+      if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
+      if (dateFrom) params.set("dateFrom", dateFrom);
+      if (dateTo) params.set("dateTo", dateTo);
+
+      const res = await fetch(`/api/orders/list?${params.toString()}`);
+      const json = await safeJson<any>(res);
+      if (!res.ok) throw new Error(json?.error ?? "Failed to load data for export.");
+
+      const rawItems = json?.items ?? [];
+      const batch = rawItems.map(normalizeHeader) as PoHeaderItem[];
+      all.push(...batch);
+
+      // stop condition
+      if (!batch.length || batch.length < EXPORT_PAGE_SIZE) break;
+
+      p += 1;
+      // hard safety to prevent infinite loops in case of buggy API
+      if (p > 500) break;
+    }
+
+    return all;
+  }
+
+// ---------- export excel ----------
   const handleExportExcel = async () => {
-    if (sortedItems.length === 0) return alert("No data to export.");
+    if (total === 0) return alert("No data to export.");
 
     // 각 PO별 라인 전체를 다시 받아서 "라인 단위"로 export
     async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
@@ -652,7 +716,10 @@ export default function PurchaseOrderListPage() {
     try {
       let grandSum = 0;
 
-      for (const it of sortedItems) {
+      const allHeaders = await fetchAllHeadersForExport();
+      const allSorted = multiSortItems(allHeaders, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
+
+      for (const it of allSorted) {
         const lines = await fetchLinesForHeaderId(it.id);
 
         // PO별 합계(라인 기반)
@@ -765,7 +832,7 @@ export default function PurchaseOrderListPage() {
       }
 
       // ✅ Grand Total row (맨 마지막 1줄)
-      const curSet = new Set(sortedItems.map((x) => (x.currency ?? "").trim()).filter(Boolean));
+      const curSet = new Set(allSorted.map((x) => (x.currency ?? "").trim()).filter(Boolean));
       const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
       rows.push([
         "",
@@ -813,7 +880,7 @@ export default function PurchaseOrderListPage() {
 
   // ---------- export pdf (jsPDF + autoTable + print) ----------
   const handleExportPdf = async () => {
-    if (sortedItems.length === 0) return alert("No data to export.");
+    if (total === 0) return alert("No data to export.");
 
     // 각 PO별 라인 전체를 다시 받아서 "라인 단위"로 export
     async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
@@ -849,7 +916,10 @@ export default function PurchaseOrderListPage() {
     try {
       let grandSum = 0;
 
-      for (const it of sortedItems) {
+      const allHeaders = await fetchAllHeadersForExport();
+      const allSorted = multiSortItems(allHeaders, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
+
+      for (const it of allSorted) {
         const lines = await fetchLinesForHeaderId(it.id);
 
         let poSum = 0;
@@ -960,7 +1030,7 @@ export default function PurchaseOrderListPage() {
       }
 
       // Grand Total row (marker)
-      const curSet = new Set(sortedItems.map((x) => (x.currency ?? "").trim()).filter(Boolean));
+      const curSet = new Set(allSorted.map((x) => (x.currency ?? "").trim()).filter(Boolean));
       const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
       body.push([
         "__GRAND_TOTAL__",
@@ -1383,9 +1453,10 @@ export default function PurchaseOrderListPage() {
                   Total: <span className="font-semibold">{total}</span> POs
                 </div>
                 <div className="text-sm text-slate-600">
-                  Grand Total:{" "}
+                  Page Subtotal:{" "}
                   <span className="font-semibold">
                     {(() => {
+                      // current page subtotal (changes by page)
                       const nums = sortedItems
                         .map((x) => (typeof x.subtotal === "number" ? x.subtotal : 0))
                         .filter((n) => Number.isFinite(n));
@@ -1396,8 +1467,13 @@ export default function PurchaseOrderListPage() {
                     })()}
                   </span>
                 </div>
-
-                <div className="flex gap-2">
+                <div className="text-sm text-slate-600">
+                  Grand Total (All Pages):{" "}
+                  <span className="font-semibold">
+                    {fmtTotalsByCurrency(grandTotalsByCurrency) || "-"}
+                  </span>
+                </div>
+<div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={handleExportExcel}>
                     Export Excel
                   </Button>

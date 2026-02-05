@@ -543,7 +543,133 @@ export async function GET(req: Request) {
       };
     });
 
-    return ok({ items, page, pageSize, total: count });
+    
+    // ---- Totals ----
+    // Page subtotal: sum of current page items (changes by page)
+    const pageTotalsByCurrency: Record<string, number> = {};
+    for (const it of items) {
+      const cur = asText(it.currency).trim() || "";
+      const v = n((it as any).subtotal, 0);
+      pageTotalsByCurrency[cur] = n(pageTotalsByCurrency[cur], 0) + v;
+    }
+    const pageSubtotal = Object.values(pageTotalsByCurrency).reduce((a, b) => a + n(b, 0), 0);
+
+    // Grand total: sum of ALL matching rows (does NOT change by page)
+    async function computeGrandTotals(): Promise<{
+      grandTotal: number;
+      grandTotalsByCurrency: Record<string, number>;
+    }> {
+      const grandTotalsByCurrency: Record<string, number> = {};
+      if (!count || count <= 0) return { grandTotal: 0, grandTotalsByCurrency };
+
+      const CHUNK = 1000;
+
+      // Build the same filtered query (but selecting only what we need)
+      let qAll = supabaseAdmin
+        .from("po_headers")
+        .select(["id", "currency", "subtotal"].join(","))
+        .eq("is_deleted", false)
+        .neq("status", "DELETED");
+
+      if (statusRaw && !["ALL", "ALL STATUS", "ALLSTATUSES"].includes(statusRaw.toUpperCase())) {
+        qAll = qAll.eq("status", statusRaw);
+      }
+      if (dateFrom) qAll = qAll.gte("order_date", dateFrom);
+      if (dateTo) qAll = qAll.lte("order_date", dateTo);
+
+      if (qRaw) {
+        const kw = qRaw.replace(/%/g, "\\%").replace(/,/g, "");
+        const like = `%${kw}%`;
+        qAll = qAll.or(
+          [
+            `po_no.ilike.${like}`,
+            `buyer_name.ilike.${like}`,
+            `destination.ilike.${like}`,
+            `buyer_brand_name.ilike.${like}`,
+          ].join(",")
+        );
+      }
+
+      // Iterate all matching headers in chunks (stable order)
+      for (let offset = 0; offset < count; offset += CHUNK) {
+        const fromAll = offset;
+        const toAll = Math.min(count - 1, offset + CHUNK - 1);
+
+        const hdrChunkRes = await qAll.order("id", { ascending: true }).range(fromAll, toAll);
+        if (hdrChunkRes.error) {
+          // fail-safe: return what we have so far (but still allow list to work)
+          return {
+            grandTotal: Object.values(grandTotalsByCurrency).reduce((a, b) => a + n(b, 0), 0),
+            grandTotalsByCurrency,
+          };
+        }
+
+        const hdrs = ((hdrChunkRes.data ?? []) as unknown as { id: string; currency: string | null; subtotal: number | null }[]) || [];
+        const ids = uniq(hdrs.map((h) => h.id).filter(Boolean));
+
+        const headerSubtotalById: Record<string, number> = {};
+        const currencyById: Record<string, string> = {};
+        for (const h of hdrs) {
+          headerSubtotalById[h.id] = n(h.subtotal, 0);
+          currencyById[h.id] = asText(h.currency).trim() || "";
+        }
+
+        // Line totals for these headers (amount 우선, 없으면 qty*unit_price)
+        const lineSumByHeader: Record<string, number> = {};
+        const lineCountByHeader: Record<string, number> = {};
+
+        if (ids.length > 0) {
+          const linesRes = await supabaseAdmin
+            .from("po_lines")
+            .select(["po_header_id", "qty", "unit_price", "amount", "is_deleted"].join(","))
+            .in("po_header_id", ids)
+            .eq("is_deleted", false);
+
+          if (!linesRes.error) {
+            const lines = (linesRes.data as any[]) ?? [];
+            for (const r of lines) {
+              const hid = r.po_header_id;
+              if (!hid) continue;
+              lineCountByHeader[hid] = n(lineCountByHeader[hid], 0) + 1;
+              const lineAmount =
+                r.amount !== null && r.amount !== undefined
+                  ? n(r.amount, 0)
+                  : n(r.qty, 0) * n(r.unit_price, 0);
+              lineSumByHeader[hid] = n(lineSumByHeader[hid], 0) + lineAmount;
+            }
+          }
+        }
+
+        // Apply the same subtotal rule as list items:
+        // - if header has >=1 line: use line sum
+        // - else: fallback to header.subtotal
+        for (const hid of ids) {
+          const hasLines = n(lineCountByHeader[hid], 0) > 0;
+          const computed = hasLines ? n(lineSumByHeader[hid], 0) : n(headerSubtotalById[hid], 0);
+          const cur = asText(currencyById[hid]).trim() || "";
+          grandTotalsByCurrency[cur] = n(grandTotalsByCurrency[cur], 0) + computed;
+        }
+      }
+
+      return {
+        grandTotal: Object.values(grandTotalsByCurrency).reduce((a, b) => a + n(b, 0), 0),
+        grandTotalsByCurrency,
+      };
+    }
+
+    const grand = await computeGrandTotals();
+
+    return ok({
+      items,
+      page,
+      pageSize,
+      total: count,
+      pageSubtotal,
+      pageTotalsByCurrency,
+      grandTotal: grand.grandTotal,
+      grandTotalsByCurrency: grand.grandTotalsByCurrency,
+    });
+
   } catch (err: any) {
     return bad(err?.message || "Unknown error", 500);
   }
