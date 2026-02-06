@@ -89,7 +89,7 @@ export async function GET(_: Request, { params }: { params: { id: string } }) {
 
     if (lr?.error) return bad(lr.error.message || "Failed to load lines", 500);
 
-    const rawLines: any[] = (lr?.data ?? []).filter((l) => !l?.is_deleted);
+    const rawLines: any[] = (lr?.data ?? []).filter((l: any) => !l?.is_deleted);
 
     // 3) po_lines join (qty, buyer_style_no, description, etc)
     const poLineIds = Array.from(
