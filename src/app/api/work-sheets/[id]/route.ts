@@ -97,6 +97,126 @@ async function firstWorking<T>(
   return { data: null, error: lastErr };
 }
 
+// ---- WS Line enrichment from PO lines + images (response-time only) ----
+async function enrichLinesFromPo(wsLines: any[]) {
+  try {
+    const poLineIds = (wsLines ?? [])
+      .map((l: any) => l?.po_line_id)
+      .filter((v: any) => isUuid(v));
+
+    if (poLineIds.length === 0) return;
+
+    // 1) PO lines (safe: select("*") to avoid schema-cache issues)
+    const { data: poLines, error: poErr } = await supabaseAdmin
+      .from("po_lines")
+      .select("*")
+      .in("id", poLineIds);
+
+    const poMap: Record<string, any> = {};
+    if (!poErr && Array.isArray(poLines)) {
+      for (const r of poLines) {
+        const id = (r as any)?.id;
+        if (isUuid(id)) poMap[id] = r;
+      }
+    }
+
+    // 2) Images (support both po_line_images and po_images)
+    const imgRowsResult = await firstWorking<any[]>([
+      async () =>
+        supabaseAdmin
+          .from("po_line_images")
+          .select("*")
+          .in("po_line_id", poLineIds)
+          .or("is_deleted.is.null,is_deleted.eq.false")
+          .order("created_at", { ascending: true }),
+      async () =>
+        supabaseAdmin
+          .from("po_images")
+          .select("*")
+          .in("po_line_id", poLineIds)
+          .or("is_deleted.is.null,is_deleted.eq.false")
+          .order("created_at", { ascending: true }),
+    ]);
+
+    const imgMap: Record<string, string[]> = {};
+    const imgRows = Array.isArray(imgRowsResult.data) ? imgRowsResult.data : [];
+    for (const r of imgRows) {
+      const plid = (r as any)?.po_line_id;
+      if (!isUuid(plid)) continue;
+
+      const url =
+        (r as any)?.image_url ??
+        (r as any)?.url ??
+        (r as any)?.public_url ??
+        (r as any)?.path ??
+        null;
+
+      if (!url) continue;
+      if (!imgMap[plid]) imgMap[plid] = [];
+      imgMap[plid].push(String(url));
+    }
+
+    // 3) Apply enrichment (do not overwrite if WS line already has values)
+    for (const l of wsLines ?? []) {
+      const poLineId = (l as any)?.po_line_id;
+      if (!isUuid(poLineId)) continue;
+
+      const pl = poMap[poLineId] ?? null;
+      const imgs = imgMap[poLineId] ?? [];
+
+      // qty
+      const currentQty = (l as any)?.qty;
+      if (currentQty === null || currentQty === undefined || currentQty === 0) {
+        const q =
+          (pl as any)?.order_qty ??
+          (pl as any)?.qty ??
+          (pl as any)?.quantity ??
+          (pl as any)?.order_quantity ??
+          null;
+        if (q !== null && q !== undefined && q !== "") (l as any).qty = Number(q) || 0;
+      }
+
+      // buyer_style / description
+      if (isBlank((l as any)?.buyer_style)) {
+        (l as any).buyer_style =
+          (pl as any)?.buyer_style_no ??
+          (pl as any)?.buyer_style ??
+          (pl as any)?.buyer_sku ??
+          (pl as any)?.sku ??
+          null;
+      }
+      if (isBlank((l as any)?.description)) {
+        (l as any).description =
+          (pl as any)?.description ??
+          (pl as any)?.item_description ??
+          (pl as any)?.product_name ??
+          null;
+      }
+
+      // jm_style_no (fallback)
+      if (isBlank((l as any)?.jm_style_no)) {
+        (l as any).jm_style_no =
+          (pl as any)?.jm_style_no ??
+          (pl as any)?.style_no ??
+          (pl as any)?.jm_no ??
+          (l as any)?.style_no ??
+          "";
+      }
+
+      // images
+      if (!((l as any)?.image_url_primary) && imgs.length > 0) {
+        (l as any).image_url_primary = imgs[0] ?? null;
+      }
+      if (!((l as any)?.image_urls) && imgs.length > 0) {
+        (l as any).image_urls = imgs;
+      }
+    }
+  } catch {
+    // ignore enrichment failures; main WS still must render
+  }
+}
+
+
 /**
  * Product Development (dev) table names are inconsistent across environments.
  * We support both:
@@ -306,6 +426,12 @@ async function loadAll(workSheetId: string) {
 
   if (lErr) throw new Error(lErr.message);
   const safeLines = Array.isArray(lines) ? lines : [];
+
+  // ✅ Enrich WS lines with PO line info (qty, buyer_style, description) and images.
+  // Production Status open-or-create may create minimal WS lines, so we backfill display fields on GET.
+  // This does NOT write to DB; it's response-time enrichment only.
+  await enrichLinesFromPo(safeLines);
+
   const lineIds = safeLines.map((l: any) => l.id).filter(isUuid);
 
   // ✅ Work/QC/Packing notes are stored in work_sheet_lines.

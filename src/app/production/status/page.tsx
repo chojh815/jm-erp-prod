@@ -138,28 +138,44 @@ function PoLink({ r }: { r: Row }) {
 }
 
 function WorkSheetLink({ r }: { r: Row }) {
-  // work_sheet_id가 있으면 바로 이동
-  const wsId = (r as any).work_sheet_id ?? null;
-  if (wsId) {
-    return (
-      <Button asChild size="sm" variant="outline">
-        <Link href={`/work-sheets/${wsId}`} target="_blank" rel="noopener noreferrer">WS</Link>
-      </Button>
-    );
+  const [loading, setLoading] = React.useState(false);
+
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const isUuid = (v: any) => typeof v === "string" && UUID_RE.test(v);
+
+  async function openOrCreate() {
+    if (loading) return;
+    const poLineId = (r as any).po_line_id ?? null;
+    if (!poLineId || !isUuid(String(poLineId))) {
+      alert("WS를 열 수 없습니다: po_line_id가 없거나 UUID가 아닙니다.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch("/api/work-sheets/open-or-create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ po_line_id: String(poLineId) }),
+      });
+      const j = await res.json().catch(() => ({} as any));
+      if (!res.ok || !j?.success || !isUuid(j?.work_sheet_id)) {
+        alert(j?.error || `WS open 실패 (HTTP ${res.status})`);
+        return;
+      }
+      // Same-tab navigation (no about:blank, no popup)
+      window.location.href = `/work-sheets/${j.work_sheet_id}`;
+    } catch (e: any) {
+      alert(e?.message || "WS open error");
+    } finally {
+      setLoading(false);
+    }
   }
-  // 없으면 생성/연결 흐름으로 (po_line_id 기반)
-  if (r.po_line_id) {
-    return (
-      <Button asChild size="sm" variant="outline">
-        <Link href={`/work-sheets/new?po_line_id=${encodeURIComponent(r.po_line_id)}`} target="_blank" rel="noopener noreferrer">
-          WS
-        </Link>
-      </Button>
-    );
-  }
+
   return (
-    <Button size="sm" variant="outline" disabled>
-      WS
+    <Button size="sm" variant="outline" onClick={openOrCreate} disabled={loading}>
+      {loading ? "..." : "WS"}
     </Button>
   );
 }

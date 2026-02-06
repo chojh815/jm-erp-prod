@@ -52,19 +52,19 @@ export default function HomePage() {
     {
       title: "Development",
       description: "Manage sample requests, costings and BOMs.",
-      href: "/dev/sample-requests",
+      href: "/costings",
     },
     {
       title: "Trade",
       description:
         "Manage buyer POs, shipments, invoices and receipts.",
-      href: "/trade/orders",
+      href: "/po/list",
     },
     {
       title: "Production",
       description:
         "Manage work orders, purchase orders and production status.",
-      href: "/production/work-orders",
+      href: "/production/status",
     },
     {
       title: "Dashboards",
