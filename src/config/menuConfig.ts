@@ -141,6 +141,12 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "dashboard.orders",
       },
       {
+        // Orders/Shipments performance (buyer/brand dimension)
+        label: "Performance",
+        href: "/dashboards/performance",
+        perm: "dashboard.performance",
+      },
+      {
         label: "Sample Dashboard",
         href: "/dashboards/samples",
         perm: "dashboard.samples",
