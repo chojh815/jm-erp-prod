@@ -138,6 +138,19 @@ function fmtDate(d?: string | null) {
   if (!d) return "";
   return String(d).slice(0, 10);
 }
+function addDaysYmd(ymd?: string | null, deltaDays: number = 0) {
+  if (!ymd) return "";
+  const s = String(ymd).slice(0, 10);
+  const m = /^\d{4}-\d{2}-\d{2}$/.exec(s);
+  if (!m) return "";
+  const [y, mo, d] = s.split("-").map((x) => Number(x));
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
 function stableStringify(obj: any): string {
   const seen = new WeakSet();
   const replacer = (_k: string, v: any) => {
@@ -635,6 +648,7 @@ export default function WorkSheetDetailPage() {
   }
 
   const reqShipDate = fmtDate(po?.requested_ship_date ?? null);
+  const deliveryDueDate = addDaysYmd(po?.requested_ship_date ?? null, -7);
   const brand = toStr(po?.buyer_brand_name ?? "").trim();
   const dept = toStr(po?.buyer_dept_name ?? "").trim();
   const brandDept = [brand, dept].filter(Boolean).join(" / ");

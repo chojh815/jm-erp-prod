@@ -41,6 +41,8 @@ type PdfData = {
 
   /** Requested ship date from po_headers */
   requestedShipDate?: string | null;
+  /** Vendor delivery due date (= requestedShipDate - 7 days) */
+  deliveryDueDate?: string | null;
 
   jmNo?: string | null;
   buyerStyle?: string | null;
@@ -91,11 +93,39 @@ const toStr = (v: any) => {
 
 const safe = (v: any, fb = "-") => toStr(v).trim() || fb;
 
+const textSafe = (doc: any, txt: any, x: any, y: any, opts?: any) => {
+  const nx = Number.isFinite(Number(x)) ? Number(x) : 0;
+  const ny = Number.isFinite(Number(y)) ? Number(y) : 0;
+
+  if (Array.isArray(txt)) {
+    const arr = txt.map((t) => safe(t, "")).filter((s) => s !== "");
+    doc.text(arr.length ? arr : [""], nx, ny, opts as any);
+    return;
+  }
+
+  const s = safe(txt, "");
+  doc.text(s, nx, ny, opts as any);
+};
+
 const fmtDate = (v?: string | null) => {
   const s = toStr(v).trim();
   if (!s) return "-";
   return s.length >= 10 ? s.slice(0, 10) : s;
 };
+
+function addDaysYmd(ymd: string | null, deltaDays: number) {
+  if (!ymd) return null;
+  const s = String(ymd).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const [y, mo, d] = s.split("-").map((x) => Number(x));
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
 
 const fmtQty = (v: any) => {
   const n = Number(v);
@@ -170,6 +200,7 @@ type Labels = {
   BRAND: string;
   SHIP: string;
   REQ_SHIP: string;
+  DELIVERY: string;
   PRODUCT: string;
   JM: string;
   STYLE: string;
@@ -405,6 +436,7 @@ function mapApiToPdfData(json: any): PdfData {
     brandDept,
     shipMode,
     requestedShipDate,
+    deliveryDueDate: addDaysYmd(requestedShipDate, -7),
 
     jmNo,
     buyerStyle,
@@ -513,7 +545,7 @@ function drawMiniCard(
 
   doc.setFontSize(10.6);
   doc.setTextColor(0);
-  doc.text(title, x + padX, y + topBarH + 5.6);
+  textSafe(doc, title, x + padX, y + topBarH + 5.6);
 
   doc.setFontSize(9.6);
 
@@ -537,8 +569,10 @@ function drawMiniCard(
 
     const isPoRow = String(lab || "").trim().toLowerCase() === "po:";
 
+    const labText = safe(lab);
+
     doc.setTextColor(...COLORS.label);
-    doc.text(lab, x + padX, cy);
+    textSafe(doc, labText, x + padX, cy);
 
     doc.setTextColor(0);
 
@@ -561,7 +595,7 @@ function drawMiniCard(
       lines[allowLines - 1] = ellipsize(lines[allowLines - 1], maxW);
     }
 
-    doc.text(lines, valueX, cy);
+    textSafe(doc, lines, valueX, cy);
 
     cy += lineH * Math.max(1, lines.length);
     if (cy > maxBodyY) break;
@@ -594,6 +628,7 @@ function t(lang: Lang, mode: Mode) {
       BRAND: "Brand:",
       SHIP: "Ship:",
       REQ_SHIP: "Req Ship:",
+      DELIVERY: "Delivery:",
       PRODUCT: "Product",
       JM: "JM:",
       STYLE: "Style:",
@@ -628,6 +663,7 @@ function t(lang: Lang, mode: Mode) {
       BRAND: "品牌:",
       SHIP: "运输:",
       REQ_SHIP: "要求出货:",
+      DELIVERY: "交货日期:",
       PRODUCT: "产品",
       JM: "JM:",
       STYLE: "款号:",
@@ -660,6 +696,7 @@ function t(lang: Lang, mode: Mode) {
       BRAND: "Thương hiệu:",
       SHIP: "Vận chuyển:",
       REQ_SHIP: "Ngày ship yêu cầu:",
+      DELIVERY: "Ngày giao:",
       PRODUCT: "Sản phẩm",
       JM: "JM:",
       STYLE: "Style:",
@@ -769,7 +806,7 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
     ["PO:", safe(d.poNo)],
     [L.BRAND, safe(d.brandDept)],
     [L.SHIP, safe(d.shipMode)],
-    [L.REQ_SHIP, fmtDate(d.requestedShipDate)],
+    [mode === "vendor" ? L.DELIVERY : L.REQ_SHIP, fmtDate(mode === "vendor" ? d.deliveryDueDate : d.requestedShipDate)],
   ]);
 
   drawMiniCard(doc, x2, cardY, cardW, cardH, L.PRODUCT, [
@@ -1043,7 +1080,7 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
     const maxLines = 6;
     if (lines.length > maxLines) lines = lines.slice(0, maxLines);
 
-    doc.text(lines, textX, textY);
+    textSafe(doc, lines, textX, textY);
     doc.setTextColor(0);
 
   }

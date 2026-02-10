@@ -46,6 +46,46 @@ function bad(message: string, status = 400) {
   );
 }
 
+function sanitizeVendorView(payload: any) {
+  // Defensive: strip any internal/pricing fields from header/lines/materials when view=vendor.
+  const stripKeys = (obj: any) => {
+    if (!obj || typeof obj !== "object") return;
+    for (const k of Object.keys(obj)) {
+      const lk = k.toLowerCase();
+      if (
+        lk.includes("price") ||
+        lk.includes("cost") ||
+        lk.includes("amount") ||
+        lk.includes("margin") ||
+        lk.includes("fx") ||
+        lk.includes("rate") ||
+        lk.includes("etd") ||
+        (lk.includes("ship") && lk.includes("date")) ||
+        lk === "internal_notes" ||
+        lk === "notes" ||
+        lk === "created_by_email"
+      ) {
+        delete obj[k];
+      }
+    }
+  };
+
+  if (payload?.header) stripKeys(payload.header);
+  if (Array.isArray(payload?.lines)) payload.lines.forEach(stripKeys);
+  if (payload?.materialsByLineId && typeof payload.materialsByLineId === "object") {
+    for (const lineId of Object.keys(payload.materialsByLineId)) {
+      const arr = payload.materialsByLineId[lineId];
+      if (Array.isArray(arr)) arr.forEach(stripKeys);
+    }
+  }
+  // keep special instructions visible to vendor if present
+  if (payload?.header?.special_instructions == null && payload?.header?.general_notes) {
+    payload.header.special_instructions = payload.header.general_notes;
+  }
+  return payload;
+}
+
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function isUuid(v: any) {
@@ -639,7 +679,7 @@ function withNoteAliases(data: any) {
 }
 
 
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+export async function GET(req: Request, { params }: { params: { id: string } }) {
   try {
     const id = params?.id;
     if (!isUuid(id)) return bad("Invalid id", 400);

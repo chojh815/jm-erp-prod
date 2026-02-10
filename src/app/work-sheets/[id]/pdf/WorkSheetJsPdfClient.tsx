@@ -22,6 +22,20 @@ function fmtDate(d: any) {
   return s.length >= 10 ? s.slice(0, 10) : s;
 }
 
+function addDaysYmd(ymd: any, deltaDays: number) {
+  if (!ymd) return "-";
+  const s = String(ymd).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "-";
+  const [y, mo, d] = s.split("-").map((x) => Number(x));
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+
 function fmtQty(n: any) {
   const v = Number(n ?? 0);
   if (Number.isNaN(v)) return "-";
@@ -136,7 +150,7 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
 
     doc.text("Currency:", rightX, row1Y);
     doc.text("Ship Mode:", rightX, row2Y);
-    doc.text("Req Ship Date:", rightX, row3Y);
+    doc.text(mode === "vendor" ? "Delivery Due:" : "Req Ship Date:", rightX, row3Y);
     doc.text("Date:", rightX, row4Y);
 
     doc.setFont("helvetica", "normal");
@@ -147,7 +161,7 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
 
     doc.text(currency, rightX + 24, row1Y);
     doc.text(shipMode, rightX + 24, row2Y);
-    doc.text(reqShipDate, rightX + 30, row3Y);
+    doc.text(mode === "vendor" ? addDaysYmd(header?.requested_ship_date || header?.req_ship_date, -7) : reqShipDate, rightX + 30, row3Y);
     doc.text(docDate, rightX + 16, row4Y);
 
     // sub boxes: sample dates + special instructions
