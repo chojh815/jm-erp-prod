@@ -88,6 +88,7 @@ type ApiData = {
   };
   buyers?: string[];
   kpis?: ApiKpi[];
+  kpiMap?: ApiKpi[]; // legacy alias
   monthly?: ApiMonthlyRow[];
   status?: ApiStatusRow[];
   buyer_breakdown?: ApiBuyerBreakdownRow[];
@@ -278,19 +279,18 @@ export default function OrdersDashboardClient() {
   const buyerSeries = buyerBreakdownRows;
 
   const kpis = useMemo(() => {
-    const arr = data?.kpis ?? [];
+    const arr = data?.kpis ?? data?.kpiMap ?? [];
     // ✅ 요청: KPI 정의는 그대로, 라벨만 정리 → Orders=전체
     return arr.map((k) => (k.key === "orders" ? { ...k, label: "Orders (Total)" } : k));
-  }, [data?.kpis]);
+  }, [data?.kpis, data?.kpiMap]);
 
-  const kpiMap = useMemo(() => {
-    const map: Record<string, ApiKpi> = {};
-    for (const k of kpis || []) {
-      if (k?.key) map[k.key] = k;
+  const kpiByKey = useMemo(() => {
+    const m: Record<string, ApiKpi> = {};
+    for (const k of kpis ?? []) {
+      if (k?.key) m[String(k.key)] = k;
     }
-    return map;
+    return m;
   }, [kpis]);
-
 
   // refs for PDF
   const refMonthly = useRef<HTMLDivElement>(null);
@@ -342,15 +342,15 @@ const handleExcel = () => {
   const wb = XLSX.utils.book_new();
 
   const wsKpi = XLSX.utils.json_to_sheet([
-    { Metric: "Orders (Total)", ValueUSD: kpiMap.orders?.value_usd ?? 0, Count: kpiMap.orders?.sub_value ?? "" },
-    { Metric: "In Production", ValueUSD: kpiMap.production?.value_usd ?? 0, Count: kpiMap.production?.sub_value ?? "" },
-    { Metric: "Ready", ValueUSD: kpiMap.ready?.value_usd ?? 0, Count: kpiMap.ready?.sub_value ?? "" },
-    { Metric: "Shipped", ValueUSD: kpiMap.shipped?.value_usd ?? 0, Count: kpiMap.shipped?.sub_value ?? "" },
+    { Metric: "Orders (Total)", ValueUSD: kpiByKey.orders?.value_usd ?? 0, Count: kpiByKey.orders?.sub_value ?? "" },
+    { Metric: "In Production", ValueUSD: kpiByKey.production?.value_usd ?? 0, Count: kpiByKey.production?.sub_value ?? "" },
+    { Metric: "Ready", ValueUSD: kpiByKey.ready?.value_usd ?? 0, Count: kpiByKey.ready?.sub_value ?? "" },
+    { Metric: "Shipped", ValueUSD: kpiByKey.shipped?.value_usd ?? 0, Count: kpiByKey.shipped?.sub_value ?? "" },
   ]);
   XLSX.utils.book_append_sheet(wb, wsKpi, "KPI");
 
   const wsMonthly = XLSX.utils.json_to_sheet(
-    (monthlySeries || []).map((r) => ({ Month: r.month, MonthlyUSD: r.amount, CumulativeUSD: r.cum }))
+    (monthlySeries || []).map((r) => ({ Month: r.month, MonthlyUSD: r.amount, CumulativeUSD: r.cumulative }))
   );
   XLSX.utils.book_append_sheet(wb, wsMonthly, "Monthly");
 
@@ -699,8 +699,7 @@ const handleExcel = () => {
     // Tables
     doc.setFont("helvetica", "bold");
     doc.setFontSize(11);
-    const totalStatusUsd = safeNum(kpiMap["orders"]?.value_usd);
-    doc.text(`Total (Status): ${fmtUSD(totalStatusUsd)}`, margin, y);
+    doc.text(`Total (Status): ${fmtUSD(Number(kpiByKey.orders?.value_usd || 0))}`, margin, y);
     y += 3;
 
     autoTable(doc, {

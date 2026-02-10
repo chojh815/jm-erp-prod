@@ -92,6 +92,8 @@ type OverviewResponse = {
   kpis: Kpi[];
   trend: TrendPoint[];
   status_dist: StatusDistItem[];
+  status_distribution?: StatusDistItem[];
+  statusDist?: StatusDistItem[];
   lists: {
     at_risk: AtRiskRow[];
     next_ship: NextShipRow[];
@@ -269,16 +271,16 @@ export default function OverviewDashboardPage() {
   //  B) { points: [{ ym, orders_usd, ... }] }
   //  C) [{ preset, start, end, points: [...] }]  (wrapper array)
   let points: any[] = [];
-  if (Array.isArray(raw?.trend)) {
-    // wrapper array OR already TrendPoint[]
-    if (raw.trend.length > 0 && Array.isArray(raw.trend[0]?.points)) {
-      points = raw.trend[0].points;
+  const trendAny: any = (raw as any)?.trend;
+  if (Array.isArray(trendAny)) {
+    const t0: any = trendAny[0];
+    if (t0 && Array.isArray(t0.points)) {
+      points = t0.points;
     } else {
-      // assume already TrendPoint[]
-      points = raw.trend;
+      points = trendAny;
     }
-  } else if (Array.isArray(raw?.trend?.points)) {
-    points = raw.trend.points;
+  } else if (trendAny && Array.isArray(trendAny.points)) {
+    points = trendAny.points;
   }
 
   // Monthly cumulative wants the totals "as of end" (sum of points)
@@ -378,9 +380,14 @@ export default function OverviewDashboardPage() {
   );
 
   return (
-    <AppShell title="Overview" rightSlot={headerRight}>
+    <AppShell title="Overview">
       <div className="space-y-4">
-        {/* Filters */}
+        {/* ✅ Header Right Slot (moved from AppShell prop) */}
+<div className="flex items-center justify-end gap-2">
+  {headerRight}
+</div>
+
+{/* Filters */}
         <Card className="rounded-2xl">
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Filters</CardTitle>
