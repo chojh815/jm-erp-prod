@@ -283,6 +283,15 @@ export default function OrdersDashboardClient() {
     return arr.map((k) => (k.key === "orders" ? { ...k, label: "Orders (Total)" } : k));
   }, [data?.kpis]);
 
+  const kpiMap = useMemo(() => {
+    const map: Record<string, ApiKpi> = {};
+    for (const k of kpis || []) {
+      if (k?.key) map[k.key] = k;
+    }
+    return map;
+  }, [kpis]);
+
+
   // refs for PDF
   const refMonthly = useRef<HTMLDivElement>(null);
   const refPie = useRef<HTMLDivElement>(null);
@@ -333,10 +342,10 @@ const handleExcel = () => {
   const wb = XLSX.utils.book_new();
 
   const wsKpi = XLSX.utils.json_to_sheet([
-    { Metric: "Orders (Total)", ValueUSD: kpis?.orders?.value_usd ?? 0, Count: kpis?.orders?.sub_value ?? "" },
-    { Metric: "In Production", ValueUSD: kpis?.production?.value_usd ?? 0, Count: kpis?.production?.sub_value ?? "" },
-    { Metric: "Ready", ValueUSD: kpis?.ready?.value_usd ?? 0, Count: kpis?.ready?.sub_value ?? "" },
-    { Metric: "Shipped", ValueUSD: kpis?.shipped?.value_usd ?? 0, Count: kpis?.shipped?.sub_value ?? "" },
+    { Metric: "Orders (Total)", ValueUSD: kpiMap.orders?.value_usd ?? 0, Count: kpiMap.orders?.sub_value ?? "" },
+    { Metric: "In Production", ValueUSD: kpiMap.production?.value_usd ?? 0, Count: kpiMap.production?.sub_value ?? "" },
+    { Metric: "Ready", ValueUSD: kpiMap.ready?.value_usd ?? 0, Count: kpiMap.ready?.sub_value ?? "" },
+    { Metric: "Shipped", ValueUSD: kpiMap.shipped?.value_usd ?? 0, Count: kpiMap.shipped?.sub_value ?? "" },
   ]);
   XLSX.utils.book_append_sheet(wb, wsKpi, "KPI");
 
@@ -690,7 +699,8 @@ const handleExcel = () => {
     // Tables
     doc.setFont("helvetica", "bold");
     doc.setFontSize(11);
-    doc.text(`Total (Status): ${fmtUSD(Number(kpis?.find((k: any) => k?.key === "orders")?.value_usd || 0))}`, margin, y);
+    const totalStatusUsd = safeNum(kpiMap["orders"]?.value_usd);
+    doc.text(`Total (Status): ${fmtUSD(totalStatusUsd)}`, margin, y);
     y += 3;
 
     autoTable(doc, {
