@@ -1,5 +1,5 @@
 import React from "react";
-import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
+import { Document, Page, Text, View, StyleSheet, Image } from "@react-pdf/renderer";
 
 /* =========================
    Types
@@ -16,7 +16,6 @@ export interface ProformaHeaderPDF {
 
   consignee_text?: string | null;
   notify_party_text?: string | null;
-
 
   remarks?: string | null;
   port_of_loading?: string | null;
@@ -238,28 +237,26 @@ const styles = StyleSheet.create({
   /* Signed by fixed (absolute) */
   signedBox: {
     position: "absolute",
-    right: 40,
+    right: 10,
     bottom: 40,
-    width: 200,
-    borderWidth: BORDER,
-    borderColor: "#000",
-    paddingVertical: 10,
-    paddingHorizontal: 10,
+    width: 220,
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    alignItems: "center",
   },
-  signedTitle: {
-    fontSize: 10,
-    fontWeight: 700 as any,
-    marginBottom: 8,
-  },
-  signedLine: {
-    height: 34,
-    borderBottomWidth: 1,
-    borderColor: "#000",
+  signedByTitle: {
+    fontSize: 11,
     marginBottom: 6,
   },
-  signedBy: {
-    fontSize: 10,
-    textAlign: "right",
+  stampImg: {
+    width: 150,
+    height: 75,
+    objectFit: "contain",
+    marginBottom: 4,
+  },
+  companyName: {
+    fontSize: 11,
+    marginTop: 6,
   },
 });
 
@@ -376,9 +373,13 @@ function TableHeader() {
 const ProformaInvoicePDF: React.FC<{
   header: ProformaHeaderPDF;
   lines: ProformaLinePDF[];
-}> = ({ header, lines }) => {
+  assetsBaseUrl?: string; // ✅ server render용: 절대 URL 베이스
+}> = ({ header, lines, assetsBaseUrl }) => {
   const subtotal = lines.reduce((s, l) => s + n(l.amount), 0);
   const pages = chunk(lines, ROWS_PER_PAGE);
+
+  const base = (assetsBaseUrl ?? "").replace(/\/$/, "");
+  const stampSrc = `${base}/images/jm_stamp_vn.jpg`;
 
   return (
     <Document>
@@ -395,8 +396,12 @@ const ProformaInvoicePDF: React.FC<{
               <TableHeader />
               {pageLines.map((l, i) => (
                 <View key={`${pageIdx}-${i}`} style={styles.tr}>
-                  <Text style={[styles.td, styles.tdCenter, { width: "16%" }]}>{softWrapToken(l.po_no)}</Text>
-                  <Text style={[styles.td, styles.tdCenter, { width: "14%" }]}>{softWrapToken(l.buyer_style_no)}</Text>
+                  <Text style={[styles.td, styles.tdCenter, { width: "16%" }]}>
+                    {softWrapToken(l.po_no)}
+                  </Text>
+                  <Text style={[styles.td, styles.tdCenter, { width: "14%" }]}>
+                    {softWrapToken(l.buyer_style_no)}
+                  </Text>
                   <Text style={[styles.td, styles.tdCenter, { width: "24%" }]}>
                     {show(l.description)}
                   </Text>
@@ -427,11 +432,12 @@ const ProformaInvoicePDF: React.FC<{
                   <Text style={styles.subtotalValue}>USD {money(subtotal)}</Text>
                 </View>
 
-                {/* ✅ Signed by 스탬프 위치 고정 */}
+                {/* ✅ Signed by: Authorized Signature 박스 제거 → 도장 이미지로 교체 */}
                 <View style={styles.signedBox}>
-                  <Text style={styles.signedTitle}>Authorized Signature</Text>
-                  <View style={styles.signedLine} />
-                  <Text style={styles.signedBy}>Signed by</Text>
+                  <Text style={styles.signedByTitle}>Signed by</Text>
+
+                  <Image src={stampSrc} style={styles.stampImg} />
+                  <Text style={styles.companyName}>JM International Co., Ltd</Text>
                 </View>
               </>
             ) : null}
