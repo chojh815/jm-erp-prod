@@ -18,7 +18,6 @@ type Props = {
 function fmtDate(d: any) {
   if (!d) return "-";
   const s = String(d);
-  // 2025-12-19T... => 2025-12-19
   return s.length >= 10 ? s.slice(0, 10) : s;
 }
 
@@ -34,7 +33,6 @@ function addDaysYmd(ymd: any, deltaDays: number) {
   const dd = String(dt.getUTCDate()).padStart(2, "0");
   return `${yy}-${mm}-${dd}`;
 }
-
 
 function fmtQty(n: any) {
   const v = Number(n ?? 0);
@@ -61,6 +59,42 @@ async function loadImageAsDataUrl(url: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * ✅ 핵심: jsPDF에 한글 폰트(NotoSansKR) 임베드
+ * - 전제: public/fonts/NotoSansKR-Regular.ttf 존재
+ * - fetch → base64 → addFileToVFS/addFont → setFont
+ */
+async function registerNotoSansKR(doc: jsPDF) {
+  // @ts-ignore
+  if ((doc as any).__notoKRRegistered) {
+    doc.setFont("NotoSansKR", "normal");
+    return;
+  }
+
+  const res = await fetch("/fonts/NotoSansKR-Regular.ttf", { cache: "force-cache" });
+  if (!res.ok) {
+    throw new Error("Missing font: /public/fonts/NotoSansKR-Regular.ttf");
+  }
+
+  const buf = await res.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+
+  // ArrayBuffer -> base64 (large file safe)
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  const b64 = btoa(binary);
+
+  doc.addFileToVFS("NotoSansKR-Regular.ttf", b64);
+  doc.addFont("NotoSansKR-Regular.ttf", "NotoSansKR", "normal", "Identity-H");
+  doc.setFont("NotoSansKR", "normal");
+
+  // @ts-ignore
+  (doc as any).__notoKRRegistered = true;
 }
 
 export default function WorkSheetJsPdfClient({ mode, header, line, materials }: Props) {
@@ -98,11 +132,12 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     (Array.isArray(line?.image_urls) ? line?.image_urls?.[0] : null) ||
     null;
 
-  // (중요) Buyer full name 노출 금지 정책
-  // -> 서버에서 buyer_name을 null로 내려주더라도, 혹시 남아있으면 여기서도 방어적으로 절대 출력 안 함.
-
   const onPrint = async () => {
     const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+
+    // ✅ 한글 폰트 임베드 (autoTable 포함 전체 적용)
+    await registerNotoSansKR(doc);
+
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
     const margin = 10;
@@ -110,8 +145,8 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     const x0 = margin;
     let y = 12;
 
-    // Title
-    doc.setFont("helvetica", "bold");
+    // Title (Bold 폰트가 없으므로 크기/레이아웃으로 강조)
+    doc.setFont("NotoSansKR", "normal");
     doc.setFontSize(24);
     doc.text(`WORK SHEET (${mode === "vendor" ? "Vendor" : "Internal"})`, pageW / 2, y, {
       align: "center",
@@ -130,7 +165,6 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     doc.rect(boxX, boxY, boxW, boxH);
 
     // Header rows (2 columns grid)
-    // Left labels/values
     const colGap = 10;
     const colW = (boxW - colGap) / 2;
     const leftX = boxX + 8;
@@ -141,8 +175,10 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     const row3Y = boxY + 26;
     const row4Y = boxY + 34;
 
+    doc.setFont("NotoSansKR", "normal");
     doc.setFontSize(11);
-    doc.setFont("helvetica", "bold");
+
+    // 라벨 (강조 느낌만)
     doc.text("Work Sheet No:", leftX, row1Y);
     doc.text("PO No:", leftX, row2Y);
     doc.text("Brand / Dept:", leftX, row3Y);
@@ -153,7 +189,7 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     doc.text(mode === "vendor" ? "Delivery Due:" : "Req Ship Date:", rightX, row3Y);
     doc.text("Date:", rightX, row4Y);
 
-    doc.setFont("helvetica", "normal");
+    // 값
     doc.text(wsNo, leftX + 36, row1Y);
     doc.text(poNo, leftX + 36, row2Y);
     doc.text(brandDept, leftX + 36, row3Y);
@@ -161,7 +197,13 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
 
     doc.text(currency, rightX + 24, row1Y);
     doc.text(shipMode, rightX + 24, row2Y);
-    doc.text(mode === "vendor" ? addDaysYmd(header?.requested_ship_date || header?.req_ship_date, -7) : reqShipDate, rightX + 30, row3Y);
+    doc.text(
+      mode === "vendor"
+        ? addDaysYmd(header?.requested_ship_date || header?.req_ship_date, -7)
+        : reqShipDate,
+      rightX + 30,
+      row3Y
+    );
     doc.text(docDate, rightX + 16, row4Y);
 
     // sub boxes: sample dates + special instructions
@@ -172,11 +214,9 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     // left sub
     doc.setLineWidth(0.4);
     doc.rect(boxX + 3, subY, subW, subH);
-    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
     doc.text("Sample Target Dates", boxX + 6, subY + 5);
 
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
     const ap = fmtDate(header?.approval_sample_target_date);
     const pp = fmtDate(header?.pp_sample_target_date);
     const top = fmtDate(header?.top_sample_target_date);
@@ -185,19 +225,15 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
 
     // right sub
     doc.rect(boxX + 3 + subW + 3, subY, subW, subH);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
     doc.text("Special Instructions", boxX + 6 + subW + 3, subY + 5);
-    doc.setFont("helvetica", "normal");
+
     const inst = safeText(header?.special_instructions || header?.instruction || header?.notes);
     doc.text(inst === "-" ? "-" : inst.slice(0, 110), boxX + 6 + subW + 3, subY + 11);
 
     y += boxH + 8;
 
     // ===== Line Head =====
-    // Left: JM No / Buyer Style / Desc / Plating
-    // Right: Qty big
-    doc.setFont("helvetica", "bold");
+    doc.setFont("NotoSansKR", "normal");
     doc.setFontSize(12);
     doc.text(`JM No: ${jmNo}`, x0, y);
     y += 6;
@@ -223,15 +259,14 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     if (imageUrl) {
       const dataUrl = await loadImageAsDataUrl(imageUrl);
       if (dataUrl) {
-        // Fit image inside box
         doc.addImage(dataUrl, "JPEG", x0 + 2, y + 2, imgW - 4, imgH - 4, undefined, "FAST");
       } else {
-        doc.setFont("helvetica", "normal");
+        doc.setFont("NotoSansKR", "normal");
         doc.setFontSize(10);
         doc.text("No image", x0 + imgW / 2, y + imgH / 2, { align: "center" });
       }
     } else {
-      doc.setFont("helvetica", "normal");
+      doc.setFont("NotoSansKR", "normal");
       doc.setFontSize(10);
       doc.text("No image", x0 + imgW / 2, y + imgH / 2, { align: "center" });
     }
@@ -258,8 +293,11 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
       theme: "grid",
       head: [["Item / Material", "Spec", "Color", "Qty", "Note"]],
       body: rows,
+
+      // ✅ 한글 폰트 강제
       styles: {
-        font: "helvetica",
+        font: "NotoSansKR",
+        fontStyle: "normal",
         fontSize: 10,
         cellPadding: 2.2,
         valign: "top",
@@ -267,11 +305,17 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
         lineWidth: 0.2,
       },
       headStyles: {
-        fillColor: [135, 190, 253], // 연한 파랑 (요청)
-        textColor: [15, 23, 42], // 네이비
-        fontStyle: "bold",
+        fillColor: [135, 190, 253],
+        textColor: [15, 23, 42],
+        font: "NotoSansKR",
+        fontStyle: "normal",
         halign: "center",
       },
+      bodyStyles: {
+        font: "NotoSansKR",
+        fontStyle: "normal",
+      },
+
       columnStyles: {
         0: { cellWidth: tableW * 0.40 },
         1: { cellWidth: tableW * 0.18 },
@@ -279,9 +323,7 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
         3: { cellWidth: tableW * 0.10, halign: "right" },
         4: { cellWidth: tableW * 0.18 },
       },
-      didDrawPage: () => {
-        // (필요하면 페이지 번호 등 추가 가능)
-      },
+      didDrawPage: () => {},
     });
 
     const afterTableY = (doc as any).lastAutoTable?.finalY ?? y + imgH;
@@ -299,10 +341,11 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     const drawNote = (x: number, title: string, body: string) => {
       doc.setLineWidth(0.6);
       doc.rect(x, notesY, noteW, noteH);
-      doc.setFont("helvetica", "bold");
+
+      doc.setFont("NotoSansKR", "normal");
       doc.setFontSize(11);
       doc.text(title, x + 3, notesY + 6);
-      doc.setFont("helvetica", "normal");
+
       doc.setFontSize(10);
       const txt = safeText(body);
       doc.text(txt === "-" ? "-" : txt.slice(0, 120), x + 3, notesY + 12);
@@ -313,7 +356,6 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
     drawNote(n3X, "Packing Notes", safeText(line?.packing_notes || header?.packing_notes));
 
     // ===== output =====
-    // 자동으로 새 탭 PDF + 프린트 유도 (브라우저 헤더/푸터 없이)
     const blobUrl = doc.output("bloburl");
     window.open(blobUrl, "_blank", "noopener,noreferrer");
   };
@@ -369,7 +411,6 @@ export default function WorkSheetJsPdfClient({ mode, header, line, materials }: 
           width: "100%",
         }}
       >
-        {/* 미리보기는 간단히 안내만 (실제 출력은 jsPDF가 담당) */}
         <div style={{ textAlign: "center", fontSize: 18, fontWeight: 900, marginTop: 12 }}>
           WORK SHEET ({mode === "vendor" ? "Vendor" : "Internal"})
         </div>

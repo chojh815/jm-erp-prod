@@ -501,7 +501,7 @@ async function loadAndRegisterFont(doc: jsPDF, fontName: string, fontUrl: string
 
   const vfsFileName = `${fontName}.ttf`;
   (doc as any).addFileToVFS(vfsFileName, base64);
-  (doc as any).addFont(vfsFileName, fontName, "normal");
+  (doc as any).addFont(vfsFileName, fontName, "normal", "Identity-H");
 }
 
 /** colors */
@@ -738,10 +738,10 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   // - Chinese: NotoSansSC (중국어 간체)
   // 주의: jsPDF는 자동 폰트 fallback이 없어서, 섹션별로 setFont를 바꿔서 사용한다.
   (doc as any).addFileToVFS("NotoSansKR-Regular.ttf", String(NotoSansKRRegular).replace(/^\s+|\s+$/g, ""));
-  (doc as any).addFont("NotoSansKR-Regular.ttf", "NotoSansKR", "normal");
+  (doc as any).addFont("NotoSansKR-Regular.ttf", "NotoSansKR", "normal", "Identity-H");
 
   (doc as any).addFileToVFS("NotoSansSC-Regular.ttf", String(NotoSansSCRegular).replace(/^\s+|\s+$/g, ""));
-  (doc as any).addFont("NotoSansSC-Regular.ttf", "NotoSansSC", "normal");
+  (doc as any).addFont("NotoSansSC-Regular.ttf", "NotoSansSC", "normal", "Identity-H");
 
   // 기본은 한글 폰트로 (노트/라벨/헤더 대부분)
   doc.setFont(lang === "cn" ? "NotoSansSC" : "NotoSansKR", "normal");
@@ -974,6 +974,8 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   // Normalize again here to satisfy jsPDF-AutoTable's RowInput typings.
   const tableHeadRow: string[] = Array.from(L.TABLE_HEAD as unknown as any[]).map((x) => String(x));
 
+  const tableFont = lang === "cn" ? "NotoSansSC" : "NotoSansKR";
+
   autoTable(doc, {
     startY: y,
     margin: { left: tableX, right: margin, top: margin, bottom: margin },
@@ -984,7 +986,7 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
     theme: "grid",
     columnStyles: colStyles,
     styles: {
-      font: "NotoSansSC",
+      font: tableFont,
       fontSize: 9.6,
       cellPadding: 1.9,
       lineWidth: 0.1,
@@ -994,6 +996,7 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
     headStyles: {
       fillColor: [255, 255, 255],
       textColor: 20,
+      font: tableFont,
       // 중국어 헤더는 bold 폰트 미등록 시 글자가 깨질 수 있어 normal로 고정
       fontStyle: lang === "cn" ? "normal" : "bold",
       fontSize: 9.2,
@@ -1001,7 +1004,13 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
       valign: "middle",
       lineWidth: 0.1,
     },
+    bodyStyles: {
+      font: tableFont,
+      fontStyle: "normal",
+    },
     didParseCell: (data) => {
+      // Ensure correct font for CJK
+      (data.cell.styles as any).font = tableFont;
       // Highlight TOTAL row (internal only)
       if (mode === "internal" && data.section === "body") {
         const row = data.row?.raw as any[] | undefined;
