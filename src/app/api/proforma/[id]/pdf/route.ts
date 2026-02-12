@@ -70,7 +70,10 @@ async function loadHeaderAny(idOrNo: string): Promise<any | null> {
 }
 
 function toPdfLine(r: any): ProformaLinePDF {
-  const qty = num(pickFirst(r, ["qty", "quantity", "order_qty", "po_qty", "shipped_qty"]), 0);
+  const qty = num(
+    pickFirst(r, ["qty", "quantity", "order_qty", "po_qty", "shipped_qty"]),
+    0
+  );
   const unitPrice = num(pickFirst(r, ["unit_price", "price", "up", "unitPrice"]), 0);
   const amount =
     num(pickFirst(r, ["amount", "line_amount", "lineAmount"]), 0) || qty * unitPrice;
@@ -173,7 +176,6 @@ async function loadLinesAny(opts: {
   }
 
   // 2) ✅ 최후 fallback: PO 라인에서 가져오기
-  // - PI 라인이 저장되는 테이블/키가 헷갈려도 “문서 출력”은 되게 만들기
   if (poHeaderId || poNo) {
     // 우선 po_header_id로
     if (poHeaderId) {
@@ -210,7 +212,7 @@ async function loadLinesAny(opts: {
       }
     }
 
-    // 그 다음 po_no로 (po_lines에 po_no가 있거나 view인 경우)
+    // 그 다음 po_no로
     if (poNo) {
       const r3 = await supabaseAdmin
         .from("po_lines")
@@ -241,8 +243,15 @@ async function loadLinesAny(opts: {
 /** ✅ shipper 주소 조합기 */
 function buildShipperAddress(site: any): string | null {
   const line1 =
-    pickFirst(site, ["shipper_address", "address", "site_address", "address1", "addr1", "street", "street1"]) ??
-    null;
+    pickFirst(site, [
+      "shipper_address",
+      "address",
+      "site_address",
+      "address1",
+      "addr1",
+      "street",
+      "street1",
+    ]) ?? null;
   const line2 =
     pickFirst(site, ["address2", "addr2", "street2", "suite", "unit", "floor"]) ?? null;
   const city = pickFirst(site, ["city", "town"]) ?? null;
@@ -349,16 +358,14 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       pickFirst(site, ["sea_port_loading", "air_port_loading", "factory_sea_port", "factory_air_port"]) ??
       null;
 
-    const originCountry =
-      pickFirst(site, ["origin_country", "country", "coo_country"]) ?? null;
+    const originCountry = pickFirst(site, ["origin_country", "country", "coo_country"]) ?? null;
 
     const cooText =
       pickFirst(headerRaw, ["coo_text", "cooText"]) ??
       (originCountry ? `MADE IN ${originCountry}` : null);
 
     // Buyer company
-    const buyerCompanyId =
-      pickFirst(headerRaw, ["buyer_company_id", "buyer_id"]) ?? null;
+    const buyerCompanyId = pickFirst(headerRaw, ["buyer_company_id", "buyer_id"]) ?? null;
 
     let buyerCompany: any = null;
     if (buyerCompanyId) {
@@ -370,53 +377,17 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       if (!bErr) buyerCompany = b;
     }
 
-    // ✅ Brand/Dept fallback: header -> PO -> buyer company (defensive for schema drift)
+    // ✅ Brand/Dept fallback
     const buyerBrandName =
-      pickFirst(headerRaw, [
-        "buyer_brand_name",
-        "buyer_brand",
-        "buyerBrandName",
-        "brand_name",
-        "brand",
-      ]) ??
-      pickFirst(poHeader, [
-        "buyer_brand_name",
-        "buyer_brand_name_text",
-        "buyer_brand",
-        "brand_name",
-        "brand",
-      ]) ??
-      pickFirst(buyerCompany, [
-        "buyer_brand_name",
-        "buyer_brand",
-        "default_brand_name",
-        "brand_name",
-        "brand",
-      ]) ??
+      pickFirst(headerRaw, ["buyer_brand_name", "buyer_brand", "buyerBrandName", "brand_name", "brand"]) ??
+      pickFirst(poHeader, ["buyer_brand_name", "buyer_brand_name_text", "buyer_brand", "brand_name", "brand"]) ??
+      pickFirst(buyerCompany, ["buyer_brand_name", "buyer_brand", "default_brand_name", "brand_name", "brand"]) ??
       null;
 
     const buyerDeptName =
-      pickFirst(headerRaw, [
-        "buyer_dept_name",
-        "buyer_dept",
-        "buyerDeptName",
-        "dept_name",
-        "dept",
-      ]) ??
-      pickFirst(poHeader, [
-        "buyer_dept_name",
-        "buyer_dept_name_text",
-        "buyer_dept",
-        "dept_name",
-        "dept",
-      ]) ??
-      pickFirst(buyerCompany, [
-        "buyer_dept_name",
-        "buyer_dept",
-        "default_dept_name",
-        "dept_name",
-        "dept",
-      ]) ??
+      pickFirst(headerRaw, ["buyer_dept_name", "buyer_dept", "buyerDeptName", "dept_name", "dept"]) ??
+      pickFirst(poHeader, ["buyer_dept_name", "buyer_dept_name_text", "buyer_dept", "dept_name", "dept"]) ??
+      pickFirst(buyerCompany, ["buyer_dept_name", "buyer_dept", "default_dept_name", "dept_name", "dept"]) ??
       null;
 
     const consigneeText =
@@ -481,7 +452,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       coo_text: cooText,
     };
 
-    // ✅ 라인 후보키들(헤더 id + url id + 혹시 다른 fk)
+    // ✅ 라인 후보키들
     const candidateIds = Array.from(
       new Set(
         [
@@ -492,22 +463,21 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       )
     );
 
-    // ✅ 라인 로드 (proforma 라인 → 없으면 po_lines fallback)
-    const lines = await loadLinesAny({
-      candidateIds,
-      invoiceNo,
-      poNo,
-      poHeaderId,
-    });
+    // ✅ 라인 로드
+    const lines = await loadLinesAny({ candidateIds, invoiceNo, poNo, poHeaderId });
 
     const normalizedLines = lines.map((l) => ({
       ...l,
       po_no: l.po_no ?? headerPdf.po_no ?? null,
     }));
 
+    // ✅ server render에서 이미지 경로 깨짐 방지: origin을 PDF에 전달
+    const assetsBaseUrl = _req.nextUrl.origin;
+
     const element = React.createElement(ProformaInvoicePDF as any, {
       header: headerPdf,
       lines: normalizedLines,
+      assetsBaseUrl,
     });
 
     const stream = await renderToStream(element as any);
