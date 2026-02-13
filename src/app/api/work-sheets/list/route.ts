@@ -7,11 +7,14 @@
  * 3) Avoid showing duplicate PO rows in list (default: keep latest row per po_no)
  * 4) IMPORTANT: Hide work sheets whose PO has been soft-deleted (po_headers.is_deleted=true)
  *    or status=DELETED (if you use status as a delete marker too).
+ * 5) IMPORTANT: Hide "broken" rows (missing po_no / buyer_id) so UI won't show '-' rows.
  *
  * Query params:
  * - q: search by po_no / buyer_name / buyer_code
  * - status: ALL | DRAFT | ... (case-insensitive)
  * - all=1 : return all rows (no dedupe)
+ * - include_empty=1 : include rows with missing po_no/buyer_id (default: hidden)
+ * - debug=1 : include debug flags to compare local/prod env
  */
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -29,12 +32,19 @@ function safeTrim(v: any) {
   return (v ?? "").toString().trim();
 }
 
+function hasServiceRoleEnv() {
+  const v = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
+  return !!v && safeTrim(v).length >= 30;
+}
+
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const qRaw = safeTrim(searchParams.get("q"));
     const status = safeTrim(searchParams.get("status")).toUpperCase();
     const all = safeTrim(searchParams.get("all")) === "1";
+    const includeEmpty = safeTrim(searchParams.get("include_empty")) === "1";
+    const debugOn = safeTrim(searchParams.get("debug")) === "1";
 
     let query = supabaseAdmin
       .from("work_sheet_headers")
@@ -62,8 +72,6 @@ export async function GET(req: Request) {
     let rows: any[] = Array.isArray(data) ? data : [];
 
     // --- NEW: Filter out rows whose PO is deleted ---
-    // Work sheets are stored independently; deleting a PO will NOT delete WS rows.
-    // So we must explicitly check po_headers.
     try {
       const poNos = Array.from(
         new Set(
@@ -85,24 +93,21 @@ export async function GET(req: Request) {
             const poNo = safeTrim((p as any)?.po_no);
             const isDel = !!(p as any)?.is_deleted;
             const st = safeTrim((p as any)?.status).toUpperCase();
-            // If your system uses BOTH flags, respect both.
             if (!poNo) continue;
             if (isDel) continue;
             if (st === "DELETED") continue;
             alive.add(poNo);
           }
 
-          // Keep rows that have no po_no (should be rare), otherwise must be alive.
           rows = rows.filter((r: any) => {
             const key = safeTrim(r?.po_no);
-            if (!key) return true;
+            if (!key) return true; // handled later by includeEmpty flag
             return alive.has(key);
           });
         }
       }
     } catch {
-      // If this filter fails for any reason, do not break the list endpoint.
-      // (Better to show extra rows than to 500.)
+      // do not break
     }
 
     // --- buyer_name / buyer_code backfill (response + optional DB patch) ---
@@ -153,6 +158,18 @@ export async function GET(req: Request) {
       }
     }
 
+    // --- Hide broken rows (missing po_no / buyer_id) unless include_empty=1 ---
+    if (!includeEmpty) {
+      rows = rows.filter((r: any) => {
+        const poNo = safeTrim(r?.po_no);
+        const buyerId = safeTrim(r?.buyer_id);
+        // poNo + buyerId are minimum requirements to render a meaningful list row
+        if (!poNo) return false;
+        if (!buyerId) return false;
+        return true;
+      });
+    }
+
     // --- De-dupe by po_no (default: keep latest row per po_no) ---
     let out = rows;
     if (!all) {
@@ -160,10 +177,7 @@ export async function GET(req: Request) {
       const deduped: any[] = [];
       for (const r of rows) {
         const key = safeTrim(r?.po_no);
-        if (!key) {
-          deduped.push(r);
-          continue;
-        }
+        if (!key) continue; // if includeEmpty=1, still don't dedupe on empty keys
         if (seen.has(key)) continue;
         seen.add(key);
         deduped.push(r);
@@ -181,7 +195,17 @@ export async function GET(req: Request) {
       updatedAt: r.updated_at,
     }));
 
-    return ok({ rows: normalized, total: normalized.length });
+    const debug = debugOn
+      ? {
+          has_service_role: hasServiceRoleEnv(),
+          node_env: process.env.NODE_ENV ?? null,
+          supabase_url_set: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+          supabase_anon_set: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+          now: new Date().toISOString(),
+        }
+      : undefined;
+
+    return ok({ rows: normalized, total: normalized.length, ...(debugOn ? { debug } : {}) });
   } catch (e: any) {
     console.error(e);
     return bad(e?.message ?? "Server error", 500);
