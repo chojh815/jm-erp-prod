@@ -225,6 +225,7 @@ export async function POST(req: NextRequest) {
           origin_code: s.originCode,
           country: s.country,
           city: s.city ?? null,
+          state: (s as any).state ?? null,
           address1: s.address1 ?? null,
           address2: s.address2 ?? null,
           phone: s.phone ?? null,

@@ -1348,6 +1348,16 @@ export default function CompaniesPage() {
                                     })
                                   }
                                 />
+                                <Label>State</Label>
+                                <Input
+                                  value={s.state ?? ""}
+                                  onChange={(e) =>
+                                    upsertSite(s.id, {
+                                      state: e.target.value,
+                                    })
+                                  }
+                                />
+
                                 <Label>Address 1</Label>
                                 <Input
                                   value={s.address1 ?? ""}

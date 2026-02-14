@@ -4,7 +4,7 @@ import { createSupabaseServerClient } from "../../_supabase";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/dashboard/overview
+ * GET /api/dashboards/overview
  *
  * ✅ No DB views required.
  * We compute everything in the route using tolerant ("schema-flex") reads:
@@ -50,7 +50,6 @@ function pickTermDays(r: any): number | null {
   return null;
 }
 
-
 function monthStartISO(anyISO: string) {
   const d = new Date(anyISO + "T00:00:00");
   const first = new Date(d.getFullYear(), d.getMonth(), 1);
@@ -85,8 +84,7 @@ function inRangeISO(dISO: string | null | undefined, start: string, end: string)
 }
 
 function pickDate(row: any): string | null {
-  // IMPORTANT: Prefer updated_at over created_at to avoid excluding older records that were recently edited.
-  // Also keep domain-specific dates (order/invoice/receipt/ship) earlier when present.
+  // Domain-specific dates first:
   return (
     row?.order_date ??
     row?.po_date ??
@@ -101,11 +99,7 @@ function pickDate(row: any): string | null {
 }
 
 function pickAmountUSD(row: any): number {
-  // Schema-flex amount pick:
-  // - PO: subtotal
-  // - Invoice: total_amount / grand_total
-  // - Receipt: amount / paid_amount
-  // - Fallbacks: *_usd variants
+  // Header-level schema-flex amount pick:
   const v =
     row?.subtotal ??
     row?.total_amount ??
@@ -123,6 +117,34 @@ function pickAmountUSD(row: any): number {
     0;
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+function pickLineAmountUSD(row: any): number {
+  // Line-level schema-flex amount pick (PO lines, invoice lines, etc.)
+  const v =
+    row?.amount_usd ??
+    row?.line_amount_usd ??
+    row?.line_total_usd ??
+    row?.total_usd ??
+    row?.total_amount_usd ??
+    row?.subtotal_usd ??
+    row?.fob_total_usd ??
+    row?.offer_total_usd ??
+    row?.amount ??
+    row?.line_amount ??
+    row?.line_total ??
+    row?.total ??
+    0;
+
+  const n = Number(v);
+  if (Number.isFinite(n) && n !== 0) return n;
+
+  // Fallback: qty * unit_price (if present)
+  const qty = Number(row?.qty ?? row?.quantity ?? row?.order_qty ?? row?.pcs ?? 0);
+  const unit = Number(row?.unit_price ?? row?.price ?? row?.unit_price_usd ?? row?.price_usd ?? 0);
+  if (Number.isFinite(qty) && Number.isFinite(unit) && qty > 0 && unit > 0) return qty * unit;
+
+  return 0;
 }
 
 function pickStatus(row: any): string {
@@ -161,6 +183,14 @@ function pickSiteId(row: any): string | null {
   return row?.ship_from_site_id ?? row?.site_id ?? row?.company_site_id ?? null;
 }
 
+function pickPoHeaderId(row: any): string | null {
+  return row?.id ?? row?.po_header_id ?? row?.header_id ?? row?.po_id ?? null;
+}
+
+function pickPoHeaderIdFromLine(row: any): string | null {
+  return row?.po_header_id ?? row?.header_id ?? row?.po_id ?? row?.poHeaderId ?? null;
+}
+
 function ymOf(dISO: string) {
   return dISO.slice(0, 7);
 }
@@ -194,18 +224,21 @@ export async function GET(req: Request) {
 
     const supabase = createSupabaseServerClient();
 
-    // Core data pulls (schema-flex). We keep them separate so any one table missing doesn't kill the whole endpoint.
-    const [poRes, invRes, shipRes, rchRes, rcaRes] = await Promise.all([
+    // Core data pulls (schema-flex). Keep separate so any one table missing doesn't kill the endpoint.
+    const [poRes, poLinesRes, invRes, shipRes, rchRes, rcaRes] = await Promise.all([
       supabase.from("po_headers").select("*"),
+      // ✅ IMPORTANT: Many projects do NOT store PO subtotal in po_headers. Sum from po_lines to avoid Orders=0.
+      supabase.from("po_lines").select("*"),
       supabase.from("invoice_headers").select("*"),
       supabase.from("shipments").select("*"),
-      // ✅ Receipts schema in this project uses receipt_headers + receipt_applications (NOT public.receipts)
+      // ✅ Receipts schema in this project uses receipt_headers + receipt_applications
       supabase.from("receipt_headers").select("*"),
       supabase.from("receipt_applications").select("*"),
     ]);
 
-    // If a table doesn't exist, Supabase will return an error. We treat missing tables as empty arrays.
+    // Missing tables -> treat as empty
     const pos = poRes.error ? [] : (poRes.data || []);
+    const poLines = poLinesRes.error ? [] : (poLinesRes.data || []);
     const invoices = invRes.error ? [] : (invRes.data || []);
     const shipments = shipRes.error ? [] : (shipRes.data || []);
     const receiptHeaders = rchRes.error ? [] : (rchRes.data || []);
@@ -247,9 +280,12 @@ export async function GET(req: Request) {
     const notDeleted = (row: any) =>
       row?.is_deleted !== true && String(row?.status ?? "").toUpperCase() !== "DELETED";
 
+    // ✅ Orders MUST be by order_date (draft/confirmed regardless). pickDate() already prioritizes order_date.
     const posF = pos.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
+    const poF = posF; // alias
     const invF = invoices.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
     const shipF = shipments.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
+
     // Receipts: filter headers first (they carry date/buyer/site), then attach applications
     const rchF = receiptHeaders.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
     const rchIdSet = new Set(rchF.map((r: any) => pickReceiptId(r)).filter(Boolean));
@@ -258,22 +294,40 @@ export async function GET(req: Request) {
       return !!hid && rchIdSet.has(hid);
     });
 
+    // ✅ PO header -> summed USD amount from po_lines (fallback to header amount if needed)
+    const poHeaderIdSet = new Set(posF.map((h: any) => pickPoHeaderId(h)).filter(Boolean));
+    const poLineSumByHeader = new Map<string, number>();
+    for (const ln of poLines.filter(notDeleted)) {
+      const hid = pickPoHeaderIdFromLine(ln);
+      if (!hid) continue;
+      if (poHeaderIdSet.size && !poHeaderIdSet.has(hid)) continue;
+      const amt = pickLineAmountUSD(ln);
+      if (!amt) continue;
+      poLineSumByHeader.set(hid, (poLineSumByHeader.get(hid) || 0) + amt);
+    }
+    const amountForPoHeader = (h: any) => {
+      const hid = pickPoHeaderId(h);
+      const summed = hid ? (poLineSumByHeader.get(hid) || 0) : 0;
+      if (summed && summed > 0) return summed;
+      return pickAmountUSD(h);
+    };
+
     // KPIs
-    const ordersUsd = posF.reduce((s, r) => s + pickAmountUSD(r), 0);
-    const poCount = new Set(posF.map((r) => r.id ?? pickPoNo(r)).filter(Boolean)).size;
+    const ordersUsd = posF.reduce((s, r) => s + amountForPoHeader(r), 0);
+    const poCount = new Set(posF.map((r: any) => r.id ?? pickPoNo(r)).filter(Boolean)).size;
 
     // Shipped (A): Shipments have no amount columns in your schema.
-    // We define shipped USD as the SUM(invoice_headers.total_amount) for invoices linked to shipments within the date filter.
+    // Define shipped USD as SUM(invoice_headers.total_amount) for invoices linked to shipments within date filter.
     const shipmentIds = new Set(shipF.map((r: any) => r?.id).filter(Boolean));
     const shippedInvoices = invoices
       .filter(notDeleted)
-      .filter((r: any) => shipmentIds.size ? shipmentIds.has(r?.shipment_id) : false);
+      .filter((r: any) => (shipmentIds.size ? shipmentIds.has(r?.shipment_id) : false));
     const shippedUsd = shippedInvoices.reduce((s: number, r: any) => s + pickAmountUSD(r), 0);
     const shipCount = shipmentIds.size;
     const shippedPoCount = new Set(shippedInvoices.map((r: any) => pickPoNo(r)).filter(Boolean)).size;
+
     const pendingOrdersUsd = Math.max((ordersUsd || 0) - (shippedUsd || 0), 0);
     const pendingPoCount = Math.max((poCount || 0) - (shippedPoCount || 0), 0);
-
 
     const invoicedUsd = invF.reduce((s, r) => s + pickAmountUSD(r), 0);
     const invCount = new Set(invF.map((r) => r.id ?? pickInvoiceNo(r)).filter(Boolean)).size;
@@ -299,9 +353,9 @@ export async function GET(req: Request) {
       { key: "at_risk", label: "At Risk", value_usd: 0, delta_pct: null, sub_label: "POs", sub_value: "0" },
     ];
 
-    // Trend (monthly, within the same range) — based on best-available date field.
+    // Trend (monthly) — orders use PO header month (order_date) but amount from summed lines
     const monthSet = new Set<string>();
-    const addMonths = (rows: any[], key: string) => {
+    const addMonths = (rows: any[]) => {
       for (const r of rows) {
         const d = pickDate(r);
         if (!d) continue;
@@ -309,13 +363,25 @@ export async function GET(req: Request) {
         monthSet.add(ymOf(d));
       }
     };
-    addMonths(posF, "orders");
-    addMonths(shipF, "shipped");
-    addMonths(invF, "invoiced");
-    addMonths(rchF, "collected");
+    addMonths(posF);
+    addMonths(shipF);
+    addMonths(invF);
+    addMonths(rchF);
 
     const months = Array.from(monthSet).sort();
-    const byMonth = (rows: any[]) => {
+
+    const ordersM = (() => {
+      const map = new Map<string, number>();
+      for (const h of posF) {
+        const d = pickDate(h);
+        if (!d) continue;
+        const ym = ymOf(d);
+        map.set(ym, (map.get(ym) || 0) + amountForPoHeader(h));
+      }
+      return map;
+    })();
+
+    const byMonthHeaderAmount = (rows: any[]) => {
       const map = new Map<string, number>();
       for (const r of rows) {
         const d = pickDate(r);
@@ -326,13 +392,11 @@ export async function GET(req: Request) {
       return map;
     };
 
-    const ordersM = byMonth(posF);
-    const shippedM = byMonth(shipF);
-    const invoicedM = byMonth(invF);
+    const shippedM = byMonthHeaderAmount(shipF);   // may be 0 if shipments table has no amount (kept for UI continuity)
+    const invoicedM = byMonthHeaderAmount(invF);
+
     const collectedM = (() => {
-      // group collected by month of receipt_date on headers
       const map = new Map<string, number>();
-      // if we have applications tied to headers, allocate by header month
       if (rcaF.length) {
         const hdrById = new Map<string, any>();
         for (const h of rchF) {
@@ -368,13 +432,13 @@ export async function GET(req: Request) {
 
     const trend = points.length ? [{ preset, start, end, points }] : [];
 
-    // Status distribution (POs)
+    // Status distribution (POs) — amount uses summed lines
     const distMap = new Map<string, { status: string; count: number; amount_usd: number }>();
     for (const r of posF) {
       const st = pickStatus(r);
       const cur = distMap.get(st) || { status: st, count: 0, amount_usd: 0 };
       cur.count += 1;
-      cur.amount_usd += pickAmountUSD(r);
+      cur.amount_usd += amountForPoHeader(r);
       distMap.set(st, cur);
     }
     const status_dist = Array.from(distMap.values()).sort((a, b) => b.amount_usd - a.amount_usd);
@@ -391,7 +455,7 @@ export async function GET(req: Request) {
           brand: pickBrand(r),
           req_ship_date: req,
           delay_days: delay,
-          amount_usd: Number(pickAmountUSD(r).toFixed(2)),
+          amount_usd: Number(amountForPoHeader(r).toFixed(2)),
           stage: pickStatus(r),
         };
       })
@@ -399,17 +463,13 @@ export async function GET(req: Request) {
       .sort((a, b) => (b.delay_days - a.delay_days) || (b.amount_usd - a.amount_usd))
       .slice(0, 200);
 
-    const atRiskUsd = at_risk.reduce((s, r) => s + (Number(r.amount_usd) || 0), 0);
-    const atRiskPoCount = new Set(at_risk.map((r) => r.po_no).filter(Boolean)).size;
-
-
     const next_ship = posF
       .map((r) => ({
         req_ship_date: pickReqShipDate(r),
         po_no: pickPoNo(r),
         buyer_name: pickBuyerName(r),
         brand: pickBrand(r),
-        amount_usd: Number(pickAmountUSD(r).toFixed(2)),
+        amount_usd: Number(amountForPoHeader(r).toFixed(2)),
         ship_mode: pickShipMode(r),
       }))
       .filter((r) => !!r.po_no && !!r.req_ship_date && r.req_ship_date >= today)
@@ -417,7 +477,6 @@ export async function GET(req: Request) {
       .slice(0, 200);
 
     // Cash Watch (AR Top): compute per-invoice outstanding using receipt_applications when available.
-    // Important: do NOT require overdue > 0; show top balances first (and overdue info if derivable).
     const rchAll = receiptHeaders.filter(notDeleted).filter(buyerOk).filter(siteOk).filter((h: any) => {
       const d = pickDate(h);
       if (!d) return false;
@@ -440,24 +499,18 @@ export async function GET(req: Request) {
       .map((r) => {
         const invId = r?.id ?? null;
         const invDate = (r?.invoice_date ?? r?.date ?? pickDate(r) ?? "").slice(0, 10) || null;
-        // Due Date priority:
-        // 1) invoice_headers.due_date (or invoice_due_date)
-        // 2) invoice_date + explicit terms days (payment_terms_days / terms_days / net_days ...)
-        // 3) fallback: invoice_date + 30 (NET 30)
+
         const due = (r?.due_date ?? r?.invoice_due_date ?? null) as string | null;
         const termDays = pickTermDays(r);
-        const dueISO = due
-          ? due.slice(0, 10)
-          : (invDate ? addDaysISO(invDate, termDays ?? 30) : null);
+        const dueISO = due ? due.slice(0, 10) : (invDate ? addDaysISO(invDate, termDays ?? 30) : null);
 
-        // Overdue Days = max(0, Today - DueDate)
         const overdue = dueISO
           ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(dueISO).getTime()) / 86400000))
           : 0;
 
         const total = pickAmountUSD(r);
         const applied = invId ? (appliedByInvoice.get(invId) || 0) : 0;
-        // If invoice has explicit balance_usd use it, else compute from total - applied (never below 0).
+
         const explicitBal = Number(r?.balance_usd);
         const bal =
           Number.isFinite(explicitBal) && explicitBal >= 0
@@ -478,7 +531,13 @@ export async function GET(req: Request) {
       .slice(0, 200);
 
     return NextResponse.json({
-      filters_echo: { preset, start, end, buyer_ids: buyerIds === "ALL" ? "ALL" : (buyerIds as string[]).join(","), site_ids: siteIds === "ALL" ? "ALL" : (siteIds as string[]).join(",") },
+      filters_echo: {
+        preset,
+        start,
+        end,
+        buyer_ids: buyerIds === "ALL" ? "ALL" : (buyerIds as string[]).join(","),
+        site_ids: siteIds === "ALL" ? "ALL" : (siteIds as string[]).join(","),
+      },
       kpis,
       trend,
       status_dist,
@@ -487,6 +546,7 @@ export async function GET(req: Request) {
         source: "route-computed",
         missing_tables: {
           po_headers: !!poRes.error ? poRes.error.message : null,
+          po_lines: !!poLinesRes.error ? poLinesRes.error.message : null,
           invoice_headers: !!invRes.error ? invRes.error.message : null,
           shipments: !!shipRes.error ? shipRes.error.message : null,
           receipt_headers: !!rchRes.error ? rchRes.error.message : null,

@@ -258,102 +258,80 @@ export async function GET(req: NextRequest) {
       .sort((a, b) => b.amount_usd - a.amount_usd)
       .slice(0, 20);
 
-    /**
-     * 3) Shipped (Alignment with Home Overview)
-     *    - Shipments in [start, end] (by ship_date/shipped_date/etd/created_at whichever exists)
-     *    - shippedUSD = SUM(invoice_headers.amount*) WHERE shipment_id IN shipmentIds
-     *    - shippedCount = shipment count in range (not invoice count)
+        /**
+     * 3) Shipped (Invoice Date 기준, Alignment with Performance/Home rule)
+     *    - 선택 기간 내 invoice_headers (invoice_date 기준) 합계
+     *    - Shipments count = 해당 invoices에서 shipment_id distinct 개수
      */
     let shippedUSD = 0;
     let shippedShipmentsCount = 0;
-    let shippedMeta: { shipment_date_col: string | null; shipped_invoices: number; shipments: number } = {
-      shipment_date_col: null,
+    let shippedMeta: {
+      invoice_date_col: string | null;
+      shipped_invoices: number;
+      shipments: number;
+    } = {
+      invoice_date_col: null,
       shipped_invoices: 0,
       shipments: 0,
     };
 
-    const shipmentDateCol = await detectDateColumn(supabase, "shipments", [
-      "ship_date",
-      "shipped_date",
-      "etd",
+    const invoiceDateCol = await detectDateColumn(supabase, "invoice_headers", [
+      "invoice_date",
+      "date",
       "created_at",
       "updated_at",
     ]);
-    shippedMeta.shipment_date_col = shipmentDateCol;
+    shippedMeta.invoice_date_col = invoiceDateCol;
 
-    let shipmentRows: any[] = [];
-    if (shipmentDateCol) {
-      let shipQ = supabase
-        .from("shipments")
+    let invRowsForShip: any[] = [];
+    if (invoiceDateCol) {
+      let invQ = supabase
+        .from("invoice_headers")
         .select("*")
-        .gte(shipmentDateCol, start)
-        .lte(shipmentDateCol, end);
+        .gte(invoiceDateCol, start)
+        .lte(invoiceDateCol, end);
 
-      const { data: shipD, error: shipE } = await shipQ;
-      if (!shipE) shipmentRows = shipD ?? [];
+      const { data: invD, error: invE } = await invQ;
+      if (!invE) invRowsForShip = invD ?? [];
     }
 
     // soft-delete filter (best effort)
-    shipmentRows = shipmentRows.filter((r: any) => r?.is_deleted === undefined || r?.is_deleted === false);
-
-    // buyer/site filter best-effort on shipments
-    if (buyerUuidList.length > 0) {
-      shipmentRows = shipmentRows.filter((r: any) => buyerUuidList.includes((r?.buyer_id ?? "").toString()));
-    } else if (buyerNameList.length > 0) {
-      shipmentRows = shipmentRows.filter((r: any) => buyerNameList.includes((r?.buyer_name ?? "").toString()));
-    }
-
-    if (siteUuidList.length > 0) {
-      shipmentRows = shipmentRows.filter((r: any) => siteUuidList.includes((r?.origin_id ?? "").toString()));
-    } else if (siteCodeList.length > 0) {
-      shipmentRows = shipmentRows.filter((r: any) => siteCodeList.includes((r?.origin_code ?? "").toString()));
-    }
-
-    const shipmentIds = Array.from(
-      new Set(shipmentRows.map((r: any) => r?.id).filter(Boolean))
+    invRowsForShip = invRowsForShip.filter(
+      (r: any) => r?.is_deleted === undefined || r?.is_deleted === false
     );
 
-    shippedShipmentsCount = shipmentIds.length;
-    shippedMeta.shipments = shippedShipmentsCount;
-
-    if (shipmentIds.length > 0) {
-      // invoice_headers linked to these shipments
-      const { data: invD, error: invE } = await supabase
-        .from("invoice_headers")
-        .select("*")
-        .in("shipment_id", shipmentIds);
-
-      if (!invE) {
-        const invoices = (invD ?? []).filter(
-          (r: any) => r?.is_deleted === undefined || r?.is_deleted === false
-        );
-
-        // buyer/site filter best-effort on invoices (in case shipments table doesn't store them)
-        let invFiltered = invoices;
-        if (buyerUuidList.length > 0) {
-          invFiltered = invFiltered.filter((r: any) =>
-            buyerUuidList.includes((r?.buyer_id ?? "").toString())
-          );
-        } else if (buyerNameList.length > 0) {
-          invFiltered = invFiltered.filter((r: any) =>
-            buyerNameList.includes((r?.buyer_name ?? "").toString())
-          );
-        }
-
-        if (siteUuidList.length > 0) {
-          invFiltered = invFiltered.filter((r: any) =>
-            siteUuidList.includes((r?.origin_id ?? r?.ship_from_id ?? "").toString())
-          );
-        } else if (siteCodeList.length > 0) {
-          invFiltered = invFiltered.filter((r: any) =>
-            siteCodeList.includes((r?.origin_code ?? r?.ship_from_code ?? "").toString())
-          );
-        }
-
-        shippedUSD = invFiltered.reduce((s: number, r: any) => s + pickAmountUSD(r), 0);
-        shippedMeta.shipped_invoices = invFiltered.length;
-      }
+    // buyer filter
+    if (buyerUuidList.length > 0) {
+      invRowsForShip = invRowsForShip.filter((r: any) =>
+        buyerUuidList.includes((r?.buyer_id ?? "").toString())
+      );
+    } else if (buyerNameList.length > 0) {
+      invRowsForShip = invRowsForShip.filter((r: any) =>
+        buyerNameList.includes((r?.buyer_name ?? "").toString())
+      );
     }
+
+    // site filter (best effort: origin_id/origin_code/ship_from_site_id/ship_from_code)
+    if (siteUuidList.length > 0) {
+      invRowsForShip = invRowsForShip.filter((r: any) => {
+        const sid = (r?.origin_id ?? r?.ship_from_site_id ?? r?.ship_from_id ?? "").toString();
+        return siteUuidList.includes(sid);
+      });
+    } else if (siteCodeList.length > 0) {
+      invRowsForShip = invRowsForShip.filter((r: any) => {
+        const sc = (r?.origin_code ?? r?.ship_from_code ?? "").toString();
+        return siteCodeList.includes(sc);
+      });
+    }
+
+    shippedUSD = invRowsForShip.reduce((s: number, r: any) => s + pickAmountUSD(r), 0);
+    shippedMeta.shipped_invoices = invRowsForShip.length;
+
+    const shipmentIdsForShip = Array.from(
+      new Set(invRowsForShip.map((r: any) => r?.shipment_id).filter(Boolean))
+    );
+    shippedShipmentsCount = shipmentIdsForShip.length;
+    shippedMeta.shipments = shippedShipmentsCount;
 
     // KPI (delta_pct는 아직 null)
     const kpis = [

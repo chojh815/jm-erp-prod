@@ -306,7 +306,7 @@ export default function PerformanceDashboardPage() {
         topMetric === "orders" ? x.order_usd : topMetric === "shipping" ? x.ship_usd : (x.order_usd + x.ship_usd);
       return { ...x, score };
     });
-    arr.sort((a, b) => b.score - a.score);
+    arr.sort((a, b) => (b.score - a.score) || a.name.localeCompare(b.name));
     return arr.slice(0, 10);
   }, [monthly, dimension, topMetric]);
 
@@ -370,17 +370,43 @@ export default function PerformanceDashboardPage() {
       });
 
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
+      
+      // Top10 summary (same metric/ordering as UI)
+      const sheetTop10 = top10.map((r, idx) => ({
+        Rank: idx + 1,
+        Dimension: dimension,
+        Name: r.name,
+        Metric: topMetric,
+        Orders_USD: Number(r.order_usd || 0),
+        Shipping_USD: Number(r.ship_usd || 0),
+        Combined_USD: Number((r.order_usd || 0) + (r.ship_usd || 0)),
+        Score: Number(r.score || 0),
+      }));
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYearly), "Yearly");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYtd), "YTD_vs_PriorYTD");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetTop10), "Top10");
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYtd), "YTD_vs_PriorYTD");
       XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
       return;
     }
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
+    
+      // Top10 summary (same metric/ordering as UI)
+      const sheetTop10 = top10.map((r, idx) => ({
+        Rank: idx + 1,
+        Dimension: dimension,
+        Name: r.name,
+        Metric: topMetric,
+        Orders_USD: Number(r.order_usd || 0),
+        Shipping_USD: Number(r.ship_usd || 0),
+        Combined_USD: Number((r.order_usd || 0) + (r.ship_usd || 0)),
+        Score: Number(r.score || 0),
+      }));
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYearly), "Yearly");
-    XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetTop10), "Top10");
+XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
   }
 
   function exportPdf() {
@@ -399,9 +425,37 @@ export default function PerformanceDashboardPage() {
 
     let y = 72;
 
-    // Use top10 list to select sections
-    const topNames = top10.map((x) => x.name);
-    const topMonthlyGroups = monthlyGrouped.filter(([name]) => topNames.includes(name));
+    // Use top10 list to select sections (preserve Top10 ranking order)
+    const rank = new Map<string, number>();
+    top10.forEach((x, i) => rank.set(x.name, i));
+
+    const topMonthlyGroups = monthlyGrouped
+      .filter(([name]) => rank.has(name))
+      .slice()
+      .sort((a, b) => (rank.get(a[0])! - rank.get(b[0])!));
+
+    // Top10 summary table (same metric / same ordering as chart)
+    autoTable(doc, {
+      startY: y,
+      head: [[dimension === "buyer" ? "Buyer" : "Brand", "Orders", "Shipping", "Combined"]],
+      body: top10.map((r) => [
+        r.name,
+        fmtUsdPlain(Number(r.order_usd || 0)),
+        fmtUsdPlain(Number(r.ship_usd || 0)),
+        fmtUsdPlain(Number((r.order_usd || 0) + (r.ship_usd || 0))),
+      ]),
+      styles: { fontSize: 8, cellPadding: 3 },
+      headStyles: { fontStyle: "bold" },
+      margin: { left: 40, right: 40 },
+      theme: "grid",
+    });
+
+    // @ts-ignore
+    y = doc.lastAutoTable.finalY + 22;
+    if (y > 520) {
+      doc.addPage();
+      y = 40;
+    }
 
     for (const [name, list] of topMonthlyGroups) {
       doc.setFontSize(11);
