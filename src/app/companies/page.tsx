@@ -48,6 +48,7 @@ export interface CompanySite {
   originCode: ShippingOriginCode;
   country: string;
   city?: string;
+  state?: string;
   address1?: string;
   address2?: string;
   phone?: string;
@@ -209,6 +210,54 @@ export default function CompaniesPage() {
   const router = useRouter();
   const { loading: authLoading, has } = usePermissions();
 
+  // ✅ Supabase session-based auth status (usePermissions does not expose session status)
+  const [status, setStatus] = useState<
+    "loading" | "authenticated" | "unauthenticated"
+  >("loading");
+
+  const [viewOnly, setViewOnly] = useState(false);
+
+  const canManageCompanies = useMemo(() => {
+    // wait until permission hook finishes
+    if (authLoading) return false;
+    try {
+      return (
+        has("companies.manage") ||
+        has("companies.write") ||
+        has("company.manage") ||
+        has("companies.admin") ||
+        has("admin")
+      );
+    } catch {
+      return false;
+    }
+  }, [authLoading, has]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (!mounted) return;
+        setStatus(data?.session ? "authenticated" : "unauthenticated");
+      } catch {
+        if (!mounted) return;
+        setStatus("unauthenticated");
+      }
+    })();
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+      setStatus(session ? "authenticated" : "unauthenticated");
+    });
+
+    return () => {
+      mounted = false;
+      sub?.subscription?.unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [searchKeyword, setSearchKeyword] = useState("");
   const [companies, setCompanies] = useState<DbCompanyListRow[]>([]);
   const [listLoading, setListLoading] = useState(false);
@@ -233,6 +282,7 @@ export default function CompaniesPage() {
 
   useEffect(() => {
     if (authLoading) return;
+    if (status === "loading") return;
     if (didRedirectRef.current) return;
 
     // ✅ login으로 보내는 조건은 "세션 없음(unauthenticated)" 하나만!
@@ -242,21 +292,23 @@ export default function CompaniesPage() {
       return;
     }
 
-    // ✅ 로그인은 됐는데 권한이 없으면 login으로 보내지 말고 home으로
-    if (status === "authenticated" && !has("companies.manage")) {
-      didRedirectRef.current = true;
-      alert("You do not have permission to manage companies.");
-      router.replace("/home");
+    // ✅ 로그인은 됐는데 권한이 없으면: 페이지는 열되 "읽기 전용"으로만 동작
+    if (status === "authenticated" && !canManageCompanies) {
+      setViewOnly(true);
+      // 최초 1회만 리스트 로딩
+      if (!didInitialLoadRef.current) {
+        didInitialLoadRef.current = true;
+        loadCompanyList("");
+      }
       return;
     }
-
-    // ✅ 정상 진입: 최초 1회만 리스트 로딩
+// ✅ 정상 진입: 최초 1회만 리스트 로딩
     if (status === "authenticated" && !didInitialLoadRef.current) {
       didInitialLoadRef.current = true;
       loadCompanyList("");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, status, router, has]);
+  }, [authLoading, status, router, has, canManageCompanies]);
 
   // ------- 리스트 로딩 / 검색 -------
   const loadCompanyList = async (keyword: string) => {
@@ -425,7 +477,7 @@ export default function CompaniesPage() {
         const { data: siteRows, error: siteErr } = await supabase
           .from("company_sites")
           .select(
-            "id, site_name, origin_code, country, city, address1, address2, phone, tax_id, bank_name, bank_account, account_holder_name, swift, currency, exporter_of_record, origin_country, is_default, air_port_loading, sea_port_loading"
+            "id, site_name, origin_code, country, city, state, address1, address2, phone, tax_id, bank_name, bank_account, account_holder_name, swift, currency, exporter_of_record, origin_country, is_default, air_port_loading, sea_port_loading"
           )
           .eq("company_id", companyId)
           .order("id", { ascending: true });
@@ -439,6 +491,7 @@ export default function CompaniesPage() {
             originCode: (s.origin_code || "KR_SEOUL") as ShippingOriginCode,
             country: s.country ?? "",
             city: s.city ?? "",
+            state: (s as any).state ?? "",
             address1: s.address1 ?? "",
             address2: s.address2 ?? "",
             phone: s.phone ?? "",
@@ -575,7 +628,11 @@ export default function CompaniesPage() {
   // ------- 저장 (/api/companies 사용) -------
   const onSave = async () => {
     setSaveMsg("");
-    setCodeError("");
+    if (status !== "authenticated") {
+      alert("Please sign in again.");
+      return;
+    }
+setCodeError("");
     setCodeSuggestion("");
 
     if (!form.companyName?.trim()) {
@@ -595,6 +652,7 @@ export default function CompaniesPage() {
                 originCode: s.originCode,
                 country: s.country,
                 city: s.city || null,
+                state: (s as any).state || null,
                 address1: s.address1 || null,
                 address2: s.address2 || null,
                 phone: s.phone || null,
@@ -706,7 +764,11 @@ export default function CompaniesPage() {
 
   // ------- 삭제 -------
   const onDelete = async () => {
-    if (!editingCompanyId) {
+    if (status !== "authenticated") {
+      alert("Please sign in again.");
+      return;
+    }
+if (!editingCompanyId) {
       alert("Select a company from the list to delete.");
       return;
     }
@@ -1350,14 +1412,13 @@ export default function CompaniesPage() {
                                 />
                                 <Label>State</Label>
                                 <Input
-                                  value={s.state ?? ""}
+                                  value={(s as any).state ?? ""}
                                   onChange={(e) =>
                                     upsertSite(s.id, {
                                       state: e.target.value,
                                     })
                                   }
                                 />
-
                                 <Label>Address 1</Label>
                                 <Input
                                   value={s.address1 ?? ""}
