@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
+import { toast } from "sonner";
 
 type WorkSheetHeader = {
   id: string;
@@ -310,6 +311,7 @@ function fmtWsRemarks(
 export default function WorkSheetDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  
   const id = params?.id;
 
   const [loading, setLoading] = React.useState(true);
@@ -884,57 +886,47 @@ export default function WorkSheetDetailPage() {
 
   const onConfirmActualCost = async (mode: "IN_HOUSE" | "OUTSOURCED") => {
     if (!id) return;
-    if (!activeLine) return;
-    if (confirmingActual) return;
-    if (activeActualLocked) return;
-
-    // ✅ guard: only allow confirm for current mode
-    if (resolvedProductionMode && mode !== resolvedProductionMode) return;
-
-    if (mode === "IN_HOUSE") {
-      if (!hasAnyActualUnitInput) {
-        toast({
-          title: "Enter Actual Unit first",
-          description:
-            "Materials 탭에서 Actual Unit을 최소 1개 이상 입력한 뒤 Confirm Actual을 눌러주세요.",
-        });
-        return;
-      }
-    } else {
-      // OUTSOURCED
-      if (!activeLine.vendor_id) {
-        toast({
-          title: "Select Vendor first",
-          description: "OUTSOURCED 모드에서는 Vendor를 먼저 선택해 주세요.",
-        });
-        return;
-      }
-    }
 
     try {
+      // guards
+      if (mode === "IN_HOUSE") {
+        if (!hasAnyActualUnitInput) {
+          toast.error("Enter Actual Unit first", {
+            description:
+              "Materials 탭에서 Actual Unit을 최소 1개 이상 입력한 뒤 Confirm Actual을 눌러주세요.",
+          });
+          return;
+        }
+      } else {
+        if (!activeLine?.vendor_id) {
+          toast.error("Select Vendor first", {
+            description: "OUTSOURCED 모드에서는 Vendor를 먼저 선택해 주세요.",
+          });
+          return;
+        }
+      }
+
       setConfirmingActual(true);
+
       const res = await fetch(`/api/work-sheets/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirm_actual_cost: true }),
       });
+
       const j = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(j?.error || "Failed to confirm actual cost");
-      }
-      // reload fresh
-      await loadAll(id);
-      toast({ title: "Actual confirmed", description: "Actual cost is now locked." });
+      if (!res.ok) throw new Error(j?.error || "Failed to confirm actual cost");
+
+      toast.success("Actual confirmed", { description: "Actual cost is now locked." });
     } catch (e: any) {
-      toast({
-        title: "Confirm failed",
+      toast.error("Confirm failed", {
         description: e?.message ?? "Server error",
-        variant: "destructive",
       });
     } finally {
       setConfirmingActual(false);
     }
   };
+
 
 
   const reqShipDate = fmtDate(po?.requested_ship_date ?? null);
@@ -1255,20 +1247,30 @@ export default function WorkSheetDetailPage() {
               const totalQty = (lines || []).reduce((s: number, ln: any) => s + (Number(ln?.qty) || 0), 0) || 0;
               const unitPrice = totalQty ? poSubtotal / totalQty : 0;
 
-              const specs = materialsByLineId?.[activeLineId] || [];
+              // activeLineId can be typed as string | null, so guard before indexing
+              const _lineId = (activeLineId ?? (activeLine as any)?.id ?? "") as string;
+              const specs = _lineId ? (materialsByLineId?.[_lineId] || []) : [];
               const plannedUnitCost = specs.reduce((s: number, sp: any) => {
-                const q = extractQtyFromNote(sp?.note);
-                const u = extractUnitCostFromNote(sp?.note);
-                return s + q * u;
-              }, 0);
+  const q = extractQtyFromNote(sp?.note) ?? 0;
+  const u = extractUnitCostFromNote(sp?.note) ?? 0;
+  return s + q * u;
+}, 0);
 
               const actualUnitCost = specs.reduce((s: number, sp: any) => {
-                const q = extractQtyFromNote(sp?.note);
-                const plannedU = extractUnitCostFromNote(sp?.note);
-                const raw = actualUnitInputBySpecId?.[sp?.id];
-                const au = raw != null && String(raw).trim() !== "" ? (parseDec4ToNumber(String(raw)) ?? plannedU) : plannedU;
-                return s + q * au;
-              }, 0);
+        const q = extractQtyFromNote(sp?.note) ?? 0;
+        const plannedU = extractUnitCostFromNote(sp?.note) ?? 0;
+
+        // avoid using null/undefined as an index type
+        const specId = String(sp?.id ?? "");
+        const raw = specId ? actualUnitInputBySpecId?.[specId] : undefined;
+
+        const au =
+          raw != null && String(raw).trim() !== ""
+            ? (parseDec4ToNumber(String(raw)) ?? plannedU)
+            : plannedU;
+
+        return s + q * au;
+      }, 0);
 
               const marginUnit = unitPrice - actualUnitCost;
               const marginPct = unitPrice ? (marginUnit / unitPrice) * 100 : 0;
@@ -1732,7 +1734,7 @@ export default function WorkSheetDetailPage() {
                                       ).filter((s) => !s.is_deleted);
                                       const totalPlanned = list.reduce(
                                         (acc, s) => {
-                                          const q = extractQtyFromNote(s.note);
+                                          const q = extractQtyFromNote(s.note) ?? 0;
                                           const u =
                                             extractUnitCostFromNote(s.note);
                                           if (q === null || u === null)
@@ -2063,7 +2065,7 @@ export default function WorkSheetDetailPage() {
                   </Tabs>
                 </>
               )}
-            </CardContent>
+              </CardContent>
           </Card>
         </div>
 
