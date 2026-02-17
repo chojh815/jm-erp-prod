@@ -22,9 +22,16 @@ type DevRole = AppRole;
 type Row = {
   id: string;
   po_no: string | null;
+  ws_no?: string | null;
   buyer_name: string | null;
   buyer_code: string | null;
-  currency: string | null;
+  buyer_style?: string | null;
+  jm_style?: string | null;
+  qty?: number | null;
+  lp_currency?: string | null;
+  lp_unit?: number | null;
+  production_mode?: string | null;
+  delivery_date?: string | null;
   status: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -35,6 +42,28 @@ function fmtDate(s: string | null) {
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
   return d.toISOString().slice(0, 10);
+}
+
+function fmtNum(n: any) {
+  if (n === null || n === undefined || n === "") return "-";
+  const v = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(v)) return "-";
+  return v.toLocaleString();
+}
+
+function fmtMoney(cur: any, n: any) {
+  if (n === null || n === undefined || n === "") return "-";
+  const v = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(v)) return "-";
+  // L.P currency is often missing in older rows; default to CNY rather than USD
+  const c = String(cur ?? "").trim() || "CNY";
+  return `${c} ${v.toFixed(2)}`;
+}
+
+function fmtMode(m?: string | null) {
+  const v = String(m ?? "").toUpperCase();
+  if (!v) return "-";
+  return v === "OUTSOURCED" ? "OUT" : v === "IN_HOUSE" ? "IN" : v;
 }
 
 function statusBadge(st?: string | null) {
@@ -109,7 +138,7 @@ export default function WorkSheetsPage() {
                 className="w-[280px]"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="Search PO / Buyer / Code"
+                placeholder="Search PO / WS / Buyer / Style"
               />
               <div className="w-[180px]">
                 <Select value={status} onValueChange={setStatus}>
@@ -140,23 +169,27 @@ export default function WorkSheetsPage() {
                 <thead className="bg-muted/60">
                   <tr>
                     <th className="p-2 text-left">PO No</th>
+                    <th className="p-2 text-left">WS No</th>
                     <th className="p-2 text-left">Buyer</th>
-                    <th className="p-2 text-left">Currency</th>
+                    <th className="p-2 text-left">Style</th>
+                    <th className="p-2 text-right">Qty</th>
+                    <th className="p-2 text-left">L.P</th>
+                    <th className="p-2 text-left">Mode</th>
+                    <th className="p-2 text-left">Delivery</th>
                     <th className="p-2 text-left">Status</th>
-                    <th className="p-2 text-left">Created</th>
                     <th className="p-2 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td className="p-4 text-muted-foreground" colSpan={6}>
+                      <td className="p-4 text-muted-foreground" colSpan={10}>
                         Loading...
                       </td>
                     </tr>
                   ) : rows.length === 0 ? (
                     <tr>
-                      <td className="p-4 text-muted-foreground" colSpan={6}>
+                      <td className="p-4 text-muted-foreground" colSpan={10}>
                         No work sheets.
                       </td>
                     </tr>
@@ -164,6 +197,7 @@ export default function WorkSheetsPage() {
                     rows.map((r) => (
                       <tr key={r.id} className="border-t">
                         <td className="p-2 font-medium">{r.po_no ?? "-"}</td>
+                        <td className="p-2">{r.ws_no ?? "-"}</td>
                         <td className="p-2">
                           {r.buyer_name ?? "-"}{" "}
                           {r.buyer_code ? (
@@ -172,9 +206,19 @@ export default function WorkSheetsPage() {
                             </span>
                           ) : null}
                         </td>
-                        <td className="p-2">{r.currency ?? "USD"}</td>
+                        <td className="p-2">
+                          <div className="leading-tight">
+                            <div className="font-medium">{r.buyer_style ?? "-"}</div>
+                            {r.jm_style ? (
+                              <div className="text-xs text-muted-foreground">{r.jm_style}</div>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="p-2 text-right tabular-nums">{fmtNum(r.qty)}</td>
+                        <td className="p-2 tabular-nums">{fmtMoney(r.lp_currency, r.lp_unit)}</td>
+                        <td className="p-2">{fmtMode(r.production_mode)}</td>
+                        <td className="p-2">{fmtDate(r.delivery_date ?? null)}</td>
                         <td className="p-2">{statusBadge(r.status)}</td>
-                        <td className="p-2">{fmtDate(r.created_at)}</td>
                         <td className="p-2 text-right">
                           <div className="inline-flex gap-2">
                             <Button

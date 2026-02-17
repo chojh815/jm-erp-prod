@@ -699,10 +699,29 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
     if (!isUuid(id)) return bad("Invalid id", 400);
 
     const body = await req.json().catch(() => null);
+
+    // ✅ Confirm Actual Cost (lock) - margin management
+    if (body?.confirm_actual_cost === true) {
+      const { error: lockErr } = await supabaseAdmin
+        .from("work_sheet_lines")
+        .update({ actual_cost_confirmed: true })
+        .eq("work_sheet_id", id);
+
+      if (lockErr) {
+        return NextResponse.json(
+          { success: false, error: lockErr.message },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({ success: true });
+    }
     if (!body) return bad("Invalid JSON body", 400);
 
     const headerPatch = body?.header ?? null;
     const linesPatch = Array.isArray(body?.lines) ? body.lines : [];
+
+    const materialsPatch = body?.materialsByLineId && typeof body.materialsByLineId === "object" ? body.materialsByLineId : null;
 
     // 1) header update
     if (headerPatch && typeof headerPatch === "object") {
@@ -811,16 +830,55 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
         const lineId = (lp as any)?.id;
         if (!isUuid(lineId)) continue;
 
-        const allowed = [
+        // ✅ Accept UI alias keys and normalize into DB column names.
+// UI uses Vendor Unit Price / Vendor Currency, but DB column is vendor_unit_cost_local + vendor_currency.
+// Also allow camelCase.
+const incoming: any = lp as any;
+if (!("vendor_unit_cost_local" in incoming)) {
+  const v = pickFirst(incoming, [
+    "vendor_unit_price",
+    "vendorUnitPrice",
+    "vendor_unit_price_local",
+    "vendorUnitPriceLocal",
+    "po_unit_price_vendor",
+  ]);
+  if (v !== null && v !== undefined && v !== "") (incoming as any).vendor_unit_cost_local = v;
+}
+if (!("vendor_currency" in incoming)) {
+  const c = pickFirst(incoming, [
+    "vendor_currency",
+    "vendorCurrency",
+    "vendor_currency_code",
+    "vendorCurrencyCode",
+  ]);
+  if (c !== null && c !== undefined && c !== "") (incoming as any).vendor_currency = c;
+}
+
+const allowed = [
           "work_notes",
           "qc_points",
           "packing_notes",
           "plating_spec",
           "spec_summary",
-          // ✅ vendor price fields (work_sheet_lines)
+
+          // ✅ production mode
+          "production_mode",
+
+          // ✅ planned vendor fields (work_sheet_lines)
           "vendor_id",
           "vendor_currency",
           "vendor_unit_cost_local",
+
+          // ✅ actual (post) vendor cost fields
+          "actual_vendor_unit_cost_local",
+          "actual_vendor_unit_cost_usd",
+          "actual_fx_rate",
+          "actual_fx_as_of",
+          "actual_fx_mode",
+          "actual_cost_confirmed",
+          "actual_cost_confirmed_at",
+          "actual_cost_confirmed_by",
+          "actual_cost_notes",
         ];
 
         const patch: any = {};
@@ -828,6 +886,64 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
           if (k in lp) patch[k] = (lp as any)[k];
         }
         patch.updated_at = new Date().toISOString();
+        // ✅ Safety: if production_mode is OUTSOURCED, vendor_id must exist (DB constraint may not exist yet)
+        // Also: if actual cost is CONFIRMED, lock actual fields (and prevent unconfirm).
+        const { data: existingLine, error: exErr } = await supabaseAdmin
+          .from("work_sheet_lines")
+          .select(
+            "id, production_mode, vendor_id, actual_cost_confirmed, actual_vendor_unit_cost_local, actual_vendor_unit_cost_usd, actual_fx_rate, actual_fx_as_of, actual_fx_mode, actual_cost_notes"
+          )
+          .eq("id", lineId)
+          .eq("work_sheet_id", id)
+          .maybeSingle();
+
+        if (exErr) return bad(exErr.message, 500);
+
+        const prevConfirmed = !!(existingLine as any)?.actual_cost_confirmed;
+
+        // If switching/being OUTSOURCED, require vendor_id
+        const nextMode = (patch as any).production_mode ?? (existingLine as any)?.production_mode ?? null;
+        const nextVendorId = ("vendor_id" in patch) ? (patch as any).vendor_id : (existingLine as any)?.vendor_id;
+
+        if (nextMode === "OUTSOURCED" && !nextVendorId) {
+          return bad("OUTSOURCED 라인은 vendor_id가 필수입니다.", 400);
+        }
+
+        if (prevConfirmed) {
+          // prevent unconfirm
+          if ("actual_cost_confirmed" in patch && !(patch as any).actual_cost_confirmed) {
+            return bad("Actual cost is already CONFIRMED and cannot be reverted.", 409);
+          }
+
+          const fields = [
+            "actual_vendor_unit_cost_local",
+            "actual_vendor_unit_cost_usd",
+            "actual_fx_rate",
+            "actual_fx_as_of",
+            "actual_fx_mode",
+            "actual_cost_notes",
+            "actual_cost_confirmed_at",
+            "actual_cost_confirmed_by",
+          ] as const;
+
+          for (const f of fields) {
+            if (!(f in patch)) continue;
+            const a = (patch as any)[f];
+            const b = (existingLine as any)?.[f];
+            if (String(a ?? "") !== String(b ?? "")) {
+              return bad("Actual cost is CONFIRMED. Actual fields are locked.", 409);
+            }
+          }
+        } else {
+          // if confirming now, set confirmed_at if missing
+          if ((patch as any).actual_cost_confirmed === true) {
+            if (!("actual_cost_confirmed_at" in patch) || !(patch as any).actual_cost_confirmed_at) {
+              (patch as any).actual_cost_confirmed_at = new Date().toISOString();
+            }
+          }
+        }
+
+
 
         // Defensive: if some columns don't exist yet, drop them and retry (prevents 500)
         let tries = 0;
@@ -857,6 +973,83 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
     }
 
     // 3) return fresh data (so UI keeps last values and feels like "update" not "reset")
+
+    // 3) materials actual patch (IN_HOUSE internal)
+    if (materialsPatch) {
+      // Flatten incoming spec updates
+      const updates: any[] = [];
+      for (const [lineId, arr] of Object.entries(materialsPatch as any)) {
+        if (!Array.isArray(arr)) continue;
+        for (const s of arr as any[]) {
+          if (!s || typeof s !== "object") continue;
+          if (!isUuid(s.id)) continue;
+          const u: any = {
+            id: s.id,
+            work_sheet_line_id: isUuid(s.work_sheet_line_id) ? s.work_sheet_line_id : lineId,
+            actual_qty: s.actual_qty ?? null,
+            actual_unit_cost: s.actual_unit_cost ?? null,
+            actual_note: s.actual_note ?? null,
+          };
+
+          // Only apply when at least one actual field is present
+          if (
+            u.actual_qty !== null ||
+            u.actual_unit_cost !== null ||
+            !isBlank(u.actual_note)
+          ) {
+            updates.push(u);
+          }
+        }
+      }
+
+      if (updates.length > 0) {
+        const lineIds = Array.from(new Set(updates.map((u) => u.work_sheet_line_id).filter(isUuid)));
+
+        // Lock policy: if a line is confirmed, block any actual edits
+        const { data: locked, error: lockErr } = await supabaseAdmin
+          .from("work_sheet_lines")
+          .select("id, actual_cost_confirmed")
+          .in("id", lineIds);
+
+        if (lockErr) throw new Error(lockErr.message);
+
+        const lockedSet = new Set(
+          (locked ?? [])
+            .filter((r: any) => !!r.actual_cost_confirmed)
+            .map((r: any) => r.id)
+        );
+
+        for (const u of updates) {
+          if (lockedSet.has(u.work_sheet_line_id)) {
+            return bad("Actual cost is CONFIRMED. Use revision flow.", 409);
+          }
+        }
+
+        // ✅ UPDATE-ONLY: never insert new rows here.
+// Some rows may have NOT NULL columns (e.g., material_name) that are not present in the payload,
+// so an UPSERT would try to INSERT and fail. We only update existing ids.
+for (const u of updates) {
+  const patch: any = {
+    updated_at: new Date().toISOString(),
+  };
+
+  // Only send fields that are explicitly provided (avoid overwriting with null unless intended)
+  if (u.actual_qty !== undefined) patch.actual_qty = u.actual_qty;
+  if (u.actual_unit_cost !== undefined) patch.actual_unit_cost = u.actual_unit_cost;
+  if (u.actual_note !== undefined)
+    patch.actual_note = isBlank(u.actual_note) ? null : safeText(u.actual_note);
+
+  const { error: upErr } = await supabaseAdmin
+    .from("work_sheet_material_specs")
+    .update(patch)
+    .eq("id", u.id)
+    .eq("work_sheet_line_id", u.work_sheet_line_id);
+
+  if (upErr) throw new Error(upErr.message);
+}
+      }
+    }
+
     const data = await loadAll(id);
     if (!data.header) return bad("Work sheet not found", 404);
 

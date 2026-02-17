@@ -40,9 +40,32 @@ function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
 function n(v: any, fallback = 0) {
+  if (v === null || v === undefined) return fallback;
+
+  // Supabase may return numeric/decimal as string. Also, some values can already be formatted with commas.
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return fallback;
+
+    // Remove thousands separators and any leading currency symbol.
+    const cleaned = s.replace(/[$,]/g, "");
+    const num = Number(cleaned);
+    return Number.isFinite(num) ? num : fallback;
+  }
+
   const num = Number(v);
   return Number.isFinite(num) ? num : fallback;
 }
+
+function toCents(v: any) {
+  const num = n(v, 0);
+  return Math.round(num * 100);
+}
+
+function fromCents(cents: number) {
+  return cents / 100;
+}
+
 
 // ---- image helpers ----
 function firstNonEmptyString(arr: any[]): string | null {
@@ -454,7 +477,7 @@ export async function GET(req: Request) {
     }
 
     // Line summary + TOTAL AMOUNT per header (best-effort)
-    const lineSummaryByHeader: Record<string, { lineCount: number; firstLine: any | null; totalAmount: number }> = {};
+    const lineSummaryByHeader: Record<string, { lineCount: number; firstLine: any | null; totalAmountCents: number }> = {};
 
     if (headerIds.length > 0) {
       const sumRes = await supabaseAdmin
@@ -472,7 +495,7 @@ export async function GET(req: Request) {
           if (!hid) continue;
 
           const bucket =
-            (lineSummaryByHeader[hid] ||= { lineCount: 0, firstLine: null, totalAmount: 0 });
+            (lineSummaryByHeader[hid] ||= { lineCount: 0, firstLine: null, totalAmountCents: 0 });
 
           bucket.lineCount += 1;
           if (!bucket.firstLine) bucket.firstLine = r;
@@ -483,24 +506,32 @@ export async function GET(req: Request) {
               ? n(r.amount, 0)
               : n(r.qty, 0) * n(r.unit_price, 0);
 
-          bucket.totalAmount += lineAmount;
+          bucket.totalAmountCents += toCents(lineAmount);
         }
       }
     }
 
     const items = headerRows.map((h) => {
-      const s = lineSummaryByHeader[h.id] ?? { lineCount: 0, firstLine: null, totalAmount: 0 };
+      const s = lineSummaryByHeader[h.id] ?? { lineCount: 0, firstLine: null, totalAmountCents: 0 };
       const fl = s.firstLine;
 
       const brandName =
         asText(h.buyer_brand_name) ||
         (h.buyer_brand_id ? asText(brandNameById[h.buyer_brand_id]) : "") ||
         "";
+      // ✅ 핵심: subtotal 기준을 "po_headers.subtotal"로 통일 (Grand Total과 1:1 일치)
+      // - header subtotal이 존재(>0 또는 0 포함)하면 그것을 우선 사용
+      // - 만약 header subtotal이 비어있거나(예: null) 계산이 불가능하면 라인 합계로 fallback
+      const headerSubtotalNum =
+        h.subtotal !== null && h.subtotal !== undefined ? n(h.subtotal, NaN) : NaN;
 
-      // ✅ 핵심: subtotal은 라인 합계(SUM)로 내려줌
-      // 라인이 1개라도 있으면 totalAmount를 신뢰 (합계가 0이어도 정상)
-      const headerSubtotal = h.subtotal !== null && h.subtotal !== undefined ? n(h.subtotal, 0) : 0;
-      const computedSubtotal = s.lineCount > 0 ? n(s.totalAmount, 0) : headerSubtotal;
+      const headerSubtotalCents = Number.isFinite(headerSubtotalNum) ? toCents(headerSubtotalNum) : null;
+      const lineSubtotalCents = s.lineCount > 0 ? s.totalAmountCents : null;
+
+      const subtotalCents =
+        headerSubtotalCents !== null ? headerSubtotalCents : lineSubtotalCents !== null ? lineSubtotalCents : 0;
+
+      const computedSubtotal = fromCents(subtotalCents);
 
       return {
         id: h.id,
@@ -544,23 +575,29 @@ export async function GET(req: Request) {
     });
 
     
-    // ---- Totals ----
+        // ---- Totals ----
     // Page subtotal: sum of current page items (changes by page)
-    const pageTotalsByCurrency: Record<string, number> = {};
+    // Use cents to avoid float drift and to tolerate comma-formatted numeric strings.
+    const pageTotalsByCurrencyCents: Record<string, number> = {};
     for (const it of items) {
       const cur = asText(it.currency).trim() || "";
-      const v = n((it as any).subtotal, 0);
-      pageTotalsByCurrency[cur] = n(pageTotalsByCurrency[cur], 0) + v;
+      const vCents = toCents((it as any).subtotal);
+      pageTotalsByCurrencyCents[cur] = (pageTotalsByCurrencyCents[cur] ?? 0) + vCents;
     }
-    const pageSubtotal = Object.values(pageTotalsByCurrency).reduce((a, b) => a + n(b, 0), 0);
+    const pageSubtotal = fromCents(Object.values(pageTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0));
+    const pageTotalsByCurrency: Record<string, number> = {};
+    for (const [cur, cents] of Object.entries(pageTotalsByCurrencyCents)) {
+      pageTotalsByCurrency[cur] = fromCents(cents ?? 0);
+    }
+
 
     // Grand total: sum of ALL matching rows (does NOT change by page)
     async function computeGrandTotals(): Promise<{
       grandTotal: number;
       grandTotalsByCurrency: Record<string, number>;
     }> {
-      const grandTotalsByCurrency: Record<string, number> = {};
-      if (!count || count <= 0) return { grandTotal: 0, grandTotalsByCurrency };
+      const grandTotalsByCurrencyCents: Record<string, number> = {};
+      if (!count || count <= 0) return { grandTotal: 0, grandTotalsByCurrency: {} };
 
       const CHUNK = 1000;
 
@@ -599,8 +636,8 @@ export async function GET(req: Request) {
         if (hdrChunkRes.error) {
           // fail-safe: return what we have so far (but still allow list to work)
           return {
-            grandTotal: Object.values(grandTotalsByCurrency).reduce((a, b) => a + n(b, 0), 0),
-            grandTotalsByCurrency,
+            grandTotal: fromCents(Object.values(grandTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0)),
+            grandTotalsByCurrency: Object.fromEntries(Object.entries(grandTotalsByCurrencyCents).map(([k,v])=>[k, fromCents(v??0)])),
           };
         }
 
@@ -615,7 +652,7 @@ export async function GET(req: Request) {
         }
 
         // Line totals for these headers (amount 우선, 없으면 qty*unit_price)
-        const lineSumByHeader: Record<string, number> = {};
+        const lineSumByHeaderCents: Record<string, number> = {};
         const lineCountByHeader: Record<string, number> = {};
 
         if (ids.length > 0) {
@@ -635,7 +672,7 @@ export async function GET(req: Request) {
                 r.amount !== null && r.amount !== undefined
                   ? n(r.amount, 0)
                   : n(r.qty, 0) * n(r.unit_price, 0);
-              lineSumByHeader[hid] = n(lineSumByHeader[hid], 0) + lineAmount;
+              lineSumByHeaderCents[hid] = (lineSumByHeaderCents[hid] ?? 0) + toCents(lineAmount);
             }
           }
         }
@@ -645,16 +682,15 @@ export async function GET(req: Request) {
         // - else: fallback to header.subtotal
         for (const hid of ids) {
           const hasLines = n(lineCountByHeader[hid], 0) > 0;
-          const computed = hasLines ? n(lineSumByHeader[hid], 0) : n(headerSubtotalById[hid], 0);
+          const computedCents = hasLines ? (lineSumByHeaderCents[hid] ?? 0) : toCents(headerSubtotalById[hid]);
           const cur = asText(currencyById[hid]).trim() || "";
-          grandTotalsByCurrency[cur] = n(grandTotalsByCurrency[cur], 0) + computed;
+          grandTotalsByCurrencyCents[cur] = (grandTotalsByCurrencyCents[cur] ?? 0) + computedCents;
         }
       }
 
-      return {
-        grandTotal: Object.values(grandTotalsByCurrency).reduce((a, b) => a + n(b, 0), 0),
-        grandTotalsByCurrency,
-      };
+      const grandTotal = fromCents(Object.values(grandTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0));
+      const grandTotalsByCurrency = Object.fromEntries(Object.entries(grandTotalsByCurrencyCents).map(([k,v])=>[k, fromCents(v??0)]));
+      return { grandTotal, grandTotalsByCurrency };
     }
 
     const grand = await computeGrandTotals();

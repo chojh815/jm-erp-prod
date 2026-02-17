@@ -10,7 +10,9 @@
  * 5) IMPORTANT: Hide "broken" rows (missing po_no / buyer_id) so UI won't show '-' rows.
  *
  * Query params:
- * - q: search by po_no / buyer_name / buyer_code
+ * - q: search by po_no / buyer_name / buyer_code / work_sheet_no (ws_no)
+ *      + buyer_style_no (header) + buyer_style (line)
+ *      + jm_style_no (line)
  * - status: ALL | DRAFT | ... (case-insensitive)
  * - all=1 : return all rows (no dedupe)
  * - include_empty=1 : include rows with missing po_no/buyer_id (default: hidden)
@@ -55,12 +57,34 @@ export async function GET(req: Request) {
       query = query.eq("status", status);
     }
 
+    // --- If q includes style keywords, we also search lines (buyer_style / jm_style_no) ---
+    let styleMatchWsIds: string[] = [];
     if (qRaw) {
-      // Keep it simple: search stable columns only.
       const q = qRaw.replace(/,/g, " ").trim();
+
+      // 1) Header-side search (PO / Buyer / Code / WS No / Buyer Style No)
       query = query.or(
-        `po_no.ilike.%${q}%,buyer_name.ilike.%${q}%,buyer_code.ilike.%${q}%`
+        `po_no.ilike.%${q}%,buyer_name.ilike.%${q}%,buyer_code.ilike.%${q}%,work_sheet_no.ilike.%${q}%,ws_no.ilike.%${q}%,buyer_style_no.ilike.%${q}%`
       );
+
+      // 2) Line-side search (Buyer Style / JM Style)
+      // NOTE: We do this in a separate query and merge in-memory for simplicity & safety.
+      const { data: lineHits, error: lineHitErr } = await supabaseAdmin
+        .from("work_sheet_lines")
+        .select("work_sheet_id")
+        .eq("is_deleted", false)
+        .or(`buyer_style.ilike.%${q}%,jm_style_no.ilike.%${q}%`)
+        .limit(500);
+
+      if (!lineHitErr && Array.isArray(lineHits)) {
+        styleMatchWsIds = Array.from(
+          new Set(
+            lineHits
+              .map((x: any) => safeTrim(x?.work_sheet_id))
+              .filter((x: string) => x)
+          )
+        );
+      }
     }
 
     const { data, error } = await query
@@ -70,6 +94,30 @@ export async function GET(req: Request) {
     if (error) return bad(error.message, 500);
 
     let rows: any[] = Array.isArray(data) ? data : [];
+
+    // Merge-in rows that matched only on line-side style search.
+    if (qRaw && styleMatchWsIds.length > 0) {
+      const existing = new Set(rows.map((r: any) => safeTrim(r?.id)).filter(Boolean));
+      const missingIds = styleMatchWsIds.filter((id) => !existing.has(id));
+      if (missingIds.length > 0) {
+        const { data: more, error: moreErr } = await supabaseAdmin
+          .from("work_sheet_headers")
+          .select("*")
+          .eq("is_deleted", false)
+          .in("id", missingIds)
+          .order("created_at", { ascending: false })
+          .limit(500);
+        if (!moreErr && Array.isArray(more) && more.length > 0) {
+          rows = [...rows, ...more];
+          // keep newest first
+          rows.sort((a: any, b: any) => {
+            const ta = new Date(a?.created_at ?? 0).getTime();
+            const tb = new Date(b?.created_at ?? 0).getTime();
+            return tb - ta;
+          });
+        }
+      }
+    }
 
     // --- NEW: Filter out rows whose PO is deleted ---
     try {
@@ -185,15 +233,134 @@ export async function GET(req: Request) {
       out = deduped;
     }
 
-    // Provide camelCase aliases too (helps if UI accidentally expects camelCase)
-    const normalized = out.map((r: any) => ({
-      ...r,
-      poNo: r.po_no,
-      buyerName: r.buyer_name,
-      buyerCode: r.buyer_code,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at,
-    }));
+    // --- Attach line-derived fields for list display (style/qty/lp/mode) ---
+    const wsIds = Array.from(
+      new Set(out.map((r: any) => safeTrim(r?.id)).filter((x: string) => x))
+    );
+
+    // Aggregate per WS because one PO can have multiple lines/styles
+    let aggMap = new Map<
+      string,
+      {
+        qty: number;
+        buyer_style: string | null;
+        jm_style: string | null;
+        lp_unit: number | null;
+        lp_currency: string | null;
+        production_mode: string | null;
+        vendor_id: string | null;
+      }
+    >();
+    if (wsIds.length > 0) {
+      const { data: lines, error: lErr } = await supabaseAdmin
+        .from("work_sheet_lines")
+        .select(
+          "work_sheet_id, jm_style_no, buyer_style, qty, vendor_id, vendor_currency, vendor_unit_cost_local, production_mode, created_at, is_deleted"
+        )
+        // older rows can have is_deleted NULL -> treat as not deleted
+        .or("is_deleted.is.null,is_deleted.eq.false")
+        .in("work_sheet_id", wsIds)
+        .order("created_at", { ascending: true })
+        .limit(2000);
+
+      if (!lErr && Array.isArray(lines)) {
+        for (const ln of lines) {
+          const wid = safeTrim((ln as any)?.work_sheet_id);
+          if (!wid) continue;
+
+          const cur =
+            aggMap.get(wid) ??
+            {
+              qty: 0,
+              buyer_style: null,
+              jm_style: null,
+              lp_unit: null,
+              lp_currency: null,
+              production_mode: null,
+              vendor_id: null,
+            };
+
+          const qn =
+            typeof (ln as any)?.qty === "number"
+              ? (ln as any).qty
+              : Number((ln as any)?.qty);
+          if (Number.isFinite(qn)) cur.qty += qn;
+
+          const bs = safeTrim((ln as any)?.buyer_style);
+          if (!cur.buyer_style && bs) cur.buyer_style = bs;
+
+          const js = safeTrim((ln as any)?.jm_style_no);
+          if (!cur.jm_style && js) cur.jm_style = js;
+
+          const vid = safeTrim((ln as any)?.vendor_id);
+          if (!cur.vendor_id && vid) cur.vendor_id = vid;
+
+          const lp =
+            typeof (ln as any)?.vendor_unit_cost_local === "number"
+              ? (ln as any).vendor_unit_cost_local
+              : Number((ln as any)?.vendor_unit_cost_local);
+          if (cur.lp_unit == null && Number.isFinite(lp)) {
+            cur.lp_unit = lp;
+            const c = safeTrim((ln as any)?.vendor_currency);
+            // If currency missing but LP exists, default to CNY (your vendor majority)
+            cur.lp_currency = c || "CNY";
+          }
+
+          const pm = safeTrim((ln as any)?.production_mode);
+          if (!cur.production_mode && pm) cur.production_mode = pm;
+
+          aggMap.set(wid, cur);
+        }
+      }
+    }
+
+    // Provide camelCase aliases + derived list fields
+    const normalized = out.map((r: any) => {
+      const a = aggMap.get(safeTrim(r?.id)) || null;
+
+      const wsNo = safeTrim(r?.work_sheet_no) || safeTrim(r?.ws_no) || null;
+      const buyerStyle =
+        safeTrim(r?.buyer_style_no) || safeTrim(a?.buyer_style) || null;
+      const jmStyle = safeTrim(a?.jm_style) || null;
+      const qty = a ? a.qty : null;
+
+      const modeRaw = safeTrim(a?.production_mode) || safeTrim(r?.production_mode) || "";
+      const mode = modeRaw || (a?.vendor_id ? "OUTSOURCED" : "IN_HOUSE");
+
+      const lpUnit =
+        typeof (a as any)?.lp_unit === "number"
+          ? (a as any).lp_unit
+          : typeof r?.vendor_unit_cost_local === "number"
+            ? r.vendor_unit_cost_local
+            : null;
+
+      const lpCurRaw =
+        safeTrim((a as any)?.lp_currency) || safeTrim(r?.vendor_currency) || "";
+      // If currency missing but LP exists, default to CNY (avoid silently forcing USD)
+      const lpCur = lpCurRaw || (lpUnit != null ? "CNY" : "");
+
+      const delivery = safeTrim(r?.requested_ship_date) || null;
+
+      return {
+        ...r,
+        // camel
+        poNo: r.po_no,
+        buyerName: r.buyer_name,
+        buyerCode: r.buyer_code,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+
+        // list-friendly derived fields
+        ws_no: wsNo,
+        buyer_style: buyerStyle,
+        jm_style: jmStyle,
+        qty,
+        lp_currency: lpCur || null,
+        lp_unit: lpUnit,
+        production_mode: mode,
+        delivery_date: delivery,
+      };
+    });
 
     const debug = debugOn
       ? {

@@ -528,6 +528,14 @@ export default function PurchaseOrderListPage() {
       if (dateFrom) params.set("dateFrom", dateFrom);
       if (dateTo) params.set("dateTo", dateTo);
 
+      // ✅ keep pagination consistent with sorting: let server sort before paging
+      params.set("s1Field", s1Field);
+      params.set("s1Dir", s1Dir);
+      params.set("s2Field", s2Field);
+      params.set("s2Dir", s2Dir);
+      params.set("s3Field", s3Field);
+      params.set("s3Dir", s3Dir);
+
       const res = await fetch(`/api/orders/list?${params.toString()}`);
       const json = await safeJson<any>(res);
 
@@ -632,12 +640,10 @@ export default function PurchaseOrderListPage() {
   const handlePrev = () => page > 1 && fetchList(page - 1);
   const handleNext = () => page < totalPages && fetchList(page + 1);
 
-  // ✅ Multi Sorted view
-  const sortedItems = useMemo(() => {
-    return multiSortItems(items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
-  }, [items, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir]);
+  // ✅ items are already sorted by server (to keep pagination consistent)
+  const sortedItems = useMemo(() => items, [items]);
 
-    
+
   // ---------- fetch ALL headers for export (ignores pagination) ----------
   async function fetchAllHeadersForExport(): Promise<PoHeaderItem[]> {
     const all: PoHeaderItem[] = [];
@@ -652,6 +658,14 @@ export default function PurchaseOrderListPage() {
       if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
       if (dateFrom) params.set("dateFrom", dateFrom);
       if (dateTo) params.set("dateTo", dateTo);
+
+      // keep same sorting as screen
+      params.set("s1Field", s1Field);
+      params.set("s1Dir", s1Dir);
+      params.set("s2Field", s2Field);
+      params.set("s2Dir", s2Dir);
+      params.set("s3Field", s3Field);
+      params.set("s3Dir", s3Dir);
 
       const res = await fetch(`/api/orders/list?${params.toString()}`);
       const json = await safeJson<any>(res);
@@ -912,12 +926,14 @@ export default function PurchaseOrderListPage() {
     const nf2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     let totalLines = 0;
+    let totalPOs = 0;
 
     try {
       let grandSum = 0;
 
       const allHeaders = await fetchAllHeadersForExport();
       const allSorted = multiSortItems(allHeaders, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
+      totalPOs = allSorted.length;
 
       for (const it of allSorted) {
         const lines = await fetchLinesForHeaderId(it.id);
@@ -1054,7 +1070,7 @@ export default function PurchaseOrderListPage() {
 
     doc.setFontSize(9);
     doc.text(
-      `Sort: ${sortLabel} | Total: ${sortedItems.length} POs / ${totalLines} Lines`,
+      `Sort: ${sortLabel} | Total: ${totalPOs} POs / ${totalLines} Lines`,
       40,
       58
     );
@@ -1389,7 +1405,7 @@ export default function PurchaseOrderListPage() {
                   </thead>
 
                   <tbody>
-                    {sortedItems.length === 0 && !loading && (
+                    {items.length === 0 && !loading && (
                       <tr>
                         <td colSpan={11} className="px-4 py-6 text-center text-slate-400">
                           No purchase orders found.
@@ -1456,14 +1472,37 @@ export default function PurchaseOrderListPage() {
                   Page Subtotal:{" "}
                   <span className="font-semibold">
                     {(() => {
-                      // current page subtotal (changes by page)
-                      const nums = sortedItems
-                        .map((x) => (typeof x.subtotal === "number" ? x.subtotal : 0))
-                        .filter((n) => Number.isFinite(n));
-                      const sum = nums.reduce((a, b) => a + b, 0);
-                      const curSet = new Set(sortedItems.map((x) => (x.currency ?? "").trim()).filter(Boolean));
-                      const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
-                      return (curLabel ? `${curLabel} ` : "") + fmtMoney2(sum);
+                      // Page subtotal should match server logic (pageTotalsByCurrency).
+                      const entries = Object.entries(pageTotalsByCurrency ?? {}).filter(
+                        ([cur, val]) => !!cur && typeof val === "number" && Number.isFinite(val)
+                      );
+
+                      if (entries.length === 0) {
+                        // Fallback: sum visible rows (should be rare)
+                        const sum = items.reduce(
+                          (acc, it) =>
+                            acc +
+                            (typeof it.subtotal === "number" && Number.isFinite(it.subtotal)
+                              ? it.subtotal
+                              : 0),
+                          0
+                        );
+                        const curLabel = items.length === 0 ? "" : "MIX";
+                        return (curLabel ? `${curLabel} ` : "") + fmtMoney2(sum);
+                      }
+
+                      if (entries.length === 1) {
+                        const [cur, val] = entries[0] as [string, number];
+                        return `${cur} ${fmtMoney2(val)}`;
+                      }
+
+                      // Multi-currency: show compact "USD 1,000.00 / CNY 2,000.00"
+                      const shown = entries
+                        .slice(0, 3)
+                        .map(([cur, val]) => `${cur} ${fmtMoney2(val as number)}`)
+                        .join(" / ");
+                      const more = entries.length > 3 ? ` (+${entries.length - 3})` : "";
+                      return `${shown}${more}`;
                     })()}
                   </span>
                 </div>

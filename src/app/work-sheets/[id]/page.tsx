@@ -76,6 +76,20 @@ type WorkSheetLine = {
   vendor_currency?: string | null;
   vendor_unit_cost_local?: number | null;
 
+  // ✅ Production cost mode & actual (post) cost
+  production_mode?: "IN_HOUSE" | "OUTSOURCED" | null;
+
+  actual_vendor_unit_cost_local?: number | null;
+  actual_vendor_unit_cost_usd?: number | null;
+  actual_fx_rate?: number | null;
+  actual_fx_as_of?: string | null;
+  actual_fx_mode?: string | null;
+
+  actual_cost_confirmed?: boolean;
+  actual_cost_confirmed_at?: string | null;
+  actual_cost_confirmed_by?: string | null;
+  actual_cost_notes?: string | null;
+
   is_deleted?: boolean;
 };
 
@@ -103,6 +117,11 @@ type WorkSheetMaterialSpec = {
   note: string | null;
   sort_order: number;
   is_deleted?: boolean;
+
+  // ✅ IN_HOUSE internal-only post cost inputs
+  actual_qty?: number | null;
+  actual_unit_cost?: number | null;
+  actual_note?: string | null;
 };
 
 type ApiGetResponse = {
@@ -124,6 +143,75 @@ function nnum(v: any, fallback = 0) {
 function toStr(v: any) {
   return v === null || v === undefined ? "" : String(v);
 }
+
+function nnumNullable(v: any): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isNaN(n) ? null : n;
+}
+
+// ✅ decimal helpers (allow up to 4 decimals while typing)
+const DEC4_RE = /^\d*(\.\d{0,4})?$/;
+function normalizeDec4Input(raw: string): string {
+  const v0 = (raw ?? "").trim();
+  if (v0 === "") return "";
+
+  // keep digits and dots only
+  let v = v0.replace(/[^0-9.]/g, "");
+
+  // allow leading dot: ".5" -> "0.5"
+  if (v.startsWith(".")) v = "0" + v;
+
+  // keep only the first dot
+  const firstDot = v.indexOf(".");
+  if (firstDot >= 0) {
+    const intPart = v.slice(0, firstDot);
+    const rest = v.slice(firstDot + 1).replace(/\./g, "");
+    const decPart = rest.slice(0, 4);
+    // if user is typing trailing dot, preserve it ("1.")
+    if (v.endsWith(".") && rest.length === 0) return intPart + ".";
+    return decPart.length ? `${intPart}.${decPart}` : `${intPart}.`;
+  }
+
+  // no dot
+  return v;
+}
+function parseDec4ToNumber(raw: string): number | null {
+  const v = (raw ?? "").trim();
+  if (v === "" || v === "." || v === "-") return null;
+  const n = Number(v);
+  if (Number.isNaN(n)) return null;
+  // round to 4 decimals max to keep consistent
+  return Math.round(n * 10000) / 10000;
+}
+
+// ✅ decimal helpers (allow up to 2 decimals while typing) - for vendor subcontract price
+const DEC2_RE = /^\d*(\.\d{0,2})?$/;
+function normalizeDec2Input(raw: string): string {
+  const v0 = (raw ?? "").trim();
+  if (v0 === "") return "";
+
+  let v = v0.replace(/[^0-9.]/g, "");
+  if (v.startsWith(".")) v = "0" + v;
+
+  const firstDot = v.indexOf(".");
+  if (firstDot >= 0) {
+    const intPart = v.slice(0, firstDot);
+    const rest = v.slice(firstDot + 1).replace(/\./g, "");
+    const decPart = rest.slice(0, 2);
+    if (v.endsWith(".") && rest.length === 0) return intPart + ".";
+    return decPart.length ? `${intPart}.${decPart}` : `${intPart}.`;
+  }
+  return v;
+}
+function parseDec2ToNumber(raw: string): number | null {
+  const v = (raw ?? "").trim();
+  if (v === "" || v === ".") return null;
+  const n = Number(v);
+  if (Number.isNaN(n)) return null;
+  return Math.round(n * 100) / 100;
+}
+
 function safeArray(v: any): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v.map(String);
@@ -198,10 +286,17 @@ function stripQtyCostTokens(note?: string | null): string {
 function fmtMoney(v: any): string {
   const n = Number(v);
   if (!Number.isFinite(n)) return "";
-  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
 }
 
-function fmtWsRemarks(specText?: string | null, color?: string | null, note?: string | null): string {
+function fmtWsRemarks(
+  specText?: string | null,
+  color?: string | null,
+  note?: string | null
+): string {
   const parts: string[] = [];
   const st = (specText ?? "").toString().trim();
   const c = (color ?? "").toString().trim();
@@ -219,17 +314,46 @@ export default function WorkSheetDetailPage() {
 
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
+  const [confirmingActual, setConfirmingActual] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   const [header, setHeader] = React.useState<WorkSheetHeader | null>(null);
   // ✅ Keep header notes in dedicated state to prevent race-condition overwrites
-  const [specialInstructions, setSpecialInstructions] = React.useState<string>("");
+  const [specialInstructions, setSpecialInstructions] =
+    React.useState<string>("");
   const [internalNotes, setInternalNotes] = React.useState<string>("");
   const [po, setPo] = React.useState<any>(null);
+
+  const [uiView, setUiView] = React.useState<"vendor" | "internal">(() => {
+    if (typeof window === "undefined") return "internal";
+    const v = window.localStorage.getItem("ws_ui_view");
+    return v === "vendor" || v === "internal" ? v : "internal";
+  });
+  const isInternalView = uiView === "internal";
+  React.useEffect(() => {
+    try {
+      window.localStorage.setItem("ws_ui_view", uiView);
+    } catch {}
+  }, [uiView]);
 
   const [lines, setLines] = React.useState<WorkSheetLine[]>([]);
   const [materialsByLineId, setMaterialsByLineId] = React.useState<
     Record<string, WorkSheetMaterialSpec[]>
+  >({});
+
+  // ✅ Actual Unit input raw string map (to allow typing decimals like "0." without losing ".")
+  const [actualUnitInputBySpecId, setActualUnitInputBySpecId] = React.useState<
+    Record<string, string>
+  >({});
+
+  // ✅ vendor subcontract price raw input per line (keep string while typing)
+  const [vendorUnitInputByLineId, setVendorUnitInputByLineId] = React.useState<
+    Record<string, string>
+  >({});
+
+  // Vendor Actual Unit Cost input (keep raw string while typing)
+  const [vendorActualUnitInputByLineId, setVendorActualUnitInputByLineId] = React.useState<
+    Record<string, string>
   >({});
 
   // Vendors (Subcontractors) for Work Sheet line
@@ -305,6 +429,47 @@ export default function WorkSheetDetailPage() {
     return lines.find((l) => l.id === activeLineId) ?? null;
   }, [lines, activeLineId]);
 
+  // ✅ resolved production mode (prevents Actual columns disappearing when production_mode is null)
+  const resolvedProductionMode = React.useMemo(() => {
+    if (!activeLine) return null;
+    return (
+      (activeLine.production_mode as any) ??
+      (activeLine.vendor_id ? "OUTSOURCED" : "IN_HOUSE")
+    );
+  }, [activeLine]);
+
+  // ✅ keep raw input strings in sync when switching lines / loading materials
+  React.useEffect(() => {
+    if (!activeLine?.id) return;
+    const list = materialsByLineId[activeLine.id] ?? [];
+    setActualUnitInputBySpecId((prev) => {
+      const next = { ...prev };
+      for (const s of list) {
+        const id = (s as any)?.id;
+        if (!id) continue;
+        const n = (s as any).actual_unit_cost;
+        // only seed if not already typed
+        if (next[id] === undefined)
+          next[id] = n === null || n === undefined ? "" : String(n);
+      }
+      return next;
+    });
+  }, [activeLine?.id, materialsByLineId]);
+
+  // ✅ keep vendor subcontract price raw input in sync when switching lines
+  React.useEffect(() => {
+    if (!activeLine?.id) return;
+    const id = activeLine.id;
+    const n = (activeLine as any).vendor_unit_cost_local as number | null | undefined;
+    setVendorUnitInputByLineId((prev) => {
+      if (prev[id] !== undefined) return prev;
+      return {
+        ...prev,
+        [id]: n === null || n === undefined ? "" : String(n),
+      };
+    });
+  }, [activeLine?.id]);
+
   const lastSavedHashRef = React.useRef<string>("");
   const didInitRef = React.useRef(false);
 
@@ -366,9 +531,7 @@ export default function WorkSheetDetailPage() {
         throw new Error(json?.error || "Load failed");
 
       const h = (json.header ?? null) as WorkSheetHeader | null;
-      const l = (json.lines ?? []).filter(
-        (x) => !x.is_deleted
-      ) as WorkSheetLine[];
+      const l = (json.lines ?? []).filter((x) => !x.is_deleted) as WorkSheetLine[];
       const m = (json.materialsByLineId ??
         {}) as Record<string, WorkSheetMaterialSpec[]>;
       const p = (json.po ?? null) as any;
@@ -383,7 +546,11 @@ export default function WorkSheetDetailPage() {
       setHeader(h);
       // ✅ Load notes from header (authoritative) into dedicated state
       setSpecialInstructions(
-        ((h as any)?.special_instructions ?? (h as any)?.general_notes ?? "").toString()
+        (
+          (h as any)?.special_instructions ??
+          (h as any)?.general_notes ??
+          ""
+        ).toString()
       );
       setInternalNotes(
         (
@@ -396,6 +563,24 @@ export default function WorkSheetDetailPage() {
       setPo(p);
       setLines(l);
       setMaterialsByLineId(m);
+
+      // ✅ init vendor input maps from loaded lines (so inputs show existing values)
+      setVendorUnitInputByLineId(() => {
+        const out: Record<string, string> = {};
+        (l || []).forEach((ln: any) => {
+          const v = ln?.vendor_unit_cost_local;
+          out[ln.id] = v === null || v === undefined ? "" : String(v);
+        });
+        return out;
+      });
+      setVendorActualUnitInputByLineId(() => {
+        const out: Record<string, string> = {};
+        (l || []).forEach((ln: any) => {
+          const v = ln?.actual_vendor_unit_cost_local;
+          out[ln.id] = v === null || v === undefined ? "" : String(v);
+        });
+        return out;
+      });
 
       // ✅ activeLineId: 기존 유지, 없으면 첫 라인
       setActiveLineId((prev) => {
@@ -470,6 +655,14 @@ export default function WorkSheetDetailPage() {
         alert("JM Style No 는 필수입니다.");
         return;
       }
+
+      const mode = (l as any)?.production_mode ?? "OUTSOURCED";
+      if (mode === "OUTSOURCED" && !(l as any)?.vendor_id) {
+        alert(
+          `OUTSOURCED 라인은 Vendor/Subcontractor가 필수입니다.\n(Style: ${(l as any)?.jm_style_no ?? "-"})`
+        );
+        return;
+      }
     }
 
     setSaving(true);
@@ -515,6 +708,16 @@ export default function WorkSheetDetailPage() {
           vendor_id: l.vendor_id ?? null,
           vendor_currency: l.vendor_currency ?? null,
           vendor_unit_cost_local: l.vendor_unit_cost_local ?? null,
+
+          production_mode: (l as any).production_mode ?? null,
+
+          actual_vendor_unit_cost_local:
+            (l as any).actual_vendor_unit_cost_local ?? null,
+          actual_vendor_unit_cost_usd:
+            (l as any).actual_vendor_unit_cost_usd ?? null,
+          actual_fx_rate: (l as any).actual_fx_rate ?? null,
+          actual_fx_as_of: (l as any).actual_fx_as_of ?? null,
+          actual_fx_mode: (l as any).actual_fx_mode ?? null,
         })),
 
         materialsByLineId: Object.fromEntries(
@@ -533,6 +736,9 @@ export default function WorkSheetDetailPage() {
               note: s.note ?? null,
               sort_order: nnum(s.sort_order, 0),
               is_deleted: !!s.is_deleted,
+              actual_qty: (s as any).actual_qty ?? null,
+              actual_unit_cost: (s as any).actual_unit_cost ?? null,
+              actual_note: (s as any).actual_note ?? null,
             })),
           ])
         ),
@@ -548,8 +754,7 @@ export default function WorkSheetDetailPage() {
       if (!res.ok || !json?.success)
         throw new Error(json?.error || "Save failed");
 
-      const incomingHeader = (json.header ??
-        null) as WorkSheetHeader | null;
+      const incomingHeader = (json.header ?? null) as WorkSheetHeader | null;
       const incomingLines = (json.lines ?? []).filter(
         (l: any) => !l.is_deleted
       ) as WorkSheetLine[];
@@ -647,14 +852,99 @@ export default function WorkSheetDetailPage() {
     }
   }
 
+  const anyActualLocked = React.useMemo(() => {
+    try {
+      return (lines || []).some((ln: any) => Boolean(ln?.actual_cost_confirmed));
+    } catch {
+      return false;
+    }
+  }, [lines])
+
+  const activeActualLocked = React.useMemo(() => {
+    try {
+      return Boolean((activeLine as any)?.actual_cost_confirmed);
+    } catch {
+      return false;
+    }
+  }, [activeLine]);
+
+
+  const hasAnyActualUnitInput = React.useMemo(() => {
+    try {
+      const lineId = activeLine?.id ?? null;
+      const specs = (lineId ? materialsByLineId?.[lineId] : []) || [];
+      return (specs as any[]).some((sp: any) => {
+        const raw = (actualUnitInputBySpecId as any)?.[sp?.id];
+        return raw != null && String(raw).trim() !== "";
+      });
+    } catch {
+      return false;
+    }
+  }, [materialsByLineId, activeLine?.id, actualUnitInputBySpecId]);
+
+  const onConfirmActualCost = async (mode: "IN_HOUSE" | "OUTSOURCED") => {
+    if (!id) return;
+    if (!activeLine) return;
+    if (confirmingActual) return;
+    if (activeActualLocked) return;
+
+    // ✅ guard: only allow confirm for current mode
+    if (resolvedProductionMode && mode !== resolvedProductionMode) return;
+
+    if (mode === "IN_HOUSE") {
+      if (!hasAnyActualUnitInput) {
+        toast({
+          title: "Enter Actual Unit first",
+          description:
+            "Materials 탭에서 Actual Unit을 최소 1개 이상 입력한 뒤 Confirm Actual을 눌러주세요.",
+        });
+        return;
+      }
+    } else {
+      // OUTSOURCED
+      if (!activeLine.vendor_id) {
+        toast({
+          title: "Select Vendor first",
+          description: "OUTSOURCED 모드에서는 Vendor를 먼저 선택해 주세요.",
+        });
+        return;
+      }
+    }
+
+    try {
+      setConfirmingActual(true);
+      const res = await fetch(`/api/work-sheets/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm_actual_cost: true }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(j?.error || "Failed to confirm actual cost");
+      }
+      // reload fresh
+      await loadAll(id);
+      toast({ title: "Actual confirmed", description: "Actual cost is now locked." });
+    } catch (e: any) {
+      toast({
+        title: "Confirm failed",
+        description: e?.message ?? "Server error",
+        variant: "destructive",
+      });
+    } finally {
+      setConfirmingActual(false);
+    }
+  };
+
+
   const reqShipDate = fmtDate(po?.requested_ship_date ?? null);
   const deliveryDueDate = addDaysYmd(po?.requested_ship_date ?? null, -7);
   const brand = toStr(po?.buyer_brand_name ?? "").trim();
   const dept = toStr(po?.buyer_dept_name ?? "").trim();
   const brandDept = [brand, dept].filter(Boolean).join(" / ");
 
+  // ✅ requiredRoles 제거 (AppShellProps에 없어서 빌드 에러)
   return (
-    // ✅ requiredRoles 제거 (AppShellProps에 없어서 빌드 에러)
     <AppShell title="Work Sheets">
       <div className="mx-auto w-full max-w-[1200px] space-y-4 p-4">
         <Card>
@@ -731,6 +1021,25 @@ export default function WorkSheetDetailPage() {
                 {saving ? "Saving..." : "Save"}
               </Button>
 
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={uiView === "vendor" ? "default" : "ghost"}
+                  onClick={() => setUiView("vendor")}
+                >
+                  Vendor View
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={uiView === "internal" ? "default" : "ghost"}
+                  onClick={() => setUiView("internal")}
+                >
+                  Internal View
+                </Button>
+              </div>
+
               <Button
                 variant="outline"
                 onClick={() => openPdf("vendor")}
@@ -778,7 +1087,11 @@ export default function WorkSheetDetailPage() {
                     const v = e.target.value;
                     setInternalNotes(v);
                     // ✅ keep header in sync for save payload/other UI
-                    updateHeader({ internal_notes: v, internal_memo: v, notes: v });
+                    updateHeader({
+                      internal_notes: v,
+                      internal_memo: v,
+                      notes: v,
+                    });
                   }}
                   placeholder="Internal memo..."
                   rows={4}
@@ -936,6 +1249,64 @@ export default function WorkSheetDetailPage() {
                     </TabsList>
 
                     <TabsContent value="spec" className="space-y-4">
+            {(() => {
+              const poSubtotal = Number(po?.subtotal ?? 0);
+              const poCurrency = (po?.currency ?? header?.currency ?? "USD") as string;
+              const totalQty = (lines || []).reduce((s: number, ln: any) => s + (Number(ln?.qty) || 0), 0) || 0;
+              const unitPrice = totalQty ? poSubtotal / totalQty : 0;
+
+              const specs = materialsByLineId?.[activeLineId] || [];
+              const plannedUnitCost = specs.reduce((s: number, sp: any) => {
+                const q = extractQtyFromNote(sp?.note);
+                const u = extractUnitCostFromNote(sp?.note);
+                return s + q * u;
+              }, 0);
+
+              const actualUnitCost = specs.reduce((s: number, sp: any) => {
+                const q = extractQtyFromNote(sp?.note);
+                const plannedU = extractUnitCostFromNote(sp?.note);
+                const raw = actualUnitInputBySpecId?.[sp?.id];
+                const au = raw != null && String(raw).trim() !== "" ? (parseDec4ToNumber(String(raw)) ?? plannedU) : plannedU;
+                return s + q * au;
+              }, 0);
+
+              const marginUnit = unitPrice - actualUnitCost;
+              const marginPct = unitPrice ? (marginUnit / unitPrice) * 100 : 0;
+              const variance = actualUnitCost - plannedUnitCost;
+
+              return (
+                <div className="grid gap-3 md:grid-cols-5">
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-muted-foreground">Unit Price (PO Currency: {poCurrency})</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{unitPrice.toFixed(4)}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">PO Subtotal: {poSubtotal.toFixed(2)} / Qty: {totalQty.toLocaleString()}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-muted-foreground">Actual Unit Cost (Cost Sum)</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{actualUnitCost.toFixed(2)}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Planned: {plannedUnitCost.toFixed(2)}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-muted-foreground">Margin / Unit ({poCurrency})</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{marginUnit.toFixed(4)}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Variance: {variance >= 0 ? "+" : ""}{variance.toFixed(2)}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-muted-foreground">Margin %</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{marginPct.toFixed(2)}%</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Line Qty: {(lines || []).find((ln: any) => ln?.id === activeLineId)?.qty?.toLocaleString?.() ?? ""}</div>
+                    </CardContent>
+                  </Card>
+                </div>
+              );
+            })()}
                       <div className="grid gap-3 md:grid-cols-2">
                         <div className="space-y-2">
                           <Label>JM Style No</Label>
@@ -1043,8 +1414,10 @@ export default function WorkSheetDetailPage() {
                       <div className="space-y-2">
                         {(materialsByLineId[activeLine.id] ?? [])
                           .filter((s) => !s.is_deleted)
-                          .sort((a, b) => nnum(a.sort_order, 0) - nnum(b.sort_order, 0))
-                          .length === 0 ? (
+                          .sort(
+                            (a, b) =>
+                              nnum(a.sort_order, 0) - nnum(b.sort_order, 0)
+                          ).length === 0 ? (
                           <div className="text-sm text-muted-foreground">
                             No material specs found for this style. (Check
                             Product Development)
@@ -1056,8 +1429,25 @@ export default function WorkSheetDetailPage() {
                                 <tr className="text-left">
                                   <th className="p-2">Material / Labor</th>
                                   <th className="p-2 text-right">Qty</th>
-                                  <th className="p-2 text-right">Unit Cost</th>
-                                  <th className="p-2 text-right">Amount</th>
+                                  <th className="p-2 text-right">
+                                    Planned Unit
+                                  </th>
+                                  <th className="p-2 text-right">
+                                    Planned Amt
+                                  </th>
+
+                                  {isInternalView &&
+                                  resolvedProductionMode === "IN_HOUSE" ? (
+                                    <>
+                                      <th className="p-2 text-right">
+                                        Actual Unit
+                                      </th>
+                                      <th className="p-2 text-right">
+                                        Actual Amt
+                                      </th>
+                                    </>
+                                  ) : null}
+
                                   <th className="p-2">Remarks</th>
                                 </tr>
                               </thead>
@@ -1075,158 +1465,601 @@ export default function WorkSheetDetailPage() {
                                         {s.material_name ?? ""}
                                       </td>
 
-                                      <td className="p-2 text-right">
-                                        {(() => {
-                                          const q = extractQtyFromNote(s.note);
-                                          return q === null ? "" : String(q);
-                                        })()}
-                                      </td>
+                                      {(() => {
+                                        const plannedQty = extractQtyFromNote(
+                                          s.note
+                                        );
+                                        const plannedUnit =
+                                          extractUnitCostFromNote(s.note);
+                                        const actualQty =
+                                          (s as any).actual_qty ?? null;
+                                        const actualUnit =
+                                          (s as any).actual_unit_cost ?? null;
 
-                                      <td className="p-2 text-right">
-                                        {(() => {
-                                          const u = extractUnitCostFromNote(s.note);
-                                          return u === null ? "" : fmtMoney(u);
-                                        })()}
-                                      </td>
+                                        // ✅ FIX: qtyForActual fallback prevents "0 after save"
+                                        const qtyForActual =
+                                          actualQty ?? plannedQty ?? 1;
 
-                                      <td className="p-2 text-right">
-                                        {(() => {
-                                          const q = extractQtyFromNote(s.note);
-                                          const u = extractUnitCostFromNote(s.note);
-                                          if (q === null || u === null) return "";
-                                          return fmtMoney(q * u);
-                                        })()}
-                                      </td>
+                                        const isInhouseInternal =
+                                          isInternalView &&
+                                          resolvedProductionMode === "IN_HOUSE";
+                                        const isLocked = !!(activeLine as any)
+                                          ?.actual_cost_confirmed;
+
+                                        return (
+                                          <>
+                                            <td className="p-2 text-right">
+                                              {plannedQty === null
+                                                ? ""
+                                                : String(plannedQty)}
+                                            </td>
+
+                                            <td className="p-2 text-right">
+                                              {plannedUnit === null
+                                                ? ""
+                                                : fmtMoney(plannedUnit)}
+                                            </td>
+
+                                            <td className="p-2 text-right">
+                                              {plannedQty === null ||
+                                              plannedUnit === null
+                                                ? ""
+                                                : fmtMoney(
+                                                    plannedQty * plannedUnit
+                                                  )}
+                                            </td>
+
+                                            {isInhouseInternal ? (
+                                              <>
+                                                <td className="p-2 text-right">
+                                                  <Input
+                                                    type="text"
+                                                    inputMode="decimal"
+                                                    value={
+                                                      actualUnitInputBySpecId[
+                                                        s.id
+                                                      ] ??
+                                                      (actualUnit === null ||
+                                                      actualUnit === undefined
+                                                        ? ""
+                                                        : String(actualUnit))
+                                                    }
+                                                    onChange={(e) => {
+                                                      const raw0 =
+                                                        e.target.value;
+                                                      const raw =
+                                                        normalizeDec4Input(
+                                                          raw0
+                                                        );
+
+                                                      // allow empty
+                                                      if (raw === "") {
+                                                        setActualUnitInputBySpecId(
+                                                          (p) => ({
+                                                            ...p,
+                                                            [s.id]: "",
+                                                          })
+                                                        );
+                                                        // keep numeric value null as well
+                                                        setMaterialsByLineId(
+                                                          (prev) => {
+                                                            const arr =
+                                                              prev[
+                                                                activeLine.id
+                                                              ] ?? [];
+                                                            const next =
+                                                              arr.map((x) =>
+                                                                x.id === s.id
+                                                                  ? {
+                                                                      ...(x as any),
+                                                                      actual_unit_cost:
+                                                                        null,
+                                                                    }
+                                                                  : x
+                                                              );
+                                                            return {
+                                                              ...prev,
+                                                              [activeLine.id]:
+                                                                next,
+                                                            };
+                                                          }
+                                                        );
+                                                        return;
+                                                      }
+
+                                                      // reject invalid formats (only up to 4 decimals)
+                                                      if (
+                                                        !DEC4_RE.test(raw)
+                                                      )
+                                                        return;
+
+                                                      setActualUnitInputBySpecId(
+                                                        (p) => ({
+                                                          ...p,
+                                                          [s.id]: raw,
+                                                        })
+                                                      );
+
+                                                      const n =
+                                                        parseDec4ToNumber(
+                                                          raw
+                                                        );
+
+                                                      // ✅ FIX: if actual_qty is empty, seed it (prevents save->0)
+                                                      setMaterialsByLineId(
+                                                        (prev) => {
+                                                          const arr =
+                                                            prev[
+                                                              activeLine.id
+                                                            ] ?? [];
+                                                          const next =
+                                                            arr.map((x) => {
+                                                              if (
+                                                                x.id !== s.id
+                                                              )
+                                                                return x;
+                                                              const seededQty =
+                                                                (x as any)
+                                                                  .actual_qty ??
+                                                                extractQtyFromNote(
+                                                                  (x as any)
+                                                                    .note
+                                                                ) ??
+                                                                1;
+                                                              return {
+                                                                ...(x as any),
+                                                                actual_unit_cost:
+                                                                  n,
+                                                                actual_qty:
+                                                                  seededQty,
+                                                              };
+                                                            });
+                                                          return {
+                                                            ...prev,
+                                                            [activeLine.id]:
+                                                              next,
+                                                          };
+                                                        }
+                                                      );
+                                                    }}
+                                                    onBlur={() => {
+                                                      const raw = (
+                                                        actualUnitInputBySpecId[
+                                                          s.id
+                                                        ] ?? ""
+                                                      ).trim();
+                                                      if (raw === "") return;
+                                                      const normalized =
+                                                        normalizeDec4Input(
+                                                          raw
+                                                        );
+                                                      if (
+                                                        !DEC4_RE.test(
+                                                          normalized
+                                                        )
+                                                      ) {
+                                                        // revert to numeric if user typed something weird
+                                                        setActualUnitInputBySpecId(
+                                                          (p) => ({
+                                                            ...p,
+                                                            [s.id]:
+                                                              actualUnit ===
+                                                                null ||
+                                                              actualUnit ===
+                                                                undefined
+                                                                ? ""
+                                                                : String(
+                                                                    actualUnit
+                                                                  ),
+                                                          })
+                                                        );
+                                                        return;
+                                                      }
+                                                      const n =
+                                                        parseDec4ToNumber(
+                                                          normalized
+                                                        );
+                                                      setActualUnitInputBySpecId(
+                                                        (p) => ({
+                                                          ...p,
+                                                          [s.id]: normalized,
+                                                        })
+                                                      );
+                                                      setMaterialsByLineId(
+                                                        (prev) => {
+                                                          const arr =
+                                                            prev[
+                                                              activeLine.id
+                                                            ] ?? [];
+                                                          const next =
+                                                            arr.map((x) =>
+                                                              x.id === s.id
+                                                                ? {
+                                                                    ...(x as any),
+                                                                    actual_unit_cost:
+                                                                      n,
+                                                                  }
+                                                                : x
+                                                            );
+                                                          return {
+                                                            ...prev,
+                                                            [activeLine.id]:
+                                                              next,
+                                                          };
+                                                        }
+                                                      );
+                                                    }}
+                                                    placeholder="e.g. 0.1200"
+                                                    className="h-8 text-right"
+                                                    disabled={isLocked}
+                                                  />
+                                                </td>
+
+                                                <td className="p-2 text-right">
+                                                  {actualUnit === null ||
+                                                  actualUnit === undefined
+                                                    ? ""
+                                                    : fmtMoney(
+                                                        Number(qtyForActual) *
+                                                          Number(actualUnit)
+                                                      )}
+                                                </td>
+                                              </>
+                                            ) : null}
+                                          </>
+                                        );
+                                      })()}
 
                                       <td className="p-2">
-                                        {fmtWsRemarks(s.spec_text, s.color, s.note) || "-"}
+                                        {fmtWsRemarks(
+                                          s.spec_text,
+                                          s.color,
+                                          s.note
+                                        ) || "-"}
                                       </td>
                                     </tr>
                                   ))}
-                              
-                                  {/* TOTAL row */}
-                                  <tr className="border-t bg-muted/30 font-semibold">
-                                    <td className="p-2">TOTAL</td>
-                                    <td className="p-2 text-right"></td>
-                                    <td className="p-2 text-right"></td>
-                                    <td className="p-2 text-right">
-                                      {(() => {
-                                        const list = (materialsByLineId[activeLine.id] ?? []).filter((s) => !s.is_deleted);
-                                        const total = list
-                                          .filter((s) => !s.is_deleted)
-                                          .reduce((acc, s) => {
-                                            const q = extractQtyFromNote(s.note);
-                                            const u = extractUnitCostFromNote(s.note);
-                                            if (q === null || u === null) return acc;
-                                            return acc + q * u;
-                                          }, 0);
-                                        return fmtMoney(total);
-                                      })()}
-                                    </td>
-                                    <td className="p-2"></td>
-                                  </tr>
 
-</tbody>
+                                {/* TOTAL row */}
+                                <tr className="border-t bg-muted/30 font-semibold">
+                                  <td className="p-2">TOTAL</td>
+                                  <td className="p-2 text-right"></td>
+                                  <td className="p-2 text-right"></td>
+                                  <td className="p-2 text-right">
+                                    {(() => {
+                                      const list = (
+                                        materialsByLineId[activeLine.id] ?? []
+                                      ).filter((s) => !s.is_deleted);
+                                      const totalPlanned = list.reduce(
+                                        (acc, s) => {
+                                          const q = extractQtyFromNote(s.note);
+                                          const u =
+                                            extractUnitCostFromNote(s.note);
+                                          if (q === null || u === null)
+                                            return acc;
+                                          return acc + q * u;
+                                        },
+                                        0
+                                      );
+                                      return fmtMoney(totalPlanned);
+                                    })()}
+                                  </td>
+
+                                  {isInternalView &&
+                                  resolvedProductionMode === "IN_HOUSE" ? (
+                                    <>
+                                      <td className="p-2 text-right"></td>
+                                      <td className="p-2 text-right">
+                                        {(() => {
+                                          const list = (
+                                            materialsByLineId[activeLine.id] ??
+                                            []
+                                          ).filter((s) => !s.is_deleted);
+                                          const totalActual = list.reduce(
+                                            (acc, s) => {
+                                              const plannedQty =
+                                                extractQtyFromNote(s.note);
+                                              const actualQty =
+                                                (s as any).actual_qty ?? null;
+                                              const qtyForActual =
+                                                actualQty ?? plannedQty ?? 1;
+                                              const actualUnit =
+                                                (s as any).actual_unit_cost ??
+                                                null;
+
+                                              // ✅ FIX: do not drop row due to qty null
+                                              if (
+                                                actualUnit === null ||
+                                                actualUnit === undefined
+                                              )
+                                                return acc;
+
+                                              return (
+                                                acc +
+                                                Number(qtyForActual) *
+                                                  Number(actualUnit)
+                                              );
+                                            },
+                                            0
+                                          );
+                                          return fmtMoney(totalActual);
+                                        })()}
+                                      </td>
+                                    </>
+                                  ) : null}
+
+                                  <td className="p-2"></td>
+                                </tr>
+                              </tbody>
                             </table>
                           </div>
                         )}
                       </div>
                     </TabsContent>
 
-                    <TabsContent value="vendor" className="space-y-3">
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <div className="md:col-span-2 space-y-2">
-                          <Label>Vendor / Subcontractor</Label>
-                          <div className="flex flex-col md:flex-row gap-2">
-                            <Input
-                              placeholder="Search vendor..."
-                              value={vendorSearch}
-                              onChange={(e) => setVendorSearch(e.target.value)}
-                            />
-                            <Button
-                              type="button"
-                              variant="outline"
-                              onClick={loadVendors}
-                              disabled={vendorsLoading}
-                              className="md:w-[140px]"
-                            >
-                              {vendorsLoading ? "Loading..." : "Refresh"}
-                            </Button>
-                          </div>
-
-                          <Select
-                            value={(activeLine.vendor_id ?? "NONE") as any}
-                            onValueChange={(v) => {
-                              const val = v === "NONE" ? null : v;
-                              updateLine(activeLine.id, { vendor_id: val });
-                            }}
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select vendor" />
-                            </SelectTrigger>
-                            <SelectContent className="max-h-[340px]">
-                              <SelectItem value="NONE">None</SelectItem>
-                              {filteredVendors.map((v) => (
-                                <SelectItem key={v.id} value={v.id}>
-                                  {vendorLabel(v)}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-
-                          {vendorLoadError ? (
-                            <div className="text-xs text-red-600">
-                              {vendorLoadError}
-                            </div>
-                          ) : null}
-
-                          {activeLine.vendor_id &&
-                          vendorMap.get(activeLine.vendor_id) ? (
-                            <div className="text-xs text-slate-500">
-                              Selected:{" "}
-                              {vendorLabel(
-                                vendorMap.get(activeLine.vendor_id)!
-                              )}
-                            </div>
-                          ) : null}
-                        </div>
-
-                        <div className="space-y-2">
-  <Label>Vendor Currency</Label>
-  <Select
-    value={activeLine.vendor_currency ?? ""}
-    onValueChange={(value) =>
-      updateLine(activeLine.id, {
-        vendor_currency: value,
-      })
-    }
-  >
-    <SelectTrigger>
-      <SelectValue placeholder="Select currency" />
-    </SelectTrigger>
-    <SelectContent>
-      <SelectItem value="CNY">CNY</SelectItem>
-      <SelectItem value="VND">VND</SelectItem>
-      <SelectItem value="USD">USD</SelectItem>
-      <SelectItem value="KRW">KRW</SelectItem>
-    </SelectContent>
-  </Select>
-</div>
-                        <div className="space-y-2">
-                          <Label>Vendor Unit Cost (Local)</Label>
-                          <Input
-                            value={activeLine.vendor_unit_cost_local ?? ""}
-                            onChange={(e) =>
-                              updateLine(activeLine.id, {
-                                vendor_unit_cost_local: e.target.value as any,
-                              })
+                    {/* vendor tab ... (이하 네 원본 그대로) */}
+          <TabsContent value="vendor" className="space-y-3">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Vendor / Margin Control</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid gap-3 md:grid-cols-4">
+                  <div className="space-y-1">
+                    <Label>Production Mode</Label>
+                    <Select
+                      value={(resolvedProductionMode ?? "IN_HOUSE") as any}
+                      onValueChange={(v) => {
+                        if (!activeLine) return;
+                        const nextMode = v as "IN_HOUSE" | "OUTSOURCED";
+                        setLines((prev) =>
+                          (prev || []).map((ln) => {
+                            if (ln.id !== activeLine.id) return ln;
+                            // ✅ Mode -> Vendor auto linkage
+                            if (nextMode === "IN_HOUSE") {
+                              return {
+                                ...ln,
+                                production_mode: "IN_HOUSE",
+                                vendor_id: null,
+                                vendor_currency: null,
+                                vendor_unit_cost_local: null,
+                              };
                             }
-                            placeholder="e.g. 12.5"
-                            inputMode="decimal"
-                          />
-                        </div>
-                      </div>
-                    </TabsContent>
+                            return { ...ln, production_mode: "OUTSOURCED" };
+                          })
+                        );
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select mode" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="IN_HOUSE">IN_HOUSE</SelectItem>
+                        <SelectItem value="OUTSOURCED">OUTSOURCED</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label>Vendor</Label>
+                    <Select
+                      value={(activeLine?.vendor_id ?? "NONE") as string}
+                      onValueChange={(v) => {
+                        if (!activeLine) return;
+                        setLines((prev) =>
+                          (prev || []).map((ln) => {
+                            if (ln.id !== activeLine.id) return ln;
+
+                            // ✅ Vendor -> Mode auto linkage
+                            if (v === "NONE") {
+                              return {
+                                ...ln,
+                                vendor_id: null,
+                                production_mode: "IN_HOUSE",
+                                vendor_currency: null,
+                                vendor_unit_cost_local: null,
+                              };
+                            }
+                            return {
+                              ...ln,
+                              vendor_id: v,
+                              production_mode: "OUTSOURCED",
+                            };
+                          })
+                        );
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select vendor" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="NONE">(No Vendor)</SelectItem>
+                        {(vendors || []).map((v: any) => (
+                          <SelectItem key={v.id} value={v.id}>
+                            {v.name || v.company_name || v.code || v.id}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label>Vendor Currency</Label>
+                    <Select
+                      value={(activeLine?.vendor_currency ?? "USD") as string}
+                      onValueChange={(v) => {
+                        if (!activeLine) return;
+                        const next = v as string;
+                        setLines((prev) =>
+                          (prev || []).map((ln) =>
+                            ln.id === activeLine.id
+                              ? ({
+                                  ...ln,
+                                  vendor_currency: next,
+                                } as any)
+                              : ln
+                          )
+                        );
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Currency" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="USD">USD</SelectItem>
+                        <SelectItem value="CNY">CNY</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label>Vendor Unit Price</Label>
+                    <Input
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={
+                        activeLine?.id
+                          ? vendorUnitInputByLineId[activeLine.id] ?? ""
+                          : ""
+                      }
+                      onChange={(e) => {
+                        if (!activeLine?.id) return;
+                        const raw0 = e.target.value;
+                        const raw = normalizeDec2Input(raw0);
+                        // hard guard for non-matching patterns
+                        if (raw !== "" && !DEC2_RE.test(raw)) return;
+
+                        const lineId = activeLine.id;
+                        setVendorUnitInputByLineId((prev) => ({
+                          ...prev,
+                          [lineId]: raw,
+                        }));
+
+                        const n = parseDec2ToNumber(raw);
+                        setLines((prev) =>
+                          (prev || []).map((ln) =>
+                            ln.id === lineId
+                              ? ({
+                                  ...ln,
+                                  vendor_unit_cost_local: n,
+                                } as any)
+                              : ln
+                          )
+                        );
+                      }}
+                      disabled={(resolvedProductionMode ?? "IN_HOUSE") !== "OUTSOURCED"}
+                    />
+                    <div className="text-[11px] text-muted-foreground">
+                      하청 단가(벤더 지급 단가)입니다. 소수점 2자리까지 입력.
+                    </div>
+                  </div>
+
+
+                  <div className="space-y-1">
+                    <Label>Vendor Actual Unit Cost</Label>
+                    <Input
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={
+                        activeLine?.id
+                          ? vendorActualUnitInputByLineId[activeLine.id] ?? ""
+                          : ""
+                      }
+                      onChange={(e) => {
+                        if (!activeLine?.id) return;
+                        const raw0 = e.target.value;
+                        const raw = normalizeDec2Input(raw0);
+                        if (raw !== "" && !DEC2_RE.test(raw)) return;
+
+                        const lineId = activeLine.id;
+                        setVendorActualUnitInputByLineId((prev) => ({
+                          ...prev,
+                          [lineId]: raw,
+                        }));
+
+                        const n = parseDec2ToNumber(raw);
+                        setLines((prev) =>
+                          (prev || []).map((ln) =>
+                            ln.id === lineId
+                              ? ({
+                                  ...ln,
+                                  actual_vendor_unit_cost_local: n,
+                                } as any)
+                              : ln
+                          )
+                        );
+                      }}
+                      disabled={(resolvedProductionMode ?? "IN_HOUSE") !== "OUTSOURCED"}
+                    />
+                    <div className="text-[11px] text-muted-foreground">
+                      실제 지급/정산된 하청 단가(USD/CNY). 소수점 2자리까지 입력.
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label>Actual Locked</Label>
+                    <Input value={activeActualLocked ? "YES (Confirmed)" : "NO"} readOnly />
+                  </div>
+                </div>
+
+                <div className="text-sm text-muted-foreground">
+                  이 탭은 <span className="font-medium text-foreground">마진 관리용</span>
+                  입니다. Unit Price는 PO Subtotal/Qty로 계산하고, Actual Unit Cost는
+                  Materials 탭의 Actual Unit 입력값 합계입니다.
+                  <br />
+                  <span className="font-medium text-foreground">Vendor Unit Price</span> 는
+                  벤더에게 지급하는 <span className="font-medium text-foreground">하청 단가</span>
+                  (USD/CNY)를 입력합니다.
+                  <br />
+                  <span className="font-medium text-foreground">연동 규칙:</span>{" "}
+                  Vendor 선택 → 자동 OUTSOURCED, Mode를 IN_HOUSE로 변경 → Vendor 자동
+                  해제(null).
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant={activeActualLocked ? "secondary" : "destructive"}
+                    onClick={() => onConfirmActualCost("IN_HOUSE")}
+                    disabled={
+                      saving ||
+                      loading ||
+                      !header ||
+                      activeActualLocked ||
+                      confirmingActual ||
+                      (resolvedProductionMode ?? "IN_HOUSE") !== "IN_HOUSE" ||
+                      !hasAnyActualUnitInput
+                    }
+                  >
+                    {activeActualLocked
+                      ? "Actual Confirmed"
+                      : confirmingActual && (resolvedProductionMode ?? "IN_HOUSE") === "IN_HOUSE"
+                      ? "Confirming..."
+                      : "Confirm Actual (IN_HOUSE)"}
+                  </Button>
+
+                  <Button
+                    variant={activeActualLocked ? "secondary" : "destructive"}
+                    onClick={() => onConfirmActualCost("OUTSOURCED")}
+                    disabled={
+                      saving ||
+                      loading ||
+                      !header ||
+                      activeActualLocked ||
+                      confirmingActual ||
+                      (resolvedProductionMode ?? "IN_HOUSE") !== "OUTSOURCED" ||
+                      !activeLine?.vendor_id
+                    }
+                  >
+                    {activeActualLocked
+                      ? "Actual Confirmed"
+                      : confirmingActual && (resolvedProductionMode ?? "IN_HOUSE") === "OUTSOURCED"
+                      ? "Confirming..."
+                      : "Confirm Actual (OUTSOURCED)"}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
                   </Tabs>
                 </>
               )}

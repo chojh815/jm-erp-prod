@@ -296,7 +296,7 @@ function mapApiToPdfData(json: any): PdfData {
       return cur !== "" || (cost !== null && cost !== undefined && toStr(cost).trim() !== "");
     }) ?? line0;
 
-  const vendorCurrency =
+  const vendorCurrencyRaw =
     vendorLine?.vendor_currency ??
     vendorLine?.vendorCurrency ??
     line0?.vendor_currency ??
@@ -304,6 +304,14 @@ function mapApiToPdfData(json: any): PdfData {
     header?.vendor_currency ??
     header?.vendorCurrency ??
     null;
+
+  // ✅ normalize empty string -> null
+  const vendorCurrencyClean = toStr(vendorCurrencyRaw).trim() || null;
+
+  // ✅ fallback: if vendor currency missing, use PO currency (common case when vendor pays in same currency)
+  const poCurrency = toStr(po?.currency ?? header?.currency).trim() || null;
+
+  const vendorCurrency = vendorCurrencyClean ?? poCurrency;
 
   const vendorUnitCostLocal =
     vendorLine?.vendor_unit_cost_local ??
