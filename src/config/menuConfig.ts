@@ -10,7 +10,12 @@ export type AppRole = "admin" | "manager" | "staff" | "viewer";
 export interface MenuItem {
   label: string;
   href: string;
-  perm?: string | string[]; // ✅ 핵심 변경
+  /**
+   * permission key(s)
+   * - string: 단일 권한
+   * - string[]: OR 조건(배열 중 하나라도 있으면 노출)
+   */
+  perm?: string | string[];
 }
 
 export interface MenuSection {
@@ -21,6 +26,10 @@ export interface MenuSection {
 /**
  * ✅ permission 기반 메뉴 정의
  * Sidebar에서는 usePermissions().has(item.perm) 으로 필터링
+ *
+ * 규칙
+ * - 기존 프로젝트에서 이미 사용 중인 perm 키는 그대로 유지
+ * - 새 기능/메뉴는 가능한 한 "도메인.기능" 형태로 명확히 부여
  */
 export const MENU_SECTIONS: MenuSection[] = [
   {
@@ -157,9 +166,12 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "dashboard.production",
       },
       {
+        // ✅ Profitability 페이지
+        // - 새로운 권한 키: dashboard.profitability
+        // - 과거/임시 키를 쓰고 있었다면 dashboard.finance 로도 접근 가능하게 OR 처리
         label: "Profitability",
-        href: "/dashboards/finance",
-        perm: "dashboard.finance",
+        href: "/dashboards/profitability",
+        perm: ["dashboard.profitability", "dashboard.finance"],
       },
     ],
   },
@@ -169,6 +181,7 @@ export const MENU_SECTIONS: MenuSection[] = [
     items: [
       { label: "Bank Accounts", href: "/bank-accounts", perm: "receipts.view" },
       { label: "Receipts", href: "/receipts", perm: "receipts.view" },
+      { label: "Expenses", href: "/finance/expenses", perm: "receipts.view" },
       { label: "Credit Notes", href: "/credits", perm: "receipts.view" },
       {
         label: "Bank Balance (Monthly)",
