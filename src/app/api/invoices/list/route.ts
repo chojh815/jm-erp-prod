@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+console.log("[SUPABASE_URL]", process.env.NEXT_PUBLIC_SUPABASE_URL);
+console.log("[SUPABASE_SERVICE_ROLE_KEY exists?]", !!process.env.SUPABASE_SERVICE_ROLE_KEY);
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
