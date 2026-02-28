@@ -4,11 +4,23 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function ok(data: any = {}) {
-  return NextResponse.json({ success: true, ...data });
+function ok(data: any = {}, extra: any = {}) {
+  // 🚫 Prevent Vercel/Browser caching for list endpoints
+  const headers = {
+    "Cache-Control": "no-store, max-age=0",
+    Pragma: "no-cache",
+    ...(extra?.headers ?? {}),
+  };
+  const status = extra?.status ?? 200;
+  return NextResponse.json({ success: true, ...data }, { status, headers });
 }
 function bad(message: string, status = 400, extra: any = {}) {
-  return NextResponse.json({ success: false, error: message, ...extra }, { status });
+  const headers = {
+    "Cache-Control": "no-store, max-age=0",
+    Pragma: "no-cache",
+    ...(extra?.headers ?? {}),
+  };
+  return NextResponse.json({ success: false, error: message, ...extra }, { status, headers });
 }
 
 function safe(v: any) {
@@ -26,7 +38,13 @@ export async function GET(req: Request) {
     const keyword = safe(url.searchParams.get("keyword"));
     const buyerId = safe(url.searchParams.get("buyer_id"));
     const status = safe(url.searchParams.get("status"));
-    const validate = safe(url.searchParams.get("validate")) === "1"; // ✅ 필요할 때만 검증쿼리 실행
+    const validate = safe(url.searchParams.get("validate")) === "1";
+    const debug = safe(url.searchParams.get("debug")) === "1";
+    const env = {
+      NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
+      SUPABASE_URL: (process.env as any).SUPABASE_URL ?? "",
+    };
+ // ✅ 필요할 때만 검증쿼리 실행
 
     // ✅ 핵심 원칙: List Total은 invoice_headers.total_amount만 사용
     let q = supabaseAdmin
@@ -98,6 +116,22 @@ export async function GET(req: Request) {
       ...r,
       total_amount: toNumber(r.total_amount, 0),
     }));
+    // Optional debug: verify which DB this API is reading from (and current table counts)
+    let debugCounts: any = null;
+    if (debug) {
+      const [ic, pc, sc] = await Promise.all([
+        supabaseAdmin.from("invoice_headers").select("id", { count: "exact", head: true }),
+        supabaseAdmin.from("packing_list_headers").select("id", { count: "exact", head: true }),
+        supabaseAdmin.from("shipments").select("id", { count: "exact", head: true }),
+      ]);
+      debugCounts = {
+        invoice_headers: ic.count ?? null,
+        packing_list_headers: pc.count ?? null,
+        shipments: sc.count ?? null,
+      };
+    }
+
+
 
     // ✅ 선택 검증: invoice_lines 합계와 header.total_amount 불일치 감지 (validate=1일 때만)
     // - 성능 보호: header를 건드리지 않고 "표시용 경고"만 내려줌
@@ -139,7 +173,7 @@ export async function GET(req: Request) {
 
         return ok({
           rows: out,
-          meta: { validated: true, mismatchCount },
+          meta: { validated: true, mismatchCount, ...(debug ? { debug: true, env, counts: debugCounts } : {}) },
         });
       } else {
         // 검증쿼리 실패해도 list는 살아야 함
@@ -148,12 +182,13 @@ export async function GET(req: Request) {
           meta: {
             validated: false,
             validate_error: sumErr?.message ?? "validate query failed",
+            ...(debug ? { debug: true, env, counts: debugCounts } : {}),
           },
         });
       }
     }
 
-    return ok({ rows });
+    return ok({ rows, ...(debug ? { meta: { debug: true, env, counts: debugCounts } } : {}) });
   } catch (e: any) {
     return bad(e?.message ?? "Failed to load invoices list", 500);
   }
