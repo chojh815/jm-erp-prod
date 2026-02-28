@@ -72,6 +72,8 @@ type PackingListLine = {
   id: string;
   packing_list_id: string;
   cbm_per_carton_text?: string; // CBM 입력용(소수점 입력 유지)
+  gw_per_carton_text?: string; // GW 입력용(소수점 2자리 입력 유지)
+  nw_per_carton_text?: string; // NW 입력용(소수점 2자리 입력 유지)
 
   po_no: string | null;
   style_no: string | null;
@@ -113,6 +115,25 @@ function n(v: any, fallback = 0) {
 /** ✅ FIX: safeNum 누락으로 빌드 에러 → n()을 그대로 alias로 제공 */
 function safeNum(v: any, fallback = 0) {
   return n(v, fallback);
+}
+
+function isDec2Input(s: string) {
+  // 빈 값 허용, 정수/소수(소수점 이하 최대 2자리) 허용
+  return /^(\d+(\.\d{0,2})?)?$/.test(s);
+}
+
+function toDec2Number(s: string): number | null {
+  if (s === "" || s === ".") return null;
+  const v = Number(s);
+  if (Number.isNaN(v)) return null;
+  return Math.round(v * 100) / 100;
+}
+
+function fmtDec2(v: any) {
+  const num = Number(v ?? 0);
+  if (!Number.isFinite(num)) return "";
+  const rounded = Math.round(num * 100) / 100;
+  return String(rounded).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
 function isDec4Input(s: string) {
@@ -1276,24 +1297,82 @@ export default function PackingListDetailPage() {
                         <td className="p-2 text-right">
                           <Input
                             className="w-[90px] text-right"
-                            value={r.nw_per_carton === null ? "" : String(r.nw_per_carton)}
-                            onChange={(e) =>
-                              onLineChange(idx, {
-                                nw_per_carton: e.target.value === "" ? null : n(e.target.value, 0),
-                              })
+                            inputMode="decimal"
+                            step="0.01"
+                            value={
+                              r.nw_per_carton_text ??
+                              (r.nw_per_carton === null ? "" : fmtDec2(r.nw_per_carton))
                             }
+                            onChange={(e) => {
+                              const v = e.target.value;
+
+                              // ✅ 최대 소수 2자리 입력 허용 + 입력 중간값(12., 0.) 유지
+                              if (!isDec2Input(v)) return;
+
+                              const num = toDec2Number(v);
+
+                              onLineChange(idx, {
+                                nw_per_carton_text: v,
+                                nw_per_carton: num,
+                              });
+                            }}
+                            onBlur={() => {
+                              const v = (r.nw_per_carton_text ?? "").trim();
+                              const num = toDec2Number(v);
+
+                              if (num === null) {
+                                onLineChange(idx, { nw_per_carton: null, nw_per_carton_text: "" });
+                                return;
+                              }
+
+                              const normalized = fmtDec2(num);
+
+                              onLineChange(idx, {
+                                nw_per_carton_text: normalized,
+                                nw_per_carton: Number(normalized),
+                              });
+                            }}
                           />
                         </td>
 
                         <td className="p-2 text-right">
                           <Input
                             className="w-[90px] text-right"
-                            value={r.gw_per_carton === null ? "" : String(r.gw_per_carton)}
-                            onChange={(e) =>
-                              onLineChange(idx, {
-                                gw_per_carton: e.target.value === "" ? null : n(e.target.value, 0),
-                              })
+                            inputMode="decimal"
+                            step="0.01"
+                            value={
+                              r.gw_per_carton_text ??
+                              (r.gw_per_carton === null ? "" : fmtDec2(r.gw_per_carton))
                             }
+                            onChange={(e) => {
+                              const v = e.target.value;
+
+                              // ✅ 최대 소수 2자리 입력 허용 + 입력 중간값(12., 0.) 유지
+                              if (!isDec2Input(v)) return;
+
+                              const num = toDec2Number(v);
+
+                              onLineChange(idx, {
+                                gw_per_carton_text: v,
+                                gw_per_carton: num,
+                              });
+                            }}
+                            onBlur={() => {
+                              const v = (r.gw_per_carton_text ?? "").trim();
+                              const num = toDec2Number(v);
+
+                              if (num === null) {
+                                onLineChange(idx, { gw_per_carton: null, gw_per_carton_text: "" });
+                                return;
+                              }
+
+                              const normalized = fmtDec2(num);
+
+                              onLineChange(idx, {
+                                gw_per_carton_text: normalized,
+                                gw_per_carton: Number(normalized),
+                              });
+                            }}
                           />
                         </td>
 
