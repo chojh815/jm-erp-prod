@@ -1,16 +1,16 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-console.log("[SUPABASE_URL]", process.env.NEXT_PUBLIC_SUPABASE_URL);
-console.log("[SUPABASE_SERVICE_ROLE_KEY exists?]", !!process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function ok(data: any = {}, extra: any = {}) {
   // 🚫 Prevent Vercel/Browser caching for list endpoints
   const headers = {
-    "Cache-Control": "no-store, max-age=0",
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    Expires: "0",
     Pragma: "no-cache",
     ...(extra?.headers ?? {}),
   };
@@ -19,7 +19,8 @@ function ok(data: any = {}, extra: any = {}) {
 }
 function bad(message: string, status = 400, extra: any = {}) {
   const headers = {
-    "Cache-Control": "no-store, max-age=0",
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    Expires: "0",
     Pragma: "no-cache",
     ...(extra?.headers ?? {}),
   };
@@ -42,10 +43,12 @@ export async function GET(req: Request) {
     const buyerId = safe(url.searchParams.get("buyer_id"));
     const status = safe(url.searchParams.get("status"));
     const validate = safe(url.searchParams.get("validate")) === "1";
-    const debug = safe(url.searchParams.get("debug")) === "1";
+    const debug = safe(url.searchParams.get("debug")) === "1" || process.env.INV_LIST_DEBUG === "1";
     const env = {
       NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
       SUPABASE_URL: (process.env as any).SUPABASE_URL ?? "",
+      SERVICE_KEY_PREFIX: ((process.env as any).SUPABASE_SERVICE_ROLE_KEY || (process.env as any).SUPABASE_SERVICE_KEY || "").slice(0, 6),
+      ANON_KEY_PREFIX: (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "").slice(0, 6),
     };
  // ✅ 필요할 때만 검증쿼리 실행
 
@@ -122,15 +125,21 @@ export async function GET(req: Request) {
     // Optional debug: verify which DB this API is reading from (and current table counts)
     let debugCounts: any = null;
     if (debug) {
-      const [ic, pc, sc] = await Promise.all([
+      const targetNos = ["JMI-RBK-26-0001","JMI-RBK-26-0002","JMI-RBK-26-0003"];
+
+      const [ic, pc, sc, hitNos] = await Promise.all([
         supabaseAdmin.from("invoice_headers").select("id", { count: "exact", head: true }),
         supabaseAdmin.from("packing_list_headers").select("id", { count: "exact", head: true }),
         supabaseAdmin.from("shipments").select("id", { count: "exact", head: true }),
+        supabaseAdmin.from("invoice_headers").select("invoice_no").in("invoice_no", targetNos),
       ]);
+
       debugCounts = {
-        invoice_headers: ic.count ?? null,
-        packing_list_headers: pc.count ?? null,
-        shipments: sc.count ?? null,
+        build_tag: "inv-list-debug-2026-02-28",
+        invoice_headers_count: ic.count ?? null,
+        packing_list_headers_count: pc.count ?? null,
+        shipments_count: sc.count ?? null,
+        invoice_no_hit: (hitNos.data ?? []).map((r: any) => r.invoice_no),
       };
     }
 
