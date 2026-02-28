@@ -1,56 +1,81 @@
 // src/lib/supabaseAdmin.ts
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
-// 서비스키는 서버에서만 사용 (절대 브라우저에 노출 X)
-if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-  throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
-}
-if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("SUPABASE_SERVICE_ROLE_KEY is missing");
+/**
+ * Server-only Supabase admin client.
+ * - Prefers server env (SUPABASE_URL) and falls back to NEXT_PUBLIC_SUPABASE_URL.
+ * - Prefers SUPABASE_SERVICE_ROLE_KEY and falls back to SUPABASE_SERVICE_KEY.
+ * - Can optionally log resolved project ref when SUPABASE_ADMIN_DEBUG=1.
+ */
+
+// ------------------------------
+// ✅ Resolve env (server-first)
+// ------------------------------
+const supabaseUrl =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+
+const serviceRoleKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || "";
+
+if (!supabaseUrl) {
+  throw new Error(
+    "Supabase URL is missing. Set SUPABASE_URL (recommended) or NEXT_PUBLIC_SUPABASE_URL."
+  );
 }
 
-// --------------------------------------------------
-// ✅ DEBUG: 서버가 실제로 사용하는 Supabase URL 확인
-// --------------------------------------------------
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+if (!serviceRoleKey) {
+  throw new Error(
+    "Supabase service role key is missing. Set SUPABASE_SERVICE_ROLE_KEY (recommended) or SUPABASE_SERVICE_KEY."
+  );
+}
 
-// project ref 추출 (xxxxx.supabase.co → xxxxx)
+// ------------------------------
+// ✅ Optional DEBUG (safe)
+// ------------------------------
+const shouldDebug =
+  process.env.SUPABASE_ADMIN_DEBUG === "1" ||
+  (process.env.NODE_ENV !== "production" && process.env.SUPABASE_ADMIN_DEBUG !== "0");
+
 let projectRef = "";
 let host = "";
 try {
   const u = new URL(supabaseUrl);
   host = u.host;
   projectRef = u.hostname.split(".")[0] ?? "";
-} catch {}
+} catch {
+  // ignore
+}
 
-// dev 서버에서만 1회 출력 (중복 로그 방지)
-if (process.env.NODE_ENV !== "production") {
+if (shouldDebug) {
   const g = globalThis as any;
-  if (!g.__SUPABASE_ADMIN_URL_LOGGED__) {
-    g.__SUPABASE_ADMIN_URL_LOGGED__ = true;
+  if (!g.__SUPABASE_ADMIN_ENV_LOGGED__) {
+    g.__SUPABASE_ADMIN_ENV_LOGGED__ = true;
+
+    const keyPrefix = serviceRoleKey.slice(0, 6);
+    const keySuffix = serviceRoleKey.slice(-4);
+
     console.log("======================================");
-    console.log("[supabaseAdmin] Supabase URL host :", host);
-    console.log("[supabaseAdmin] Supabase project :", projectRef);
+    console.log("[supabaseAdmin] Supabase URL host  :", host);
+    console.log("[supabaseAdmin] Supabase project   :", projectRef);
+    console.log("[supabaseAdmin] Using URL env      :", process.env.SUPABASE_URL ? "SUPABASE_URL" : "NEXT_PUBLIC_SUPABASE_URL");
+    console.log("[supabaseAdmin] Service key env    :", process.env.SUPABASE_SERVICE_ROLE_KEY ? "SUPABASE_SERVICE_ROLE_KEY" : "SUPABASE_SERVICE_KEY");
+    console.log("[supabaseAdmin] Service key prefix :", `${keyPrefix}…${keySuffix}`);
     console.log("======================================");
   }
 }
 
-// --------------------------------------------------
-// ✅ 단일 Admin Client 인스턴스
-// --------------------------------------------------
-export const supabaseAdmin = createSupabaseClient(
-  supabaseUrl,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
+// ------------------------------
+// ✅ Single Admin Client
+// ------------------------------
+export const supabaseAdmin = createSupabaseClient(supabaseUrl, serviceRoleKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+  },
+});
 
 // ----------------------------------------------
-// ✅ Compatibility exports (기존 코드 호환용)
+// ✅ Compatibility exports (existing code)
 // ----------------------------------------------
 export const SupabaseAdminClient = supabaseAdmin;
 
