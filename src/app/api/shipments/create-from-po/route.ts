@@ -143,6 +143,15 @@ export async function POST(req: NextRequest) {
     // Use the first header as base (UI should keep same buyer for combined shipment)
     const base = poHeaders[0];
 
+    // Map po_header_id -> po_no (do NOT trust shipment_lines.po_no for multi-PO shipments)
+    const poNoByHeaderId = new Map<string, string>();
+    for (const h of poHeaders) {
+      const hid = safeStr((h as any)?.id);
+      if (!hid) continue;
+      const pno = pickFirst(h, ["po_no", "po_number", "poNo"]) ?? null;
+      if (pno) poNoByHeaderId.set(hid, safeStr(pno));
+    }
+
     // 2) Create shipped_qty + mode map keyed by po_line_id
     const byLineId = new Map<
       string,
@@ -298,7 +307,21 @@ export async function POST(req: NextRequest) {
           0
         );
 
-        const styleNo = pickFirst(poLine, ["style_no", "style", "style_number", "styleNo"]) ?? null;
+        const styleNo =
+          // Prefer buyer style number; fall back to JM/internal style number.
+          (pickFirst(poLine, [
+            "buyer_style_no",
+            "buyer_style_number",
+            "buyer_style",
+            "buyerStyleNo",
+            "buyerStyleNumber",
+            "style_no",
+            "style",
+            "style_number",
+            "styleNo",
+            "jm_style_no",
+            "jmStyleNo",
+          ]) ?? null);
         const desc = pickFirst(poLine, ["description", "item_description", "desc"]) ?? null;
         const color = pickFirst(poLine, ["color", "plating_color", "color_name"]) ?? null;
         const size = pickFirst(poLine, ["size"]) ?? null;
@@ -309,7 +332,11 @@ export async function POST(req: NextRequest) {
           shipment_id: shipment.id,
           po_line_id: poLine?.id ?? null,
           po_header_id: poLine?.po_header_id ?? base?.id ?? null,
-          po_no: poNo,
+          // Resolve PO# per line using po_header_id → po_headers.po_no
+          po_no:
+            poNoByHeaderId.get(safeStr(poLine?.po_header_id ?? "")) ??
+            poNoByHeaderId.get(safeStr(base?.id ?? "")) ??
+            poNo,
 
           line_no: pickFirst(poLine, ["line_no", "line", "lineNo"]) ?? null,
 

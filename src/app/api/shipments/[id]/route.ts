@@ -146,7 +146,7 @@ export async function GET(
     // Try FK join first
     const { data: lineRows, error: lineErr } = await supabaseAdmin
       .from("shipment_lines")
-      .select("*, po_lines(*)")
+      .select("*, po_lines(*, po_headers:po_headers(po_no))")
       .eq("shipment_id", id)
       .eq("is_deleted", false);
 
@@ -166,7 +166,7 @@ export async function GET(
       if (poLineIds.length > 0) {
         const { data: poLines } = await supabaseAdmin
           .from("po_lines")
-          .select("*")
+          .select("*, po_headers:po_headers(po_no)")
           .in("id", poLineIds);
         (poLines ?? []).forEach((pl: any) => poLineMap.set(pl.id, pl));
       }
@@ -203,16 +203,21 @@ export async function GET(
         pickFirst(pl, ["size", "size_name"]) ??
         "-";
 
-      const poNo2 =
-        pickFirst(r, ["po_no"]) ??
+      // Prefer authoritative PO No from po_lines -> po_headers.po_no (prevents all-lines collapsing to shipment.po_no)
+      const realPoNo =
+        pickFirst(pl?.po_headers, ["po_no"]) ??
         pickFirst(pl, ["po_no"]) ??
-        pickFirst(shipment, ["po_no"]) ??
+        pickFirst(r, ["po_no"]) ??
         "-";
+
+      // Keep what was stored in shipment_lines for debugging (optional)
+      const savedPoNo = pickFirst(r, ["po_no"]) ?? "";
 
       return {
         ...r,
         line_no: r.line_no ?? idx + 1,
-        po_no: poNo2,
+        po_no: realPoNo,
+        saved_po_no: savedPoNo,
         style_no: styleNo,
         description: desc,
         color,

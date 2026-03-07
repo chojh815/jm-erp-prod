@@ -200,6 +200,28 @@ export async function POST(req: Request, { params }: { params: { id: string } })
 
     if (slErr) return bad(slErr.message, 500);
 
+    // ✅ Derive PO No from po_line_id to avoid wrong fallback to shipment.po_no
+    const poLineIds = Array.from(
+      new Set((sLines ?? []).map((l: any) => l?.po_line_id).filter(Boolean))
+    ) as string[];
+
+    const poNoByPoLineId = new Map<string, string>();
+    if (poLineIds.length > 0) {
+      const { data: plRows, error: plErr } = await supabaseAdmin
+        .from("po_lines")
+        // FK: po_lines.po_header_id -> po_headers.id
+        .select("id, po_headers ( po_no )")
+        .in("id", poLineIds);
+
+      if (!plErr && plRows) {
+        for (const r of plRows as any[]) {
+          const poNo = r?.po_headers?.po_no;
+          if (poNo) poNoByPoLineId.set(r.id, poNo);
+        }
+      }
+    }
+
+
     // 4) buyer (code 포함)
     let buyerCode: string | null = null;
     if ((shipment as any).buyer_id) {
@@ -342,7 +364,7 @@ export async function POST(req: Request, { params }: { params: { id: string } })
 
         po_header_id: l.po_header_id ?? null,
         po_line_id: l.po_line_id ?? null,
-        po_no: l.po_no ?? (shipment as any).po_no ?? null,
+        po_no: (poNoByPoLineId.get(l?.po_line_id) ?? l?.po_no ?? l?.poNo ?? null),
 
         line_no: l.line_no ?? idx + 1,
         style_no: l.style_no ?? null,

@@ -2,6 +2,17 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+/**
+ * ✅ v5
+ * - PO# resolution priority changed:
+ *    1) po_header_id -> po_headers.po_no  (authoritative)
+ *    2) po_line_id   -> nested po_headers.po_no
+ *    3) shipment_lines.po_no (fallback only; may be wrong in your DB)
+ *    4) shipment.po_no
+ * - Buyer Style first for Style# (buyer_style_* preferred)
+ * - If PL exists, POST rebuilds lines (same as v4)
+ */
+
 function bad(message: string, status = 400, extra?: any) {
   return NextResponse.json({ success: false, error: message, ...extra }, { status });
 }
@@ -14,11 +25,21 @@ const UUID_RE =
 function isUuid(v: any) {
   return UUID_RE.test(String(v || ""));
 }
+
 function num(v: any, fallback = 0) {
   if (v === null || v === undefined || v === "") return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
+
+function pickFirst(obj: any, keys: string[]) {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return null;
+}
+
 function originToCountryCode(origin?: string | null) {
   const o = String(origin || "").toUpperCase();
   if (o.startsWith("VN_") || o.includes("VIET")) return "VN";
@@ -26,6 +47,7 @@ function originToCountryCode(origin?: string | null) {
   if (o.startsWith("KR_") || o.includes("KOREA") || o.includes("SEOUL")) return "KR";
   return "JM";
 }
+
 function toDate10(v?: any) {
   if (!v) return null;
   const s = String(v);
@@ -182,9 +204,61 @@ async function loadShipmentLines(shipmentId: string) {
   return Array.isArray(data) ? data : [];
 }
 
-/**
- * GET: 링크 상태 조회
- */
+function pickPoLineStyleBuyerFirst(poLine: any) {
+  return (
+    pickFirst(poLine, [
+      "buyer_style_no",
+      "buyer_style_number",
+      "buyer_style",
+      "buyer_style_code",
+      "buyer_style_name",
+      "buyer_style_no_text",
+      "jm_style_no",
+      "jm_style",
+      "jm_style_number",
+      "jm_style_code",
+      "style_no",
+      "style",
+      "style_number",
+      "style_code",
+    ]) ?? null
+  );
+}
+
+function pickPoLineDesc(poLine: any) {
+  return (
+    pickFirst(poLine, [
+      "description",
+      "item_description",
+      "item_desc",
+      "product_name",
+      "style_desc",
+      "name",
+    ]) ?? null
+  );
+}
+
+async function clearPackingListLinesBestEffort(packingListId: string) {
+  const soft = await supabaseAdmin
+    .from("packing_list_lines")
+    .update({ is_deleted: true })
+    .eq("packing_list_id", packingListId);
+
+  if (!soft.error) return { cleared: true, mode: "soft" as const };
+
+  const msg = String(soft.error.message || "");
+  if (extractMissingColumn(msg) === "is_deleted" || msg.toLowerCase().includes("is_deleted")) {
+    const hard = await supabaseAdmin
+      .from("packing_list_lines")
+      .delete()
+      .eq("packing_list_id", packingListId);
+    if (hard.error) return { cleared: false, mode: "hard" as const, error: hard.error };
+    return { cleared: true, mode: "hard" as const };
+  }
+
+  return { cleared: false, mode: "soft" as const, error: soft.error };
+}
+
 export async function GET(_req: Request, ctx: { params: { id: string } }) {
   try {
     const shipmentId = ctx?.params?.id;
@@ -198,90 +272,195 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
   }
 }
 
-/**
- * POST: 생성(없으면) / 있으면 유지
- * ✅ 핵심:
- *  - Invoice가 없으면 생성 막기(409) (정책 동일)
- *  - 기존 PL이 있어도 invoice_id/invoice_no가 비어있으면 즉시 백필
- *  - 신규 생성 시 packing_list_headers에 invoice_id/invoice_no를 반드시 저장
- */
 export async function POST(_req: Request, ctx: { params: { id: string } }) {
   try {
     const shipmentId = ctx?.params?.id;
     if (!isUuid(shipmentId)) return bad("Invalid shipment id", 400);
 
-    // 1) shipment
     const shipment = await getShipmentOr404(shipmentId);
     if (!shipment) return bad("Shipment not found", 404);
 
-    // 2) invoice (필수 정책)
     const inv = await getLatestInvoiceHeaderByShipment(shipmentId);
     if (!inv?.id || !inv?.invoice_no) {
-      return bad("Invoice must be created first for this shipment.", 409, {
-        shipment_id: shipmentId,
-      });
+      return bad("Invoice must be created first for this shipment.", 409, { shipment_id: shipmentId });
     }
 
-    // 0) 기존 PL 있으면 그대로 반환 (단, 번호 NULL이면 채우기 + invoice null이면 백필)
-    const existing = await findExistingPackingList(shipmentId);
-    if (existing) {
-      const patch: Record<string, any> = { updated_at: new Date().toISOString() };
-
-      // packing_list_no 보정
-      if (!existing.packing_list_no) {
-        patch.packing_list_no = `PL-${String(existing.id).slice(0, 8)}`;
-      }
-
-      // ✅ invoice_id / invoice_no 보정 (핵심!)
-      if (!existing.invoice_id) patch.invoice_id = inv.id;
-      if (!existing.invoice_no) patch.invoice_no = inv.invoice_no;
-
-      // patch할 게 있으면 업데이트
-      const shouldPatch =
-        Object.keys(patch).some((k) => k !== "updated_at") || !existing.updated_at;
-
-      if (shouldPatch) {
-        const upd = await safeUpdateOne("packing_list_headers", existing.id, patch);
-        if (upd.error) {
-          console.error("existing packing_list patch error:", upd.error, { finalPatch: upd.finalPatch });
-          // 업데이트 실패해도 기존 반환(업무 진행 우선)
-          return ok({
-            already_exists: true,
-            packing_list_id: existing.id,
-            packing_list: existing,
-            warn: "Existing PL found, but auto-patch failed",
-          });
-        }
-        return ok({
-          already_exists: true,
-          packing_list_id: existing.id,
-          packing_list: upd.data ?? existing,
-          auto_patched: true,
-        });
-      }
-
-      return ok({
-        already_exists: true,
-        packing_list_id: existing.id,
-        packing_list: existing,
-      });
-    }
-
-    // 3) shipment_lines
     const sLines = await loadShipmentLines(shipmentId);
+
+    const poLineIds = Array.from(
+      new Set(
+        sLines
+          .map((r: any) => pickFirst(r, ["po_line_id", "poLineId", "po_line_uuid"]))
+          .filter(Boolean)
+      )
+    ) as string[];
+
+    const poLineToHeader = new Map<string, string>();
+    const poHeaderToNo = new Map<string, string>();
+    const poLineToNestedPoNo = new Map<string, string>();
+    const poLineToBuyerStyle = new Map<string, string>();
+    const poLineToDesc = new Map<string, string>();
+
+    const headerIdsFromShipment = Array.from(
+      new Set(
+        sLines
+          .map((r: any) => pickFirst(r, ["po_header_id", "poHeaderId"]))
+          .filter(Boolean)
+      )
+    ) as string[];
+
+    if (poLineIds.length > 0) {
+      const { data: poLineRows, error: poLineErr } = await supabaseAdmin
+        .from("po_lines")
+        .select("*, po_headers:po_header_id(po_no)")
+        .in("id", poLineIds)
+        .limit(5000);
+
+      if (poLineErr) throw new Error(poLineErr.message);
+
+      const headerIds: string[] = [];
+      for (const r of poLineRows ?? []) {
+        const id = (r as any)?.id;
+        if (!id) continue;
+
+        const headerId = (r as any)?.po_header_id ?? null;
+        if (headerId) {
+          poLineToHeader.set(id, headerId);
+          headerIds.push(headerId);
+        }
+
+        const nestedPoNo = (r as any)?.po_headers?.po_no ?? null;
+        if (nestedPoNo) poLineToNestedPoNo.set(id, nestedPoNo);
+
+        const buyerStyle = pickPoLineStyleBuyerFirst(r);
+        if (buyerStyle) poLineToBuyerStyle.set(id, buyerStyle);
+
+        const desc = pickPoLineDesc(r);
+        if (desc) poLineToDesc.set(id, desc);
+      }
+
+      for (const hid of headerIdsFromShipment) headerIds.push(hid);
+      const uniqHeaderIds = Array.from(new Set(headerIds));
+
+      if (uniqHeaderIds.length > 0) {
+        const { data: poHeaderRows, error: poHeaderErr } = await supabaseAdmin
+          .from("po_headers")
+          .select("id, po_no")
+          .in("id", uniqHeaderIds)
+          .limit(5000);
+
+        if (poHeaderErr) throw new Error(poHeaderErr.message);
+
+        for (const r of poHeaderRows ?? []) {
+          if ((r as any)?.id && (r as any)?.po_no) poHeaderToNo.set((r as any).id, (r as any).po_no);
+        }
+      }
+    } else if (headerIdsFromShipment.length > 0) {
+      const { data: poHeaderRows, error: poHeaderErr } = await supabaseAdmin
+        .from("po_headers")
+        .select("id, po_no")
+        .in("id", headerIdsFromShipment)
+        .limit(5000);
+
+      if (poHeaderErr) throw new Error(poHeaderErr.message);
+
+      for (const r of poHeaderRows ?? []) {
+        if ((r as any)?.id && (r as any)?.po_no) poHeaderToNo.set((r as any).id, (r as any).po_no);
+      }
+    }
 
     const totalCartonsCalc = sLines.reduce((a, r: any) => a + num(r.cartons, 0), 0);
     const totalGwCalc = sLines.reduce((a, r: any) => a + num(r.gw, 0), 0);
     const totalNwCalc = sLines.reduce((a, r: any) => a + num(r.nw, 0), 0);
 
-    // 4) packing_list_no 생성(실패해도 fallback)
+    const existing = await findExistingPackingList(shipmentId);
+
+    const buildLineRows = (packingListId: string) =>
+      sLines.map((r: any, idx: number) => {
+        const poLineId = pickFirst(r, ["po_line_id", "poLineId", "po_line_uuid"]) ?? null;
+
+        const poHeaderId =
+          pickFirst(r, ["po_header_id", "poHeaderId"]) ||
+          (poLineId ? poLineToHeader.get(poLineId) : null) ||
+          null;
+
+        const poNoByHeader = poHeaderId ? poHeaderToNo.get(poHeaderId) : null;
+        const poNoByNested = poLineId ? poLineToNestedPoNo.get(poLineId) : null;
+        const savedPoNo = pickFirst(r, ["po_no", "poNo", "po_number", "po#", "po"]) ?? null;
+
+        const resolvedPoNo = poNoByHeader || poNoByNested || savedPoNo || null;
+
+        const buyerStyle =
+          (poLineId ? poLineToBuyerStyle.get(poLineId) : null) ||
+          pickFirst(r, ["buyer_style_no", "buyerStyleNo", "buyer_style_number", "buyerStyleNumber"]) ||
+          null;
+
+        const fallbackStyle = pickFirst(r, ["style_no", "style", "style#", "style_no_text"]) || null;
+        const resolvedStyle = buyerStyle || fallbackStyle;
+
+        const resolvedDesc =
+          pickFirst(r, ["description", "item_desc", "product_name", "style_desc"]) ||
+          (poLineId ? poLineToDesc.get(poLineId) : null) ||
+          null;
+
+        return {
+          packing_list_id: packingListId,
+          shipment_id: shipment.id,
+          shipment_line_id: r.id ?? null,
+          line_no: r.line_no ?? idx + 1,
+
+          po_header_id: poHeaderId ?? shipment.po_header_id ?? null,
+          po_no: resolvedPoNo ?? shipment.po_no ?? null,
+          po_line_id: poLineId,
+
+          style_no: resolvedStyle,
+          description: resolvedDesc,
+
+          shipped_qty: pickFirst(r, ["shipped_qty", "shippedQty"]) ?? 0,
+
+          cartons: pickFirst(r, ["cartons"]) ?? 0,
+          gw: pickFirst(r, ["gw"]) ?? null,
+          nw: pickFirst(r, ["nw"]) ?? null,
+
+          gw_per_ctn: pickFirst(r, ["gw_per_ctn", "gw_per_carton", "gwPerCtn", "gwPerCarton"]) ?? null,
+          nw_per_ctn: pickFirst(r, ["nw_per_ctn", "nw_per_carton", "nwPerCtn", "nwPerCarton"]) ?? null,
+          cbm_per_ctn: pickFirst(r, ["cbm_per_ctn", "cbm_per_carton", "cbmPerCtn", "cbmPerCarton"]) ?? null,
+
+          is_deleted: false,
+        };
+      });
+
+    if (existing) {
+      await safeUpdateOne("packing_list_headers", existing.id, {
+        updated_at: new Date().toISOString(),
+        invoice_id: existing.invoice_id ?? inv.id,
+        invoice_no: existing.invoice_no ?? inv.invoice_no,
+        total_cartons: existing.total_cartons ?? totalCartonsCalc,
+        total_gw: existing.total_gw ?? totalGwCalc,
+        total_nw: existing.total_nw ?? totalNwCalc,
+      });
+
+      const cleared = await clearPackingListLinesBestEffort(existing.id);
+
+      const lineRows = buildLineRows(existing.id);
+      const insLines = await safeInsertMany("packing_list_lines", lineRows);
+      if (insLines.error) return bad("Failed to rebuild packing list lines.", 500, { packing_list_id: existing.id });
+
+      return ok({
+        already_exists: true,
+        rebuilt: true,
+        packing_list_id: existing.id,
+        cleared_lines_mode: cleared.mode,
+        rebuilt_lines: insLines.data.length,
+      });
+    }
+
     const genNo = await generatePackingListNo(
       shipment.shipping_origin_code ?? null,
       shipment.etd ?? shipment.created_at ?? null
     );
     const packingListNo = genNo || null;
 
-    // 5) header insert  ✅ invoice_id / invoice_no 포함!
     const headerPayload: Record<string, any> = {
       shipment_id: shipment.id,
       shipment_no: shipment.shipment_no ?? null,
@@ -305,11 +484,9 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
       total_gw: shipment.total_gw ?? totalGwCalc,
       total_nw: shipment.total_nw ?? totalNwCalc,
 
-      // ✅ INVOICE LINK (핵심)
       invoice_id: inv.id,
       invoice_no: inv.invoice_no,
 
-      // invoice_headers → PL 복사(있으면)
       remarks: inv?.remarks ?? null,
       consignee_text: inv?.consignee_text ?? null,
       notify_party_text: inv?.notify_party_text ?? null,
@@ -319,70 +496,33 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
       final_destination: inv?.final_destination ?? null,
       coo_text: inv?.coo_text ?? null,
 
-      // ✅ DB 컬럼명: packing_list_no
       packing_list_no: packingListNo,
     };
 
     const ins = await safeInsertOne("packing_list_headers", headerPayload);
-    if (ins.error) {
-      console.error("packing_list_headers insert error:", ins.error, { final: ins.finalPayload });
-      return bad(ins.error.message || "Failed to create packing list", 500);
-    }
+    if (ins.error) return bad(ins.error.message || "Failed to create packing list", 500);
 
-    let header = ins.data as any;
+    const header = ins.data as any;
     const packingListId = header?.id;
     if (!packingListId) return bad("packing_list_headers insert succeeded but id missing", 500);
 
-    // 6) packing_list_no NULL 방지
     if (!header?.packing_list_no) {
       const finalNo = packingListNo || `PL-${String(packingListId).slice(0, 8)}`;
-      const upd = await safeUpdateOne("packing_list_headers", packingListId, {
+      await safeUpdateOne("packing_list_headers", packingListId, {
         packing_list_no: finalNo,
         updated_at: new Date().toISOString(),
       });
-      if (upd.error) {
-        console.error("packing_list_no update error:", upd.error, { finalPatch: upd.finalPatch });
-        return bad(upd.error.message || "Failed to set packing_list_no", 500);
-      }
-      header = upd.data ?? header;
     }
 
-    // 7) 라인 복사
-    const lineRows: Record<string, any>[] = sLines.map((r: any, idx: number) => ({
-      packing_list_id: packingListId,
-      shipment_id: shipment.id,
-      shipment_line_id: r.id ?? null,
-
-      line_no: r.line_no ?? idx + 1,
-      po_header_id: r.po_header_id ?? shipment.po_header_id ?? null,
-      po_no: r.po_no ?? shipment.po_no ?? null,
-
-      style_no: r.style_no ?? null,
-      description: r.description ?? null,
-
-      shipped_qty: r.shipped_qty ?? r.order_qty ?? null,
-
-      cartons: r.cartons ?? null,
-      gw: r.gw ?? null,
-      nw: r.nw ?? null,
-      gw_per_ctn: r.gw_per_ctn ?? null,
-      nw_per_ctn: r.nw_per_ctn ?? null,
-    }));
-
+    const lineRows = buildLineRows(packingListId);
     const insLines = await safeInsertMany("packing_list_lines", lineRows);
     if (insLines.error) {
-      console.error("packing_list_lines insert error:", insLines.error);
-      return bad(
-        "Packing List header created, but failed to copy lines. Check packing_list_lines schema.",
-        500,
-        { packing_list_id: packingListId }
-      );
+      return bad("Packing List header created, but failed to copy lines.", 500, { packing_list_id: packingListId });
     }
 
     return ok({
       already_exists: false,
       packing_list_id: packingListId,
-      packing_list: header,
       copied_lines: insLines.data.length,
       invoice: { id: inv.id, invoice_no: inv.invoice_no },
     });
