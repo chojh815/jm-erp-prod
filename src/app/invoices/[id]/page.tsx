@@ -80,13 +80,11 @@ type InvoiceLine = {
 
   is_deleted: boolean;
 
-  // (테이블에는 있지만, Invoice 화면/표에는 지금 안 쓰는 것들)
   color?: string | null;
   size?: string | null;
   cartons?: number | null;
   gw?: number | null;
   nw?: number | null;
-
 };
 
 type ReceiptRow = {
@@ -114,7 +112,10 @@ function todayISODate() {
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
-
+function normalizeDateInput(v?: string | null) {
+  if (!v) return "";
+  return String(v).trim().slice(0, 10);
+}
 function fmtDate10(v?: string | null) {
   if (!v) return "";
   try {
@@ -146,12 +147,6 @@ function upperIncludesLDC(header: InvoiceHeader) {
   return s0.includes("LDC");
 }
 
-/**
- * ✅ Material/HS 표시 규칙
- * - LDC면 무조건 ON
- * - 다른 바이어는 lines에서 material_content 또는 hs_code가 하나라도 있으면 ON
- * - 전부 비어있으면 컬럼 자체 OFF
- */
 function shouldShowMaterialHS(header: InvoiceHeader, lines: InvoiceLine[]) {
   if (upperIncludesLDC(header)) return true;
   return (lines || []).some(
@@ -172,13 +167,6 @@ function poSort(a: string, b: string) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
-/**
- * ✅ PO별 블록 + 정렬 규칙 (UI/PDF 공통)
- * - 그룹: po_no
- * - 정렬: PO(자연정렬) → Style(문자) → line_no(숫자) → id(문자)
- * - is_deleted 라인은 제외
- * - ✅ group에 poSubtotal / poQty 계산 포함
- */
 function groupInvoiceLines(lines: InvoiceLine[]) {
   const alive = (lines || []).filter((l) => !l?.is_deleted);
 
@@ -229,7 +217,6 @@ export default function InvoiceDetailPage() {
   const [header, setHeader] = React.useState<InvoiceHeader | null>(null);
   const [lines, setLines] = React.useState<InvoiceLine[]>([]);
 
-  // ===== Receipts (Invoice-linked)
   const [receiptsLoading, setReceiptsLoading] = React.useState(false);
   const [receipts, setReceipts] = React.useState<ReceiptRow[]>([]);
 
@@ -294,7 +281,6 @@ export default function InvoiceDetailPage() {
     return sum;
   }, [lines]);
 
-
   const receivedTotal = React.useMemo(() => {
     return (receipts || []).reduce((sum, r) => sum + parseAmount(r.received_amount), 0);
   }, [receipts]);
@@ -333,7 +319,6 @@ export default function InvoiceDetailPage() {
   }, [balance]);
 
   React.useEffect(() => {
-    // balance가 바뀌면 amount 기본값을 맞춰줌(사용자 입력 있으면 유지하려면 여기서 더 복잡하게 하면 됨)
     resetNewReceiptDefaults();
   }, [resetNewReceiptDefaults]);
 
@@ -457,11 +442,6 @@ export default function InvoiceDetailPage() {
     [loadReceipts]
   );
 
-  // ✅ autoPdf=1 처리 (PDF 버튼 의미 분리)
-  // IMPORTANT FIX:
-  // - router.replace()를 PDF 실행 "이후"에 호출해야 함.
-  // - replace를 먼저 호출하면, App Router가 navigation/re-render를 하면서
-  //   setTimeout이 취소되거나 effect가 꼬여 자동 실행이 안 될 수 있음.
   const autoPdfRequested = (searchParams?.get("autoPdf") || "") === "1";
   const autoPdfRanRef = React.useRef(false);
 
@@ -505,13 +485,13 @@ export default function InvoiceDetailPage() {
 
       const patchedHeader: InvoiceHeader = {
         ...h,
-        invoice_date: h.invoice_date ? fmtDate10(h.invoice_date) : todayISODate(),
+        invoice_date: normalizeDateInput(h.invoice_date) || "",
+        etd: normalizeDateInput(h.etd) || "",
+        eta: normalizeDateInput(h.eta) || "",
       };
 
       setHeader(patchedHeader);
-
-      const filteredLines = (rawLines || []).filter((l) => !l?.is_deleted);
-      setLines(filteredLines);
+      setLines((rawLines || []).filter((l) => !l?.is_deleted));
     } catch (e: any) {
       console.error(e);
       setErrorMsg("Failed to load invoice.");
@@ -562,11 +542,7 @@ export default function InvoiceDetailPage() {
 
     setSaving(true);
     try {
-      const safeDate =
-        header.invoice_date && String(header.invoice_date).trim() !== ""
-          ? String(header.invoice_date).slice(0, 10)
-          : null;
-
+      const safeDate = normalizeDateInput(header.invoice_date) || null;
       const payload = {
         header: {
           invoice_no: header.invoice_no ?? null,
@@ -589,8 +565,8 @@ export default function InvoiceDetailPage() {
           port_of_loading: header.port_of_loading ?? null,
           final_destination: header.final_destination ?? null,
 
-          etd: header.etd ?? null,
-          eta: header.eta ?? null,
+          etd: normalizeDateInput(header.etd) || null,
+          eta: normalizeDateInput(header.eta) || null,
 
           status: header.status ?? null,
 
@@ -601,8 +577,12 @@ export default function InvoiceDetailPage() {
         },
         lines: (lines || []).map((l) => ({
           id: l.id,
+          invoice_id: l.invoice_id ?? invoiceId,
+          invoice_header_id: l.invoice_header_id ?? invoiceId,
+          shipment_id: l.shipment_id ?? null,
 
           po_no: l.po_no ?? null,
+          line_no: l.line_no ?? null,
           style_no: l.style_no ?? null,
           description: l.description ?? null,
 
@@ -620,55 +600,70 @@ export default function InvoiceDetailPage() {
       const res = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
+        cache: "no-store",
         body: JSON.stringify(payload),
       });
 
       const json = await res.json().catch(() => null);
-      if (!res.ok) {
+      if (!res.ok || !json?.success) {
         const msg =
           json?.error || json?.message || `Save failed (status ${res.status})`;
         alert(msg);
         return;
       }
 
-      await loadInvoice();
+      const h: InvoiceHeader | null =
+        json?.header ?? json?.data?.header ?? json?.invoice?.header ?? null;
+      const rawLines: InvoiceLine[] =
+        json?.lines ?? json?.data?.lines ?? json?.invoice?.lines ?? [];
+
+      if (h) {
+        setHeader({
+          ...h,
+          invoice_date: normalizeDateInput(h.invoice_date) || "",
+          etd: normalizeDateInput(h.etd) || "",
+          eta: normalizeDateInput(h.eta) || "",
+        });
+      }
+      setLines((rawLines || []).filter((l) => !l?.is_deleted));
+
+      if (safeDate && normalizeDateInput(h?.invoice_date) !== safeDate) {
+        alert(
+          `Invoice Date save mismatch.\nRequested: ${safeDate}\nSaved: ${
+            normalizeDateInput(h?.invoice_date) || "(blank)"
+          }`
+        );
+      }
     } catch (e: any) {
       console.error(e);
       alert("Save failed.");
     } finally {
       setSaving(false);
     }
-  }, [invoiceId, header, lines, recomputeTotal, loadInvoice]);
+  }, [invoiceId, header, lines, recomputeTotal]);
 
-  // ====== PDF (jsPDF 유지)
   const handlePdf = React.useCallback(async (): Promise<void> => {
     if (!header) return;
-
     setExporting(true);
     try {
       const doc = new jsPDF("p", "mm", "a4");
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
-
       const margin = 10;
       const contentWidth = pageWidth - margin * 2;
       const half = contentWidth / 2;
-
       let y = 14;
 
-      // Title
       doc.setFontSize(20);
       doc.setFont("helvetica", "bold");
       doc.text("COMMERCIAL INVOICE", pageWidth / 2, y, { align: "center" });
       y += 12;
 
-      // Buyer
       doc.setFontSize(13);
       doc.setFont("helvetica", "normal");
       doc.text(`Buyer: ${header.buyer_name || "-"}`, margin, y);
       y += 8;
 
-      // ===== Top: Shipper/Exporter (left) + Invoice Info (right)
       doc.setFontSize(9);
       doc.setFont("helvetica", "normal");
 
@@ -681,17 +676,14 @@ export default function InvoiceDetailPage() {
       const incoterm = header.incoterm || "-";
       const payTerm = header.payment_term || "-";
 
-      // Remarks (최대 2줄)
       const remarksText = (header.remarks || "").trim();
       const remarksLinesRaw = remarksText
         ? doc.splitTextToSize(`Remarks: ${remarksText}`, half - 4)
         : [];
       const remarksLines = remarksLinesRaw.slice(0, 2);
 
-      // ✅ Remarks 줄수에 따라 박스 높이 증가 (겹침 방지)
       const topBoxH = 32 + remarksLines.length * 4.5;
 
-      // left box
       doc.rect(margin, y, half, topBoxH);
       doc.setFont("helvetica", "bold");
       doc.text("Shipper / Exporter", margin + 2, y + 6);
@@ -702,7 +694,6 @@ export default function InvoiceDetailPage() {
       );
       doc.text(shipperLines, margin + 2, y + 12);
 
-      // right box
       doc.rect(margin + half, y, half, topBoxH);
       doc.setFont("helvetica", "bold");
       doc.text("Invoice Info", margin + half + 2, y + 6);
@@ -729,7 +720,6 @@ export default function InvoiceDetailPage() {
 
       y += topBoxH;
 
-      // ===== Consignee / Notify Party
       const consignee = (header.consignee_text || "").trim() || "-";
       const notify = (header.notify_party_text || "").trim() || "-";
 
@@ -747,7 +737,6 @@ export default function InvoiceDetailPage() {
 
       y += partyH;
 
-      // ===== COO / Certification
       const originCode = (header.shipping_origin_code || "").toUpperCase();
       const originDisplay = originCode.includes("VN")
         ? "MADE IN VIETNAM"
@@ -773,7 +762,6 @@ export default function InvoiceDetailPage() {
 
       y += cooH + 8;
 
-      // ===== Table
       const showMatHs = shouldShowMaterialHS(header, lines);
 
       const headBase = ["PO No", "Style No", "Description"];
@@ -785,7 +773,6 @@ export default function InvoiceDetailPage() {
 
       const groups = groupInvoiceLines(lines);
       const body: any[] = [];
-
       let grandTotalCalc = 0;
 
       for (const g of groups) {
@@ -828,15 +815,13 @@ export default function InvoiceDetailPage() {
         styles: { fontSize: 8, cellPadding: 1.8, halign: "center", valign: "middle" },
         headStyles: { fontStyle: "bold" },
         columnStyles: {
-          [colCount - 3]: { halign: "right" }, // Qty
-          [colCount - 2]: { halign: "right" }, // Unit
-          [colCount - 1]: { halign: "right" }, // Amount
+          [colCount - 3]: { halign: "right" },
+          [colCount - 2]: { halign: "right" },
+          [colCount - 1]: { halign: "right" },
         },
       });
 
       const lastTableY = (doc as any).lastAutoTable?.finalY ?? y + 40;
-
-      // ===== Grand Total
       let y2 = lastTableY + 10;
       if (y2 > pageHeight - 40) {
         doc.addPage();
@@ -853,14 +838,11 @@ export default function InvoiceDetailPage() {
       doc.text("Grand Total", margin, y2);
       doc.text(`${cur} ${fmtMoney2(grandTotal)}`, pageWidth - margin, y2, { align: "right" });
 
-      // ===== Signed by + Stamp
       const stampWidth = 60;
       const stampHeight = 30;
-
       const sigTextTopGap = 6;
       const sigBottomGap = 8;
       const sigBlockH = sigTextTopGap + stampHeight + sigBottomGap + 10;
-
       let stampY = y2 + 18;
       const fitsSamePage = stampY + sigBlockH <= pageHeight - 12;
 
@@ -870,7 +852,6 @@ export default function InvoiceDetailPage() {
       }
 
       const stampX = pageWidth - margin - stampWidth;
-
       const stampImg = new Image();
       stampImg.src = "/images/jm_stamp_vn.jpg";
 
@@ -884,12 +865,10 @@ export default function InvoiceDetailPage() {
       doc.text("Signed by", pageWidth - margin, stampY - 4, { align: "right" });
 
       doc.addImage(stampImg, "JPEG", stampX, stampY, stampWidth, stampHeight);
-
       doc.text("JM International Co.,Ltd", pageWidth - margin, stampY + stampHeight + 6, {
         align: "right",
       });
 
-      // ===== Page Number
       const pageCount = doc.getNumberOfPages();
       doc.setFont("helvetica", "normal");
       doc.setFontSize(9);
@@ -910,7 +889,6 @@ export default function InvoiceDetailPage() {
     }
   }, [header, lines, recomputeTotal]);
 
-  // ✅ autoPdf=1이면 로드 완료 후 자동 PDF 실행 (1회)
   React.useEffect(() => {
     if (!autoPdfRequested) return;
     if (autoPdfRanRef.current) return;
@@ -922,11 +900,9 @@ export default function InvoiceDetailPage() {
     autoPdfRanRef.current = true;
 
     const run = async () => {
-      // 약간 딜레이(렌더 안정)
       await new Promise((r) => setTimeout(r, 150));
       await handlePdf();
 
-      // PDF 실행 후 URL에서 autoPdf 제거 (새로고침 반복 방지)
       if (invoiceId) {
         router.replace(`/invoices/${encodeURIComponent(invoiceId)}`);
       }
@@ -980,7 +956,6 @@ export default function InvoiceDetailPage() {
       </div>
 
       <div className="grid gap-4">
-        {/* Header */}
         <Card>
           <CardHeader>
             <CardTitle>Header</CardTitle>
@@ -1000,7 +975,7 @@ export default function InvoiceDetailPage() {
                 <Label>Invoice Date</Label>
                 <Input
                   type="date"
-                  value={fmtDate10(header.invoice_date) || todayISODate()}
+                  value={header.invoice_date ?? ""}
                   onChange={(e) => setHeaderField("invoice_date", e.target.value)}
                 />
               </div>
@@ -1123,7 +1098,6 @@ export default function InvoiceDetailPage() {
           </CardContent>
         </Card>
 
-        {/* Lines */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Lines</CardTitle>
@@ -1277,7 +1251,6 @@ export default function InvoiceDetailPage() {
           </CardContent>
         </Card>
 
-        {/* Receipts */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Receipts</CardTitle>
@@ -1314,7 +1287,6 @@ export default function InvoiceDetailPage() {
           </CardHeader>
 
           <CardContent className="grid gap-4">
-            {/* Add Receipt */}
             <div className="rounded-md border p-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="font-semibold">Add Receipt</div>
@@ -1385,7 +1357,6 @@ export default function InvoiceDetailPage() {
               </div>
             </div>
 
-            {/* Receipts table */}
             <div className="w-full overflow-auto rounded-md border">
               <table className="w-full text-sm">
                 <thead className="bg-muted/40">

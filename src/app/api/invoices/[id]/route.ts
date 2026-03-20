@@ -17,16 +17,18 @@ const UUID_RE =
 function isUuid(v: any) {
   return typeof v === "string" && UUID_RE.test(v);
 }
-
 function n(v: any, fallback = 0) {
   const x = Number(v);
   return Number.isFinite(x) ? x : fallback;
 }
-
 function s(v: any) {
   return (v ?? "").toString().trim();
 }
-
+function normalizeDate10(v: any): string | null {
+  const t = s(v);
+  if (!t) return null;
+  return t.slice(0, 10);
+}
 function isConfirmedStatus(v: any) {
   const t = s(v).toUpperCase();
   return t === "CONFIRMED";
@@ -45,7 +47,6 @@ async function loadInvoiceHeader(invoiceId: string) {
 }
 
 async function loadInvoiceLines(invoiceId: string, invoiceNo?: string | null) {
-  // 1) invoice_id 우선
   const { data: a, error: e1 } = await supabaseAdmin
     .from("invoice_lines")
     .select(`*, po_lines:po_lines ( buyer_style_no, buyer_style_code, jm_style_no, jm_style_code )`)
@@ -56,7 +57,6 @@ async function loadInvoiceLines(invoiceId: string, invoiceNo?: string | null) {
 
   if (!e1 && Array.isArray(a) && a.length > 0) return a;
 
-  // 2) fallback: invoice_header_id (과거 데이터)
   const { data: b, error: e2 } = await supabaseAdmin
     .from("invoice_lines")
     .select(`*, po_lines:po_lines ( buyer_style_no, buyer_style_code, jm_style_no, jm_style_code )`)
@@ -67,26 +67,22 @@ async function loadInvoiceLines(invoiceId: string, invoiceNo?: string | null) {
 
   if (!e2 && Array.isArray(b) && b.length > 0) return b;
 
-  // 3) 최종 fallback: invoice_no 컬럼이 있는 경우 (일부 구버전 스키마)
-  const invNo = (invoiceNo ?? "").toString().trim();
+  const invNo = s(invoiceNo);
   if (invNo) {
     try {
       const { data: c, error: e3 } = await supabaseAdmin
         .from("invoice_lines")
         .select(`*, po_lines:po_lines ( buyer_style_no, buyer_style_code, jm_style_no, jm_style_code )`)
-        // @ts-ignore - invoice_no 컬럼이 없을 수 있음
+        // @ts-ignore
         .eq("invoice_no", invNo)
         .order("po_no", { ascending: true })
         .order("style_no", { ascending: true })
         .order("line_no", { ascending: true });
 
       if (!e3 && Array.isArray(c) && c.length > 0) return c;
-    } catch {
-      // ignore (invoice_no 컬럼이 없는 경우)
-    }
+    } catch {}
   }
 
-  // 여기까지면 진짜 없음
   if (e2) throw new Error(e2.message);
   return [];
 }
@@ -97,7 +93,6 @@ function computeTotalAmount(lines: any[]) {
 }
 
 function pickStyleNo(line: any) {
-  // buyer_style_no 우선, 없으면 buyer_style_code, 없으면 jm_style_no/jm_style_code, 마지막으로 기존 style_no
   const p = line?.po_lines ?? {};
   const candidates = [
     p.buyer_style_no,
@@ -107,12 +102,24 @@ function pickStyleNo(line: any) {
     line?.style_no,
   ];
   for (const v of candidates) {
-    const s = (v ?? "").toString().trim();
-    if (s) return s;
+    const sv = s(v);
+    if (sv) return sv;
   }
   return "-";
 }
 
+function normalizeHeaderOut(header: any, computedTotal?: number) {
+  return {
+    ...header,
+    invoice_date: normalizeDate10(header?.invoice_date),
+    etd: normalizeDate10(header?.etd),
+    eta: normalizeDate10(header?.eta),
+    total_amount:
+      header?.total_amount != null && Number(header.total_amount) > 0
+        ? Number(header.total_amount)
+        : Number(computedTotal || 0),
+  };
+}
 
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
@@ -123,25 +130,15 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     if (!header) return bad("Invoice not found", 404);
 
     let lines = await loadInvoiceLines(id, header?.invoice_no);
-
-    // ✅ display용 Style No = Buyer Style No 우선
     lines = (lines || []).map((l: any) => ({
       ...(l ?? {}),
       style_no: pickStyleNo(l),
     }));
 
-    // total_amount가 비어있거나 0이면 lines로 계산해서 내려줌(화면 표시 안정)
     const computed = computeTotalAmount(lines);
-    const outHeader = {
-      ...header,
-      total_amount:
-        header.total_amount != null && Number(header.total_amount) > 0
-          ? Number(header.total_amount)
-          : computed,
-    };
 
     return ok({
-      header: outHeader,
+      header: normalizeHeaderOut(header, computed),
       lines,
       meta: {
         locked: isConfirmedStatus(header.status),
@@ -163,7 +160,6 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const existing = await loadInvoiceHeader(id);
     if (!existing) return bad("Invoice not found", 404);
 
-    // ✅ Confirm 이후 수정 잠금
     if (isConfirmedStatus(existing.status)) {
       return bad("Invoice is locked (CONFIRMED). Use Revision.", 409, {
         meta: {
@@ -177,57 +173,108 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const headerIn = body?.header ?? {};
     const linesIn: any[] = Array.isArray(body?.lines) ? body.lines : [];
 
-    // --- header update (page.tsx payload 기준)
+    const requestedInvoiceDate =
+      headerIn.invoice_date !== undefined
+        ? normalizeDate10(headerIn.invoice_date)
+        : normalizeDate10(existing.invoice_date);
+
     const headerPatch: any = {
-      invoice_no: headerIn.invoice_no ?? existing.invoice_no ?? null,
-      invoice_date: headerIn.invoice_date ?? existing.invoice_date ?? null,
-
-      currency: headerIn.currency ?? existing.currency ?? null,
-      incoterm: headerIn.incoterm ?? existing.incoterm ?? null,
-      payment_term: headerIn.payment_term ?? existing.payment_term ?? null,
-
-      destination: headerIn.destination ?? existing.destination ?? null,
-
-      remarks: headerIn.remarks ?? existing.remarks ?? null,
-      consignee_text: headerIn.consignee_text ?? existing.consignee_text ?? null,
+      invoice_no:
+        headerIn.invoice_no !== undefined
+          ? (s(headerIn.invoice_no) || null)
+          : (existing.invoice_no ?? null),
+      currency:
+        headerIn.currency !== undefined
+          ? (s(headerIn.currency) || null)
+          : (existing.currency ?? null),
+      incoterm:
+        headerIn.incoterm !== undefined
+          ? (s(headerIn.incoterm) || null)
+          : (existing.incoterm ?? null),
+      payment_term:
+        headerIn.payment_term !== undefined
+          ? (s(headerIn.payment_term) || null)
+          : (existing.payment_term ?? null),
+      destination:
+        headerIn.destination !== undefined
+          ? (s(headerIn.destination) || null)
+          : (existing.destination ?? null),
+      remarks:
+        headerIn.remarks !== undefined
+          ? (headerIn.remarks ?? null)
+          : (existing.remarks ?? null),
+      consignee_text:
+        headerIn.consignee_text !== undefined
+          ? (headerIn.consignee_text ?? null)
+          : (existing.consignee_text ?? null),
       notify_party_text:
-        headerIn.notify_party_text ?? existing.notify_party_text ?? null,
-
-      shipper_name: headerIn.shipper_name ?? existing.shipper_name ?? null,
-      shipper_address: headerIn.shipper_address ?? existing.shipper_address ?? null,
-
+        headerIn.notify_party_text !== undefined
+          ? (headerIn.notify_party_text ?? null)
+          : (existing.notify_party_text ?? null),
+      shipper_name:
+        headerIn.shipper_name !== undefined
+          ? (s(headerIn.shipper_name) || null)
+          : (existing.shipper_name ?? null),
+      shipper_address:
+        headerIn.shipper_address !== undefined
+          ? (s(headerIn.shipper_address) || null)
+          : (existing.shipper_address ?? null),
       shipping_origin_code:
-        headerIn.shipping_origin_code ?? existing.shipping_origin_code ?? null,
-      port_of_loading: headerIn.port_of_loading ?? existing.port_of_loading ?? null,
+        headerIn.shipping_origin_code !== undefined
+          ? (s(headerIn.shipping_origin_code) || null)
+          : (existing.shipping_origin_code ?? null),
+      port_of_loading:
+        headerIn.port_of_loading !== undefined
+          ? (s(headerIn.port_of_loading) || null)
+          : (existing.port_of_loading ?? null),
       final_destination:
-        headerIn.final_destination ?? existing.final_destination ?? null,
-
-      etd: headerIn.etd ?? existing.etd ?? null,
-      eta: headerIn.eta ?? existing.eta ?? null,
-
-      status: headerIn.status ?? existing.status ?? null,
-
-      // total_amount는 아래에서 lines 기준으로 확정해서 다시 업데이트
+        headerIn.final_destination !== undefined
+          ? (s(headerIn.final_destination) || null)
+          : (existing.final_destination ?? null),
+      etd:
+        headerIn.etd !== undefined
+          ? normalizeDate10(headerIn.etd)
+          : normalizeDate10(existing.etd),
+      eta:
+        headerIn.eta !== undefined
+          ? normalizeDate10(headerIn.eta)
+          : normalizeDate10(existing.eta),
+      status:
+        headerIn.status !== undefined
+          ? (s(headerIn.status) || null)
+          : (existing.status ?? null),
       updated_at: new Date().toISOString(),
     };
 
-    const { error: hUpErr } = await supabaseAdmin
+    const { data: firstUpdatedHeader, error: hUpErr } = await supabaseAdmin
       .from("invoice_headers")
-      .update(headerPatch)
-      .eq("id", id);
+      .update({
+        ...headerPatch,
+        invoice_date: requestedInvoiceDate,
+      })
+      .eq("id", id)
+      .select("*")
+      .single();
 
     if (hUpErr) return bad(hUpErr.message, 500);
 
-    // --- lines upsert (삭제는 is_deleted=true로)
+    if (normalizeDate10(firstUpdatedHeader?.invoice_date) !== requestedInvoiceDate) {
+      return bad("Invoice date did not persist after header update.", 500, {
+        debug: {
+          requested_invoice_date: requestedInvoiceDate,
+          saved_invoice_date: normalizeDate10(firstUpdatedHeader?.invoice_date),
+        },
+      });
+    }
+
     if (linesIn.length > 0) {
       const toUpsert = linesIn
-        .filter((x) => x) // id 없으면 서버에서 생성
+        .filter((x) => x)
         .map((x) => {
           const qty = x.qty === "" || x.qty == null ? null : n(x.qty, 0);
           const unit_price =
             x.unit_price === "" || x.unit_price == null ? null : n(x.unit_price, 0);
 
-          // amount가 안오면 qty*unit_price로 계산
           const amount =
             x.amount == null || x.amount === ""
               ? n(qty) * n(unit_price)
@@ -235,22 +282,18 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
           return {
             id: x.id ?? randomUUID(),
-            invoice_id: x.invoice_id ?? id, // 안전
-            invoice_header_id: x.invoice_header_id ?? null,
+            invoice_id: x.invoice_id ?? id,
+            invoice_header_id: x.invoice_header_id ?? id,
             shipment_id: x.shipment_id ?? null,
-
             po_no: x.po_no ?? null,
             line_no: x.line_no ?? null,
             style_no: x.style_no && x.style_no !== "-" ? x.style_no : null,
             description: x.description ?? null,
-
             material_content: x.material_content ?? null,
             hs_code: x.hs_code ?? null,
-
             qty,
             unit_price,
             amount,
-
             is_deleted: !!x.is_deleted,
             updated_at: new Date().toISOString(),
           };
@@ -263,24 +306,45 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       if (lErr) return bad(lErr.message, 500);
     }
 
-    // --- 재조회 + total 확정 업데이트
-    const newHeader = await loadInvoiceHeader(id);
-    const newLines = await loadInvoiceLines(id, newHeader?.invoice_no);
-
+    const newLines = await loadInvoiceLines(id, firstUpdatedHeader?.invoice_no ?? existing.invoice_no);
     const total = computeTotalAmount(newLines);
 
-    // header.total_amount 확정 반영
-    await supabaseAdmin
+    const { data: finalHeader, error: totalErr } = await supabaseAdmin
       .from("invoice_headers")
-      .update({ total_amount: total, updated_at: new Date().toISOString() })
-      .eq("id", id);
+      .update({
+        total_amount: total,
+        invoice_date: requestedInvoiceDate,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select("*")
+      .single();
 
-    const finalHeader = await loadInvoiceHeader(id);
+    if (totalErr) return bad(totalErr.message, 500);
+
+    const finalSavedDate = normalizeDate10(finalHeader?.invoice_date);
+    if (finalSavedDate !== requestedInvoiceDate) {
+      return bad("Invoice date changed after final save.", 500, {
+        debug: {
+          requested_invoice_date: requestedInvoiceDate,
+          saved_invoice_date: finalSavedDate,
+        },
+      });
+    }
+
+    const outLines = (newLines || []).map((l: any) => ({
+      ...(l ?? {}),
+      style_no: pickStyleNo(l),
+    }));
 
     return ok({
-      header: finalHeader,
-      lines: newLines,
+      header: normalizeHeaderOut(finalHeader, total),
+      lines: outLines,
       meta: { locked: false, lock_reason: null },
+      debug: {
+        requested_invoice_date: requestedInvoiceDate,
+        saved_invoice_date: finalSavedDate,
+      },
     });
   } catch (e: any) {
     return bad(e?.message || "Server error", 500);
