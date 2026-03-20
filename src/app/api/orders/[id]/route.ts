@@ -129,7 +129,7 @@ async function loadExistingLineByIdOrLineNo(
   if (incomingId && isUuid(incomingId)) {
     const { data, error } = await supabaseAdmin
       .from("po_lines")
-      .select("id, line_no, image_url, image_urls, main_image_url, is_deleted")
+      .select("id, line_no, image_url, image_urls, main_image_url, is_deleted, qty_cancelled")
       .eq("id", incomingId)
       .eq("po_header_id", poHeaderId)
       .maybeSingle();
@@ -145,8 +145,8 @@ async function loadExistingLineByIdOrLineNo(
   const { data, error } = await supabaseAdmin
     .from("po_lines")
     .select(
-      "id, line_no, image_url, image_urls, main_image_url, is_deleted, updated_at"
-    )
+  "id, line_no, image_url, image_urls, main_image_url, is_deleted, qty_cancelled, updated_at"
+)
     .eq("po_header_id", poHeaderId)
     .eq("line_no", lineNo)
     .eq("is_deleted", false)
