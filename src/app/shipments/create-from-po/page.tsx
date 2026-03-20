@@ -1,7 +1,10 @@
 "use client";
 
 // src/app/shipments/create-from-po/page.tsx
-// A안(라인별 Mode + Split + Courier) + 검색형 PO 선택(참고 코드 반영) "전체 한방 교체본"
+// 부분선적 잔량 기준 버전
+// - 기존 shipment 누적수량을 차감하여 remaining_qty만 표시
+// - 전량 선적 완료 라인은 자동 제외
+// - split 허용, 저장 시 서버에서도 remaining 재검증
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
@@ -43,15 +46,13 @@ function num(v: any, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
-
 function num1(v: any, fallback = 0) {
   if (v === null || v === undefined || v === "") return fallback;
   const s = String(v).replace(",", ".");
   const n = Number(s);
   if (!Number.isFinite(n)) return fallback;
-  return Math.round(n * 10) / 10; // 소수점 1자리
+  return Math.round(n * 10) / 10;
 }
-
 function fmt2(n: number) {
   return (Number(n) || 0).toLocaleString(undefined, {
     minimumFractionDigits: 2,
@@ -77,8 +78,9 @@ function pickFirst(obj: any, keys: string[]) {
 function normalizeMode(v: any): ShipMode {
   const s = safe(v).toUpperCase();
   if (s.includes("AIR")) return "AIR";
-  if (s.includes("COURIER") || s.includes("DHL") || s.includes("FEDEX") || s.includes("UPS"))
+  if (s.includes("COURIER") || s.includes("DHL") || s.includes("FEDEX") || s.includes("UPS")) {
     return "COURIER";
+  }
   return "SEA";
 }
 function uid() {
@@ -92,19 +94,24 @@ function originCodeToCooText(code: string | null | undefined) {
   if (v.startsWith("KR_")) return "MADE IN KOREA";
   return "";
 }
-function commonOrMixed(values: Array<string | null | undefined>) {
-  const arr = values.map((v) => safe(v)).filter(Boolean);
-  if (arr.length === 0) return "-";
-  const first = arr[0];
-  const same = arr.every((x) => x === first);
-  return same ? first : "MIXED";
+
+function clamp(n: number, min: number, max: number) {
+  return Math.min(Math.max(n, min), max);
 }
+
+const CANCELLED_SHIPMENT_STATUSES = new Set(["CANCELLED", "DELETED"]);
 
 type PoHeader = any;
 type PoLine = any;
+type ShipmentLine = any;
+type ShipmentHeaderLite = {
+  id: string;
+  status?: string | null;
+  is_deleted?: boolean | null;
+};
 
 type AllocationRow = {
-  id: string; // client local id
+  id: string;
   po_id: string;
   po_no: string;
   po_line_id: string;
@@ -116,6 +123,8 @@ type AllocationRow = {
   size: string;
 
   order_qty: number;
+  prev_shipped_qty: number;
+  remaining_qty: number;
   shipped_qty: number;
 
   unit_price: number;
@@ -124,19 +133,15 @@ type AllocationRow = {
   cartons: number;
   gw_per_ctn: number;
   nw_per_ctn: number;
-
-  // 입력 중간값(예: '7.' / '0.5') 보존용
   gw_per_ctn_raw?: string;
   nw_per_ctn_raw?: string;
 
   include: boolean;
-
   ship_mode: ShipMode;
   carrier: string;
   tracking_no: string;
 };
 
-// PO incoterm이 null일 때 companies.buyer_default_incoterm로 보정 (참고 코드 반영)
 async function resolveIncotermFallback(supabase: any, buyerId: string | null): Promise<string | null> {
   if (!buyerId) return null;
   const { data, error } = await supabase
@@ -153,8 +158,6 @@ async function resolveIncotermFallback(supabase: any, buyerId: string | null): P
 }
 
 export default function ShipmentsCreateFromPoPage() {
-  // ⚠️ AppShell props는 프로젝트마다 다릅니다.
-  // 사용자가 올린 참고 코드가 currentRole을 사용하므로 동일하게 유지합니다.
   const currentRole: DevRole = ("staff" as any) as DevRole;
 
   const router = useRouter();
@@ -163,16 +166,12 @@ export default function ShipmentsCreateFromPoPage() {
   const [loading, setLoading] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
 
-  // PO search
   const [searchText, setSearchText] = React.useState("");
   const [poList, setPoList] = React.useState<PoHeader[]>([]);
   const [poLoading, setPoLoading] = React.useState(false);
 
-  // selected (same buyer only)
   const [selectedPoIds, setSelectedPoIds] = React.useState<string[]>([]);
   const [selectedHeaders, setSelectedHeaders] = React.useState<PoHeader[]>([]);
-
-  // allocations (merged rows, supports split)
   const [allocs, setAllocs] = React.useState<AllocationRow[]>([]);
 
   const selectedBuyerId = React.useMemo(() => {
@@ -180,7 +179,6 @@ export default function ShipmentsCreateFromPoPage() {
     return pickFirst(h, ["buyer_company_id", "buyer_id", "company_id"]) || "";
   }, [selectedHeaders]);
 
-  // ====== Search POs (server-side like, CONFIRMED best-effort) ======
   const handleSearchPo = React.useCallback(
     async (q?: string) => {
       const keyword = (q ?? searchText).trim();
@@ -192,7 +190,6 @@ export default function ShipmentsCreateFromPoPage() {
       try {
         const like = `%${keyword}%`;
 
-        // 기본 select: 필요한 필드 위주(없어도 괜찮게 pickFirst로 읽음)
         let qq = supabase
           .from("po_headers")
           .select("*")
@@ -208,13 +205,11 @@ export default function ShipmentsCreateFromPoPage() {
           .order("created_at", { ascending: false })
           .limit(100);
 
-        // status=CONFIRMED가 있으면 적용 (없어도 실패하지 않게 try)
         try {
           const { data, error } = await qq.eq("status", "CONFIRMED");
           if (!error) {
             setPoList(data ?? []);
           } else {
-            // fallback
             const { data: data2, error: error2 } = await qq;
             if (error2) throw error2;
             setPoList(data2 ?? []);
@@ -234,10 +229,65 @@ export default function ShipmentsCreateFromPoPage() {
     if (e.key === "Enter") handleSearchPo();
   };
 
-  // ====== Load PO lines ======
+  const loadShippedAggByPoLine = React.useCallback(
+    async (poLineIds: string[]) => {
+      const shippedByLineId = new Map<string, number>();
+      if (!poLineIds.length) return shippedByLineId;
+
+      const { data: rawShipmentLines, error: slErr } = await supabase
+        .from("shipment_lines")
+        .select("id, shipment_id, po_line_id, shipped_qty, is_deleted")
+        .in("po_line_id", poLineIds)
+        .eq("is_deleted", false);
+
+      if (slErr) throw slErr;
+
+      const shipmentLines: ShipmentLine[] = rawShipmentLines ?? [];
+      if (!shipmentLines.length) return shippedByLineId;
+
+      const shipmentIds = Array.from(
+        new Set(
+          shipmentLines
+            .map((r: any) => safe(r?.shipment_id))
+            .filter(Boolean)
+        )
+      );
+
+      const allowedShipmentIdSet = new Set<string>();
+      if (shipmentIds.length) {
+        const { data: shipments, error: shErr } = await supabase
+          .from("shipments")
+          .select("id, status, is_deleted")
+          .in("id", shipmentIds);
+
+        if (shErr) throw shErr;
+
+        for (const sh of (shipments ?? []) as ShipmentHeaderLite[]) {
+          const id = safe(sh?.id);
+          if (!id) continue;
+          if (Boolean(sh?.is_deleted)) continue;
+          const status = safe(sh?.status).toUpperCase();
+          if (CANCELLED_SHIPMENT_STATUSES.has(status)) continue;
+          allowedShipmentIdSet.add(id);
+        }
+      }
+
+      for (const row of shipmentLines) {
+        const shipmentId = safe((row as any)?.shipment_id);
+        if (allowedShipmentIdSet.size && !allowedShipmentIdSet.has(shipmentId)) continue;
+        const lineId = safe((row as any)?.po_line_id);
+        if (!lineId) continue;
+        const shipped = num((row as any)?.shipped_qty, 0);
+        shippedByLineId.set(lineId, num(shippedByLineId.get(lineId), 0) + shipped);
+      }
+
+      return shippedByLineId;
+    },
+    [supabase]
+  );
+
   const loadPoLines = React.useCallback(
     async (po: PoHeader) => {
-      // incoterm fallback 보정 (참고 코드 반영)
       let fixedPo = po;
       const buyerId = pickFirst(po, ["buyer_company_id", "buyer_id", "company_id"]) || null;
       const incoterm = pickFirst(po, ["incoterm"]);
@@ -254,6 +304,11 @@ export default function ShipmentsCreateFromPoPage() {
 
       if (error) throw error;
 
+      const lineIds = (data ?? [])
+        .map((ln: any) => safe(ln?.id))
+        .filter(Boolean);
+      const shippedAgg = await loadShippedAggByPoLine(lineIds);
+
       const headerMode = normalizeMode(pickFirst(fixedPo, ["ship_mode", "shipMode", "shipmode"]));
       const po_no = pickFirst(fixedPo, ["po_no", "poNo"]);
 
@@ -261,9 +316,9 @@ export default function ShipmentsCreateFromPoPage() {
         .filter((ln: any) => (ln?.is_deleted === undefined ? true : ln.is_deleted === false))
         .map((ln: PoLine) => {
           const orderQty = num(pickFirst(ln, ["qty", "order_qty", "orderQty"]), 0);
+          const prevShipped = num(shippedAgg.get(safe(ln?.id)), 0);
+          const remainingQty = Math.max(0, orderQty - prevShipped);
           const unitPrice = num(pickFirst(ln, ["unit_price", "unitPrice"]), 0);
-          const amt = num(pickFirst(ln, ["amount"]), orderQty * unitPrice);
-
           const style = pickFirst(ln, [
             "buyer_style_no",
             "buyer_style_code",
@@ -271,7 +326,6 @@ export default function ShipmentsCreateFromPoPage() {
             "jm_style_no",
             "jm_style_code",
           ]);
-
           const mode = normalizeMode(
             pickFirst(ln, ["ship_mode", "shipMode"]) ||
               pickFirst(fixedPo, ["ship_mode", "shipMode"]) ||
@@ -284,33 +338,29 @@ export default function ShipmentsCreateFromPoPage() {
             po_no: safe(po_no),
             po_line_id: ln.id,
             line_no: ln.line_no ?? null,
-
             style_no: safe(style),
             description: safe(pickFirst(ln, ["description"])),
             color: safe(pickFirst(ln, ["color"])),
             size: safe(pickFirst(ln, ["size"])),
-
             order_qty: orderQty,
-            shipped_qty: orderQty,
-
+            prev_shipped_qty: prevShipped,
+            remaining_qty: remainingQty,
+            shipped_qty: remainingQty,
             unit_price: unitPrice,
-            amount: amt,
-
+            amount: remainingQty * unitPrice,
             cartons: 0,
             gw_per_ctn: 0,
             nw_per_ctn: 0,
             gw_per_ctn_raw: "",
             nw_per_ctn_raw: "",
-
-            include: true,
-
+            include: remainingQty > 0,
             ship_mode: mode,
             carrier: "",
             tracking_no: "",
           };
-        });
+        })
+        .filter((r) => r.remaining_qty > 0);
 
-      // stable sort: PO -> line
       rows.sort((a, b) => {
         if (a.po_no !== b.po_no) return a.po_no.localeCompare(b.po_no);
         return (a.line_no ?? 0) - (b.line_no ?? 0);
@@ -318,18 +368,15 @@ export default function ShipmentsCreateFromPoPage() {
 
       return { fixedPo, rows };
     },
-    [supabase]
+    [supabase, loadShippedAggByPoLine]
   );
 
-  // ====== Toggle PO (same buyer constraint, add/remove rows) ======
   const handleTogglePo = React.useCallback(
     async (po: PoHeader) => {
       const poId = po?.id;
       if (!poId) return;
 
       const already = selectedPoIds.includes(poId);
-
-      // unselect
       if (already) {
         setSelectedPoIds((prev) => prev.filter((x) => x !== poId));
         setSelectedHeaders((prev) => prev.filter((x) => x.id !== poId));
@@ -337,7 +384,6 @@ export default function ShipmentsCreateFromPoPage() {
         return;
       }
 
-      // select: buyer constraint
       const buyerKey = pickFirst(po, ["buyer_company_id", "buyer_id", "company_id"]);
       if (!buyerKey) {
         alert("선택한 PO에 buyer_id가 없습니다. 먼저 PO에 buyer_id가 저장되어야 합니다.");
@@ -351,8 +397,6 @@ export default function ShipmentsCreateFromPoPage() {
       setLoading(true);
       try {
         const { fixedPo, rows } = await loadPoLines(po);
-
-        // enforce same buyer after fallback (safe)
         const buyerKey2 = pickFirst(fixedPo, ["buyer_company_id", "buyer_id", "company_id"]);
         if (!buyerKey2) {
           alert("buyer_id 가 PO에 없습니다. PO에 buyer_id가 저장되어 있어야 합니다.");
@@ -363,12 +407,15 @@ export default function ShipmentsCreateFromPoPage() {
           return;
         }
 
-        // add
+        if (rows.length === 0) {
+          alert("이 PO는 이미 전량 shipment 생성되어 남은 수량이 없습니다.");
+          return;
+        }
+
         setSelectedPoIds((prev) => [...prev, fixedPo.id]);
         setSelectedHeaders((prev) => [...prev, fixedPo]);
         setAllocs((prev) => {
           const next = [...prev, ...rows];
-          // keep stable sort
           next.sort((a, b) => {
             if (a.po_no !== b.po_no) return a.po_no.localeCompare(b.po_no);
             return (a.line_no ?? 0) - (b.line_no ?? 0);
@@ -391,20 +438,20 @@ export default function ShipmentsCreateFromPoPage() {
     setAllocs([]);
   }, []);
 
-  // ====== Update alloc row ======
   const updateAlloc = (id: string, patch: Partial<AllocationRow>) => {
     setAllocs((prev) =>
       prev.map((r) => {
         if (r.id !== id) return r;
         const merged = { ...r, ...patch };
-        // amount recalculation when shipped_qty or unit_price changes
-        merged.amount = num(merged.shipped_qty, 0) * num(merged.unit_price, 0);
+        const maxQty = num(merged.remaining_qty, 0);
+        const shippedQty = clamp(num(merged.shipped_qty, 0), 0, maxQty);
+        merged.shipped_qty = shippedQty;
+        merged.amount = shippedQty * num(merged.unit_price, 0);
         return merged;
       })
     );
   };
 
-  // ====== Split (Partial Shipment) ======
   const splitRow = (id: string) => {
     const row = allocs.find((r) => r.id === id);
     if (!row) return;
@@ -446,7 +493,6 @@ export default function ShipmentsCreateFromPoPage() {
 
   const removeRow = (id: string) => setAllocs((prev) => prev.filter((r) => r.id !== id));
 
-  // ====== Summary / Totals ======
   const header0 = selectedHeaders?.[0] ?? null;
   const buyerName = safe(pickFirst(header0, ["buyer_name", "buyerName"]));
   const currency = safe(pickFirst(header0, ["currency"])) || "USD";
@@ -479,7 +525,6 @@ export default function ShipmentsCreateFromPoPage() {
     return { totalCartons, totalGW, totalNW, totalAmount, byMode };
   }, [allocs]);
 
-  // ====== Save (split by mode creates multiple shipments) ======
   const save = async () => {
     const po_ids = selectedHeaders.map((h) => h.id).filter(Boolean);
     if (po_ids.length === 0) {
@@ -487,24 +532,37 @@ export default function ShipmentsCreateFromPoPage() {
       return;
     }
 
-    const lines = allocs
-      .filter((r) => r.include && num(r.shipped_qty, 0) > 0)
-      .map((r) => ({
-        po_id: r.po_id,
-        po_line_id: r.po_line_id,
-        shipped_qty: num(r.shipped_qty, 0),
-        ship_mode: r.ship_mode,
-        carrier: safe(r.carrier),
-        tracking_no: safe(r.tracking_no),
-        cartons: num(r.cartons, 0),
-        gw_per_ctn: num(r.gw_per_ctn, 0),
-        nw_per_ctn: num(r.nw_per_ctn, 0),
-      }));
-
-    if (lines.length === 0) {
+    const includedRows = allocs.filter((r) => r.include && num(r.shipped_qty, 0) > 0);
+    if (includedRows.length === 0) {
       alert("출고할 라인이 없습니다. (Shipped Qty > 0 필요)");
       return;
     }
+
+    const reqByLine = new Map<string, number>();
+    for (const r of includedRows) {
+      reqByLine.set(r.po_line_id, num(reqByLine.get(r.po_line_id), 0) + num(r.shipped_qty, 0));
+    }
+    for (const r of allocs) {
+      const requested = num(reqByLine.get(r.po_line_id), 0);
+      if (requested > num(r.remaining_qty, 0)) {
+        alert(
+          `Style ${r.style_no || r.po_line_id}: 요청 출고수량 ${requested} 이(가) 남은 수량 ${r.remaining_qty} 을 초과합니다.`
+        );
+        return;
+      }
+    }
+
+    const lines = includedRows.map((r) => ({
+      po_id: r.po_id,
+      po_line_id: r.po_line_id,
+      shipped_qty: num(r.shipped_qty, 0),
+      ship_mode: r.ship_mode,
+      carrier: safe(r.carrier),
+      tracking_no: safe(r.tracking_no),
+      cartons: num(r.cartons, 0),
+      gw_per_ctn: num(r.gw_per_ctn, 0),
+      nw_per_ctn: num(r.nw_per_ctn, 0),
+    }));
 
     setSaving(true);
     try {
@@ -525,7 +583,6 @@ export default function ShipmentsCreateFromPoPage() {
       if (ids.length === 1) {
         window.location.href = `/shipments/${ids[0]}`;
       } else {
-        // stay; user can see list / refresh
         router.refresh();
       }
     } catch (e: any) {
@@ -539,12 +596,11 @@ export default function ShipmentsCreateFromPoPage() {
   return (
     <AppShell currentRole={currentRole}>
       <div className="space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <div>
             <div className="text-2xl font-semibold">Create Shipment from PO</div>
             <div className="text-sm text-muted-foreground">
-              ✅ A안: 라인별 Ship Mode(SEA/AIR/COURIER) 선택 → 저장 시 Mode별 Shipment 자동 생성 (같은 라인도 split 가능)
+              남은 shipment 가능 수량만 표시됩니다. 기존 shipment 누적수량은 자동 차감됩니다.
             </div>
           </div>
           <div className="flex gap-2">
@@ -554,7 +610,6 @@ export default function ShipmentsCreateFromPoPage() {
           </div>
         </div>
 
-        {/* 1) PO Search & Select */}
         <Card>
           <CardHeader>
             <CardTitle>1. Select PO(s)</CardTitle>
@@ -579,8 +634,7 @@ export default function ShipmentsCreateFromPoPage() {
               <span className="font-semibold">Selected:</span>{" "}
               {selectedHeaders.length ? (
                 <>
-                  {selectedHeaders.length} PO(s) — Buyer:{" "}
-                  <span className="font-semibold">{buyerName || "-"}</span>{" "}
+                  {selectedHeaders.length} PO(s) — Buyer: <span className="font-semibold">{buyerName || "-"}</span>{" "}
                   <span className="text-muted-foreground">
                     ({selectedHeaders.map((h) => safe(pickFirst(h, ["po_no", "poNo"]))).join(", ")})
                   </span>
@@ -618,8 +672,6 @@ export default function ShipmentsCreateFromPoPage() {
                     const sd = safe(pickFirst(h, ["requested_ship_date", "ship_date", "shipDate"])).slice(0, 10);
                     const cur = safe(pickFirst(h, ["currency"])) || "USD";
                     const st = safe(pickFirst(h, ["status"])) || "";
-
-                    // same buyer only (첫 선택 이후)
                     const buyerKey = pickFirst(h, ["buyer_company_id", "buyer_id", "company_id"]);
                     const disabled = !checked && !!selectedBuyerId && !!buyerKey && buyerKey !== selectedBuyerId;
 
@@ -656,7 +708,6 @@ export default function ShipmentsCreateFromPoPage() {
           </CardContent>
         </Card>
 
-        {/* 2) Header Preview */}
         {selectedPoIds.length > 0 && (
           <Card>
             <CardHeader>
@@ -666,8 +717,7 @@ export default function ShipmentsCreateFromPoPage() {
               <div>
                 <div className="text-sm font-semibold">PO(s)</div>
                 <div className="text-sm">
-                  {selectedHeaders.length} —{" "}
-                  {selectedHeaders.map((h) => safe(pickFirst(h, ["po_no", "poNo"]))).join(", ")}
+                  {selectedHeaders.length} — {selectedHeaders.map((h) => safe(pickFirst(h, ["po_no", "poNo"]))).join(", ")}
                 </div>
               </div>
               <div>
@@ -707,21 +757,19 @@ export default function ShipmentsCreateFromPoPage() {
               <div className="md:col-span-5">
                 <Separator className="my-2" />
                 <div className="text-sm text-muted-foreground">
-                  * 저장 시: 라인별 Mode 기준으로 Shipment가 나뉘어 생성됩니다.
+                  * 저장 시 라인별 Mode 기준으로 Shipment가 나뉘어 생성됩니다. 기존 shipment는 덮어쓰지 않고 새 shipment가 생성됩니다.
                 </div>
               </div>
             </CardContent>
           </Card>
         )}
 
-        {/* 3) Lines & Totals */}
         {selectedPoIds.length > 0 && (
           <Card>
             <CardHeader>
-              <CardTitle>3. Shipment Lines & Totals (Split by Mode)</CardTitle>
+              <CardTitle>3. Shipment Lines & Totals (Remaining Qty Based)</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Totals */}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <div>
                   <Label>Total Cartons</Label>
@@ -745,27 +793,23 @@ export default function ShipmentsCreateFromPoPage() {
                 <div>
                   <span className="font-semibold">SEA</span>{" "}
                   <span className="text-muted-foreground">
-                    Qty {summary.byMode.SEA.qty.toLocaleString()} /{" "}
-                    {money(summary.byMode.SEA.amount, currency)}
+                    Qty {summary.byMode.SEA.qty.toLocaleString()} / {money(summary.byMode.SEA.amount, currency)}
                   </span>
                 </div>
                 <div>
                   <span className="font-semibold">AIR</span>{" "}
                   <span className="text-muted-foreground">
-                    Qty {summary.byMode.AIR.qty.toLocaleString()} /{" "}
-                    {money(summary.byMode.AIR.amount, currency)}
+                    Qty {summary.byMode.AIR.qty.toLocaleString()} / {money(summary.byMode.AIR.amount, currency)}
                   </span>
                 </div>
                 <div>
                   <span className="font-semibold">COURIER</span>{" "}
                   <span className="text-muted-foreground">
-                    Qty {summary.byMode.COURIER.qty.toLocaleString()} /{" "}
-                    {money(summary.byMode.COURIER.amount, currency)}
+                    Qty {summary.byMode.COURIER.qty.toLocaleString()} / {money(summary.byMode.COURIER.amount, currency)}
                   </span>
                 </div>
               </div>
 
-              {/* Lines table */}
               <div className="border rounded-md overflow-hidden">
                 <Table>
                   <TableHeader>
@@ -778,6 +822,8 @@ export default function ShipmentsCreateFromPoPage() {
                       <TableHead className="w-[90px]">Color</TableHead>
                       <TableHead className="w-[70px]">Size</TableHead>
                       <TableHead className="w-[90px] text-right">Order</TableHead>
+                      <TableHead className="w-[90px] text-right">Prev Shipped</TableHead>
+                      <TableHead className="w-[90px] text-right">Remain</TableHead>
                       <TableHead className="w-[120px]">Shipped</TableHead>
                       <TableHead className="w-[120px] text-right">Unit Price</TableHead>
                       <TableHead className="w-[120px] text-right">Amount</TableHead>
@@ -807,19 +853,23 @@ export default function ShipmentsCreateFromPoPage() {
                         <TableCell className="whitespace-pre-wrap">{r.description}</TableCell>
                         <TableCell>{r.color || "-"}</TableCell>
                         <TableCell>{r.size || "-"}</TableCell>
-
                         <TableCell className="text-right">{r.order_qty.toLocaleString()}</TableCell>
+                        <TableCell className="text-right">{r.prev_shipped_qty.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-semibold">{r.remaining_qty.toLocaleString()}</TableCell>
 
                         <TableCell>
                           <Input
                             value={String(r.shipped_qty)}
-                            onChange={(e) => updateAlloc(r.id, { shipped_qty: num(e.target.value, 0) })}
+                            onChange={(e) =>
+                              updateAlloc(r.id, {
+                                shipped_qty: clamp(num(e.target.value, 0), 0, num(r.remaining_qty, 0)),
+                              })
+                            }
                             disabled={!r.include}
                           />
                         </TableCell>
 
                         <TableCell className="text-right">{money(r.unit_price, currency)}</TableCell>
-
                         <TableCell className="text-right">
                           {money(num(r.shipped_qty, 0) * num(r.unit_price, 0), currency)}
                         </TableCell>
@@ -839,11 +889,7 @@ export default function ShipmentsCreateFromPoPage() {
                             step="0.1"
                             pattern="[0-9]*[.,]?[0-9]?"
                             value={r.gw_per_ctn_raw ?? String(r.gw_per_ctn)}
-                            onChange={(e) =>
-                              updateAlloc(r.id, {
-                                gw_per_ctn_raw: e.target.value,
-                              })
-                            }
+                            onChange={(e) => updateAlloc(r.id, { gw_per_ctn_raw: e.target.value })}
                             onBlur={() => {
                               const v = num1(r.gw_per_ctn_raw ?? r.gw_per_ctn, 0);
                               updateAlloc(r.id, { gw_per_ctn: v, gw_per_ctn_raw: String(v) });
@@ -859,11 +905,7 @@ export default function ShipmentsCreateFromPoPage() {
                             step="0.1"
                             pattern="[0-9]*[.,]?[0-9]?"
                             value={r.nw_per_ctn_raw ?? String(r.nw_per_ctn)}
-                            onChange={(e) =>
-                              updateAlloc(r.id, {
-                                nw_per_ctn_raw: e.target.value,
-                              })
-                            }
+                            onChange={(e) => updateAlloc(r.id, { nw_per_ctn_raw: e.target.value })}
                             onBlur={() => {
                               const v = num1(r.nw_per_ctn_raw ?? r.nw_per_ctn, 0);
                               updateAlloc(r.id, { nw_per_ctn: v, nw_per_ctn_raw: String(v) });
@@ -928,7 +970,7 @@ export default function ShipmentsCreateFromPoPage() {
 
                     {allocs.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={19} className="text-muted-foreground">
+                        <TableCell colSpan={21} className="text-muted-foreground">
                           No lines. Select PO(s) first.
                         </TableCell>
                       </TableRow>
