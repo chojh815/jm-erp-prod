@@ -1218,7 +1218,7 @@ const fetchPoList = React.useCallback(
         }
 
         const header = data.header as any;
-
+        
         // keep header id for UPDATE
         const _loadedHeaderId = header?.id ? String(header.id) : null;
         setPoHeaderId(_loadedHeaderId);
@@ -1835,20 +1835,66 @@ if (targetStatus === "CANCELLED" && hasAnyShipped) {
     };
 
     const payload = {
-      header: headerPayload,
-      lines,
-      totals: { subtotal },
-      audit,
-    };
+  header: headerPayload,
+  lines: linesToSave,
+  totals: { subtotal },
+  audit,
+};
 
     try {
       setSaving(true);
 
-      const res = await fetch("/api/orders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+// 1) 현재 들고 있는 id 우선
+let resolvedHeaderId = String(
+  poHeaderId || loadedHeaderIdRef.current || ""
+).trim();
+
+// 2) id가 없지만 poNo가 있으면, 저장 직전에 poNo로 다시 조회해서 기존 PO id를 복구
+if (!resolvedHeaderId && poNo.trim()) {
+  try {
+    const probeRes = await fetch(
+      `/api/orders?poNo=${encodeURIComponent(poNo.trim())}`,
+      { cache: "no-store" }
+    );
+    const probeData = await probeRes.json().catch(() => null);
+
+    if (probeRes.ok) {
+      const probedId = String(probeData?.header?.id || "").trim();
+      if (probedId) {
+        resolvedHeaderId = probedId;
+        setPoHeaderId(probedId);
+        loadedHeaderIdRef.current = probedId;
+        loadedPoNoRef.current = poNo.trim();
+      }
+    }
+  } catch (e) {
+    console.warn("Failed to probe existing PO by poNo before save:", e);
+  }
+}
+
+const isEditMode = !!resolvedHeaderId;
+
+const saveUrl = isEditMode
+  ? `/api/orders/${encodeURIComponent(resolvedHeaderId)}`
+  : "/api/orders";
+
+const saveMethod = isEditMode ? "PUT" : "POST";
+
+if (isEditMode) {
+  const okOverwrite = window.confirm(
+    "This PO already exists. Save changes and overwrite the current PO?"
+  );
+  if (!okOverwrite) {
+    setSaving(false);
+    return;
+  }
+}
+
+const res = await fetch(saveUrl, {
+  method: saveMethod,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload),
+});
 
       const data = await res.json().catch(() => null);
 

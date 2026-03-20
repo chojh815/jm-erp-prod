@@ -15,13 +15,86 @@ function safeTrim(v: any) {
 function isEmpty(v: any) {
   return safeTrim(v) === "";
 }
+function str(v: any): string | null {
+  const s = safeTrim(v);
+  return s ? s : null;
+}
+function strUndefIfEmpty(v: any): string | undefined {
+  const s = safeTrim(v);
+  return s ? s : undefined;
+}
+function num(v: any, fallback: number | null = 0): number | null {
+  if (v === undefined || v === null || v === "") return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+function intNum(v: any, fallback = 0): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.trunc(n));
+}
+function pickDate(obj: any, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v === undefined || v === null || v === "") continue;
+    const s = String(v).trim();
+    if (!s) continue;
+    if (/^\d{4}-\d{2}-\d{2}T/.test(s)) return s.slice(0, 10);
+    return s;
+  }
+  return undefined;
+}
+
+function normalizeImageUrls(input: any): string[] | null | undefined {
+  if (input === null) return null;
+
+  const v =
+    input?.image_urls ??
+    input?.imageUrls ??
+    input?.thumbUrls ??
+    input?.thumb_urls ??
+    input?.images;
+
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+
+  if (Array.isArray(v)) {
+    const cleaned = v
+      .map((x) => (typeof x === "string" ? x.trim() : ""))
+      .filter(Boolean);
+    return cleaned.length ? cleaned : [];
+  }
+
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return [];
+    if (s.startsWith("[") && s.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed)) {
+          const cleaned = parsed
+            .map((x) => (typeof x === "string" ? x.trim() : ""))
+            .filter(Boolean);
+          return cleaned.length ? cleaned : [];
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return [s];
+  }
+
+  return null;
+}
 
 async function loadBuyerDefaults(buyerId: string) {
   if (!buyerId || !isUuid(buyerId)) return null;
 
   const { data, error } = await supabaseAdmin
     .from("companies")
-    .select("buyer_default_incoterm, buyer_consignee, buyer_notify_party")
+    .select(
+      "buyer_default_incoterm, buyer_consignee, buyer_notify_party, buyer_payment_term_id, buyer_payment_term, buyer_default_ship_mode, buyer_final_destination"
+    )
     .eq("id", buyerId)
     .maybeSingle();
 
@@ -32,9 +105,6 @@ async function loadBuyerDefaults(buyerId: string) {
 async function resolveBrandName(brandId: string) {
   if (!brandId || !isUuid(brandId)) return "";
 
-  // buyer_brands 테이블명은 프로젝트에 따라 다를 수 있음
-  // (buyer_brands / brands / company_brands 등)
-  // 현재 스키마 기준: buyer_brands 가정
   const { data, error } = await supabaseAdmin
     .from("buyer_brands")
     .select("id, brand_name, name")
@@ -42,27 +112,61 @@ async function resolveBrandName(brandId: string) {
     .maybeSingle();
 
   if (error) {
-    // brand 테이블명이 다르거나 컬럼이 다를 수 있으니,
-    // brand_name/name 둘 다 시도했는데도 실패하면 조용히 빈값 반환 (저장 자체는 진행)
     console.warn("resolveBrandName error:", error?.message);
     return "";
   }
 
-  const name = safeTrim((data as any)?.brand_name ?? (data as any)?.name);
-  return name;
+  return safeTrim((data as any)?.brand_name ?? (data as any)?.name);
+}
+
+async function loadExistingLineByIdOrLineNo(
+  poHeaderId: string,
+  incomingLine: any,
+  fallbackLineNo: number
+) {
+  const incomingId = safeTrim(incomingLine?.id);
+
+  if (incomingId && isUuid(incomingId)) {
+    const { data, error } = await supabaseAdmin
+      .from("po_lines")
+      .select("id, line_no, image_url, image_urls, main_image_url, is_deleted")
+      .eq("id", incomingId)
+      .eq("po_header_id", poHeaderId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (data?.id) return data;
+  }
+
+  const lineNoRaw =
+    incomingLine?.line_no ?? incomingLine?.lineNo ?? fallbackLineNo;
+  const lineNo = intNum(lineNoRaw, fallbackLineNo);
+
+  const { data, error } = await supabaseAdmin
+    .from("po_lines")
+    .select(
+      "id, line_no, image_url, image_urls, main_image_url, is_deleted, updated_at"
+    )
+    .eq("po_header_id", poHeaderId)
+    .eq("line_no", lineNo)
+    .eq("is_deleted", false)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+
+  if (error) throw error;
+  return Array.isArray(data) && data.length > 0 ? data[0] : null;
 }
 
 /**
  * GET /api/orders/[id]
  * - PO 헤더/라인 조회 (소프트삭제 제외)
+ * - shipped_qty / remaining_qty 포함
  */
 export async function GET(
   _req: Request,
   { params }: { params: { id: string } }
 ) {
   try {
-    // (권한키는 프로젝트마다 다를 수 있어 최소한으로 적용)
-    // 필요없으면 아래 2줄 주석 처리 가능
     const guard = await assertApiPermission("po.view");
     if (guard) return guard;
 
@@ -112,46 +216,44 @@ export async function GET(
       );
     }
 
+    const baseLines = (lines ?? []) as any[];
+    const lineIds = baseLines
+      .map((r) => String(r?.id || ""))
+      .filter((v) => isUuid(v));
 
-// ✅ shipped_qty(출하수량) 합산해서 라인에 붙여 내려줌
-// - shipment_lines: po_line_id, shipped_qty
-const baseLines = (lines ?? []) as any[];
-const lineIds = baseLines
-  .map((r) => String(r?.id || ""))
-  .filter((v) => isUuid(v));
+    const shippedMap = new Map<string, number>();
+    if (lineIds.length > 0) {
+      const { data: shipRows, error: shipErr } = await supabaseAdmin
+        .from("shipment_lines")
+        .select("po_line_id, shipped_qty")
+        .in("po_line_id", lineIds);
 
-const shippedMap = new Map<string, number>();
-if (lineIds.length > 0) {
-  const { data: shipRows, error: shipErr } = await supabaseAdmin
-    .from("shipment_lines")
-    .select("po_line_id, shipped_qty")
-    .in("po_line_id", lineIds);
-
-  if (shipErr) {
-    console.error("Load shipment_lines error:", shipErr);
-  } else {
-    for (const r of shipRows ?? []) {
-      const id = String((r as any).po_line_id || "");
-      const q = Number((r as any).shipped_qty ?? 0);
-      if (!id) continue;
-      shippedMap.set(id, (shippedMap.get(id) ?? 0) + (Number.isFinite(q) ? q : 0));
+      if (shipErr) {
+        console.error("Load shipment_lines error:", shipErr);
+      } else {
+        for (const r of shipRows ?? []) {
+          const id = String((r as any).po_line_id || "");
+          const q = Number((r as any).shipped_qty ?? 0);
+          if (!id) continue;
+          shippedMap.set(id, (shippedMap.get(id) ?? 0) + (Number.isFinite(q) ? q : 0));
+        }
+      }
     }
-  }
-}
 
-const enrichedLines = baseLines.map((r) => {
-  const ordered = Number((r as any).qty ?? 0) || 0;
-  const cancelled = Number((r as any).qty_cancelled ?? (r as any).cancel_qty ?? 0) || 0;
-  const shipped = shippedMap.get(String((r as any).id)) ?? 0;
-  const remaining = Math.max(0, ordered - shipped - cancelled);
+    const enrichedLines = baseLines.map((r) => {
+      const ordered = Number((r as any).qty ?? 0) || 0;
+      const cancelled =
+        Number((r as any).qty_cancelled ?? (r as any).cancel_qty ?? 0) || 0;
+      const shipped = shippedMap.get(String((r as any).id)) ?? 0;
+      const remaining = Math.max(0, ordered - shipped - cancelled);
 
-  return {
-    ...r,
-    shipped_qty: shipped,
-    qty_cancelled: cancelled,
-    remaining_qty: remaining,
-  };
-});
+      return {
+        ...r,
+        shipped_qty: shipped,
+        qty_cancelled: cancelled,
+        remaining_qty: remaining,
+      };
+    });
 
     return NextResponse.json({ success: true, header, lines: enrichedLines });
   } catch (err: any) {
@@ -165,12 +267,10 @@ const enrichedLines = baseLines.map((r) => {
 
 /**
  * PUT /api/orders/[id]
- * - PO 저장(헤더 중심)
- * - 핵심: buyer_brand_id/name 저장 + incoterm 자동 주입(companies.buyer_default_incoterm)
- *
- * 기대 Body(유연 처리):
- *  A) { header: {...}, lines?: [...] }
- *  B) { ...headerFields, lines?: [...] }
+ * - 기존 PO 수정 저장
+ * - 헤더 + 라인 동시 저장
+ * - po_no 변경 금지
+ * - payload에 없는 기존 라인은 soft-delete
  */
 export async function PUT(
   req: Request,
@@ -191,9 +291,9 @@ export async function PUT(
 
     const body = await req.json().catch(() => ({}));
     const headerIn = (body?.header ?? body ?? {}) as any;
-    const linesIn = (body?.lines ?? []) as any[];
+    const linesIn = Array.isArray(body?.lines) ? body.lines : [];
+    const totalsIn = (body?.totals ?? {}) as any;
 
-    // 0) 기존 헤더 로드
     const { data: existing, error: existErr } = await supabaseAdmin
       .from("po_headers")
       .select("*")
@@ -222,11 +322,10 @@ export async function PUT(
       );
     }
 
-    // ✅ 안전장치: 기존 PO의 po_no는 일반 저장(수정)에서 절대 변경하지 않는다.
-    // (예: 4400003848 → 4400003848S 로 바뀌는 사고 방지)
-    // PO 번호 변경이 필요하면 "Copy as New PO"(duplicate) 기능으로 새 PO를 만들도록 한다.
     const existingPoNo = safeTrim(existing?.po_no);
-    const incomingPoNo = headerIn?.po_no !== undefined ? safeTrim(headerIn?.po_no) : "";
+    const incomingPoNo =
+      headerIn?.po_no !== undefined ? safeTrim(headerIn?.po_no) : "";
+
     if (!isEmpty(incomingPoNo) && !isEmpty(existingPoNo) && incomingPoNo !== existingPoNo) {
       return NextResponse.json(
         {
@@ -241,31 +340,26 @@ export async function PUT(
 
     const now = new Date().toISOString();
 
-    // 1) buyer_id 확정 (payload 우선, 없으면 기존값)
     const buyer_id = safeTrim(headerIn?.buyer_id) || safeTrim(existing?.buyer_id);
-
-    // 2) 회사 기본값 로드 (incoterm/consignee/notify)
     const buyerDefaults = await loadBuyerDefaults(buyer_id).catch((e) => {
       console.error("loadBuyerDefaults error:", e);
       return null;
     });
 
-    // 3) Brand 처리
-    // - payload로 buyer_brand_id가 오면 그걸 우선 저장
-    // - buyer_brand_name은 서버가 buyer_brands에서 찾아서 확정 저장(가능하면)
     const incomingBrandId = safeTrim(headerIn?.buyer_brand_id);
     const existingBrandId = safeTrim(existing?.buyer_brand_id);
     const brandIdToSave = incomingBrandId || existingBrandId || null;
 
-    let brandNameToSave = safeTrim(headerIn?.buyer_brand_name);
+    let brandNameToSave =
+      safeTrim(headerIn?.buyer_brand_name) ||
+      safeTrim(headerIn?.brand) ||
+      safeTrim(existing?.buyer_brand_name);
+
     if (brandIdToSave) {
       const resolved = await resolveBrandName(brandIdToSave);
       if (!isEmpty(resolved)) brandNameToSave = resolved;
     }
 
-    // 4) Incoterm 처리
-    // - 화면 입력칸 없으니, payload가 비어있으면 companies 기본값을 주입
-    // - 단, 이미 existing에 값이 있으면 덮어쓰지 않음(데이터 보호)
     const incomingIncoterm = safeTrim(headerIn?.incoterm);
     const existingIncoterm = safeTrim(existing?.incoterm);
     const companyDefaultIncoterm = safeTrim(buyerDefaults?.buyer_default_incoterm);
@@ -277,26 +371,23 @@ export async function PUT(
         ? existingIncoterm
         : companyDefaultIncoterm;
 
-    // 5) 헤더 업데이트 payload 구성
-    // - headerIn의 값들을 최대한 반영하되, 민감한 키는 우리가 확정/보정
-    // - undefined는 업데이트에 넣지 않기 위해 수동으로 구성
     const patch: Record<string, any> = {
       updated_at: now,
     };
 
-    // (a) 일반 필드 반영: 필요 필드만 선별적으로 반영 (너무 공격적으로 전체 spread 안 함)
-    // - 여기서 프로젝트에 있는 컬럼들만 넣어주세요.
-    // - 아래는 “대표적인 PO 헤더 필드”들만 안전하게 처리
     const allow = [
       "buyer_id",
       "buyer_name",
       "buyer_code",
+      "order_type",
       "order_date",
       "requested_ship_date",
       "origin_code",
       "payment_term_id",
+      "payment_term",
       "currency",
       "final_destination",
+      "destination",
       "port_of_loading",
       "ship_mode",
       "carrier",
@@ -304,23 +395,85 @@ export async function PUT(
       "cancel_date",
       "cancel_reason",
       "status",
+      "shipping_origin_code",
+      "approval_sample_target_date",
+      "pp_sample_target_date",
+      "top_sample_target_date",
+      "final_sample_target_date",
+      "updated_by",
+      "updated_by_email",
+      "created_by",
+      "created_by_email",
     ];
 
     for (const k of allow) {
       if (headerIn?.[k] !== undefined) patch[k] = headerIn[k];
     }
 
-    // (b) 보정 필드 강제 반영
     if (buyer_id) patch.buyer_id = buyer_id;
-
-    // brand
     patch.buyer_brand_id = brandIdToSave;
-    patch.buyer_brand_name = brandNameToSave;
+    patch.buyer_brand_name = brandNameToSave || null;
+    patch.buyer_dept_name =
+      safeTrim(headerIn?.buyer_dept_name) ||
+      safeTrim(headerIn?.department) ||
+      safeTrim(headerIn?.dept) ||
+      safeTrim(existing?.buyer_dept_name) ||
+      null;
 
-    // incoterm
-    patch.incoterm = incotermToSave;
+    patch.incoterm = incotermToSave || null;
 
-    // 6) 헤더 업데이트
+    if (
+      patch.payment_term_id &&
+      typeof patch.payment_term_id === "string" &&
+      patch.payment_term_id.startsWith("TEMP-")
+    ) {
+      patch.payment_term_id = null;
+    }
+
+    if (patch.payment_term === undefined) {
+      patch.payment_term =
+        safeTrim(headerIn?.payment_term) ||
+        safeTrim(existing?.payment_term) ||
+        safeTrim(buyerDefaults?.buyer_payment_term) ||
+        null;
+    }
+
+    if (patch.ship_mode === undefined) {
+      patch.ship_mode =
+        safeTrim(headerIn?.ship_mode) ||
+        safeTrim(existing?.ship_mode) ||
+        safeTrim(buyerDefaults?.buyer_default_ship_mode) ||
+        null;
+    }
+
+    if (patch.destination === undefined && patch.final_destination === undefined) {
+      const fallbackDest =
+        safeTrim(headerIn?.destination) ||
+        safeTrim(existing?.destination) ||
+        safeTrim(buyerDefaults?.buyer_final_destination) ||
+        null;
+      patch.destination = fallbackDest;
+    }
+
+    if (patch.shipping_origin_code === undefined) {
+      patch.shipping_origin_code =
+        safeTrim(headerIn?.shipping_origin_code) ||
+        safeTrim(existing?.shipping_origin_code) ||
+        null;
+    }
+
+    if (
+      String(patch.status ?? existing?.status ?? "").toUpperCase() === "CONFIRMED" &&
+      !existing?.confirmed_at
+    ) {
+      patch.confirmed_at = now;
+    }
+
+    if (totalsIn?.subtotal !== undefined) {
+      const subtotal = num(totalsIn.subtotal, null);
+      if (subtotal !== null) patch.subtotal = subtotal;
+    }
+
     const { data: updatedHeader, error: upErr } = await supabaseAdmin
       .from("po_headers")
       .update(patch)
@@ -336,15 +489,183 @@ export async function PUT(
       );
     }
 
-    // 7) (옵션) 라인 업데이트는 여기서 과감히 건드리지 않음
-    //    기존 프로젝트는 라인 저장 로직이 별도일 가능성이 높고,
-    //    지금 이슈의 핵심은 "헤더 brand/incoterm 저장"이므로 안정성을 위해 생략.
-    //    필요하면 너가 쓰는 기존 라인 저장 API로 유지하는 게 안전.
+    const incomingLines = Array.isArray(linesIn) ? linesIn : [];
+    const keepIds: string[] = [];
+
+    const parsedLineNos = incomingLines.map((ln: any, i: number) => {
+      const raw = ln?.line_no ?? ln?.lineNo ?? i + 1;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : i + 1;
+    });
+    const hasDupLineNo = new Set(parsedLineNos).size !== parsedLineNos.length;
+    const useSequentialLineNo = hasDupLineNo;
+
+    for (let i = 0; i < incomingLines.length; i++) {
+      const ln = incomingLines[i] ?? {};
+      const lineNo = useSequentialLineNo
+        ? i + 1
+        : intNum(ln?.line_no ?? ln?.lineNo, i + 1);
+
+      const existingLine = await loadExistingLineByIdOrLineNo(poHeaderId, ln, lineNo);
+
+      const qty = intNum(ln?.qty, 0);
+      const qtyCancelled = intNum(
+        ln?.qty_cancelled ?? ln?.cancel_qty ?? existingLine?.qty_cancelled,
+        0
+      );
+      const unitPrice = Number(num(ln?.unit_price ?? ln?.unitPrice ?? ln?.price, 0) ?? 0);
+      const amount =
+        num(ln?.amount, null) !== null
+          ? Number(num(ln?.amount, 0) ?? 0)
+          : Math.round(qty * unitPrice * 100) / 100;
+
+      const base: Record<string, any> = {
+        po_header_id: poHeaderId,
+        line_no: lineNo,
+
+        buyer_style_no: str(ln?.buyer_style_no ?? ln?.buyerStyleNo),
+        jm_style_no: str(ln?.jm_style_no ?? ln?.jmStyleNo ?? ln?.style_no ?? ln?.styleNo),
+        description: str(ln?.description),
+
+        color: str(ln?.color),
+        size: str(ln?.size),
+        plating_color: str(ln?.plating_color ?? ln?.platingColor),
+        hs_code: str(ln?.hs_code ?? ln?.hsCode),
+        upc: str(ln?.upc),
+
+        uom: str(ln?.uom ?? ln?.unit) ?? "PCS",
+        remark: str(ln?.remark),
+
+        qty,
+        qty_cancelled: qtyCancelled,
+        amount,
+        unit_price: unitPrice,
+
+        currency: str(ln?.currency) ?? str(updatedHeader?.currency),
+        is_deleted: false,
+        updated_at: now,
+      };
+
+      const deliveryDate =
+        pickDate(ln, ["delivery_date", "deliveryDate"]) ??
+        pickDate(headerIn, ["requested_ship_date", "requestedShipDate"]) ??
+        pickDate(existing, ["requested_ship_date"]);
+      const shipmentMode =
+        strUndefIfEmpty(ln?.ship_mode ?? ln?.shipMode ?? ln?.shipmentMode) ??
+        strUndefIfEmpty(headerIn?.ship_mode) ??
+        strUndefIfEmpty(updatedHeader?.ship_mode);
+
+      if (deliveryDate !== undefined) base.delivery_date = deliveryDate;
+      if (shipmentMode !== undefined) base.ship_mode = shipmentMode;
+
+      const imageUrl = strUndefIfEmpty(ln?.image_url ?? ln?.imageUrl);
+      const mainImageUrl = strUndefIfEmpty(ln?.main_image_url ?? ln?.mainImageUrl);
+      const normalized = normalizeImageUrls(ln);
+
+      if (
+        "image_urls" in ln ||
+        "imageUrls" in ln ||
+        "thumbUrls" in ln ||
+        "thumb_urls" in ln ||
+        "images" in ln
+      ) {
+        base.image_urls = normalized;
+      }
+
+      if (imageUrl !== undefined) base.image_url = imageUrl;
+      if (mainImageUrl !== undefined) base.main_image_url = mainImageUrl;
+
+      if (base.image_url === undefined && Array.isArray(base.image_urls) && base.image_urls.length > 0) {
+        base.image_url = base.image_urls[0];
+      }
+      if (base.main_image_url === undefined && base.image_url) {
+        base.main_image_url = base.image_url;
+      }
+
+      if (existingLine?.id) {
+        const { error: lineUpErr } = await supabaseAdmin
+          .from("po_lines")
+          .update(base)
+          .eq("id", existingLine.id);
+
+        if (lineUpErr) {
+          console.error("Update PO Line Error:", lineUpErr);
+          return NextResponse.json(
+            { success: false, error: lineUpErr.message },
+            { status: 500 }
+          );
+        }
+        keepIds.push(existingLine.id);
+      } else {
+        const { data: inserted, error: lineInErr } = await supabaseAdmin
+          .from("po_lines")
+          .insert(base)
+          .select("id")
+          .single();
+
+        if (lineInErr) {
+          console.error("Insert PO Line Error:", lineInErr);
+          return NextResponse.json(
+            { success: false, error: lineInErr.message },
+            { status: 500 }
+          );
+        }
+        if (inserted?.id) keepIds.push(inserted.id);
+      }
+    }
+
+    if (keepIds.length > 0) {
+      const idList = keepIds.map((id) => `"${id}"`).join(",");
+      const { error: delErr } = await supabaseAdmin
+        .from("po_lines")
+        .update({ is_deleted: true, updated_at: now })
+        .eq("po_header_id", poHeaderId)
+        .eq("is_deleted", false)
+        .not("id", "in", `(${idList})`);
+
+      if (delErr) {
+        console.error("Soft Delete Missing Lines Error:", delErr);
+        return NextResponse.json(
+          { success: false, error: delErr.message },
+          { status: 500 }
+        );
+      }
+    } else {
+      const { error: delAllErr } = await supabaseAdmin
+        .from("po_lines")
+        .update({ is_deleted: true, updated_at: now })
+        .eq("po_header_id", poHeaderId)
+        .eq("is_deleted", false);
+
+      if (delAllErr) {
+        console.error("Soft Delete All Lines Error:", delAllErr);
+        return NextResponse.json(
+          { success: false, error: delAllErr.message },
+          { status: 500 }
+        );
+      }
+    }
+
+    const { data: savedLines, error: readLinesErr } = await supabaseAdmin
+      .from("po_lines")
+      .select("*")
+      .eq("po_header_id", poHeaderId)
+      .eq("is_deleted", false)
+      .order("line_no", { ascending: true });
+
+    if (readLinesErr) {
+      console.error("Read Saved Lines Error:", readLinesErr);
+    }
 
     return NextResponse.json({
       success: true,
       header: updatedHeader,
-      linesReceived: Array.isArray(linesIn) ? linesIn.length : 0,
+      header_id: poHeaderId,
+      headerId: poHeaderId,
+      po_no: updatedHeader?.po_no ?? existingPoNo,
+      poNo: updatedHeader?.po_no ?? existingPoNo,
+      lines: savedLines ?? [],
+      linesReceived: incomingLines.length,
     });
   } catch (err: any) {
     console.error("Update PO Fatal:", err);
@@ -356,11 +677,10 @@ export async function PUT(
 }
 
 export async function DELETE(
-  req: Request,
+  _req: Request,
   { params }: { params: { id: string } }
 ) {
   try {
-    // ✅ A안(정석): PO 삭제 권한 체크
     const guard = await assertApiPermission("po.delete");
     if (guard) return guard;
 
@@ -375,7 +695,6 @@ export async function DELETE(
 
     const now = new Date().toISOString();
 
-    // 0) 이미 삭제된 헤더인지 확인(멱등 처리)
     const { data: headerRow, error: headerGetErr } = await supabaseAdmin
       .from("po_headers")
       .select("id, is_deleted")
@@ -397,12 +716,10 @@ export async function DELETE(
       );
     }
 
-    // 이미 삭제되어 있으면 성공으로 처리(멱등)
     if (headerRow.is_deleted === true) {
       return NextResponse.json({ success: true, alreadyDeleted: true });
     }
 
-    // 1) 라인도 소프트 삭제
     const { error: lineErr } = await supabaseAdmin
       .from("po_lines")
       .update({
@@ -419,7 +736,6 @@ export async function DELETE(
       );
     }
 
-    // 2) 헤더 소프트 삭제 + 상태 DELETED
     const { error: headerErr } = await supabaseAdmin
       .from("po_headers")
       .update({
