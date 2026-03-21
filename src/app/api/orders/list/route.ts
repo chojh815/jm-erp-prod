@@ -11,6 +11,42 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+type SortField =
+  | "NONE"
+  | "REQ_SHIP_DATE"
+  | "BRAND"
+  | "ORDER_DATE"
+  | "PO_NO"
+  | "BUYER"
+  | "SHIP_MODE"
+  | "SUBTOTAL";
+
+type SortDir = "ASC" | "DESC";
+type ComputedPoStatus = "OPEN" | "PARTIAL" | "ALLOCATED" | "SHIPPED";
+
+const COMPUTED_STATUS_SET = new Set<ComputedPoStatus>([
+  "OPEN",
+  "PARTIAL",
+  "ALLOCATED",
+  "SHIPPED",
+]);
+
+const EXCLUDED_SHIPMENT_STATUSES = new Set(["CANCELLED", "CANCELED", "DELETED"]);
+
+/**
+ * IMPORTANT:
+ * - These statuses count as physically/logically shipped-complete for PO List status.
+ * - If your business wants CONFIRMED to still be "allocated" rather than "shipped",
+ *   remove CONFIRMED from this set.
+ */
+const SHIPPED_COMPLETE_SHIPMENT_STATUSES = new Set([
+  "SHIPPED",
+  "CONFIRMED",
+  "CLOSED",
+  "DELIVERED",
+  "INVOICED",
+]);
+
 function jsonNoStore(body: any, status = 200) {
   return NextResponse.json(body, {
     status,
@@ -42,12 +78,9 @@ function uniq<T>(arr: T[]) {
 function n(v: any, fallback = 0) {
   if (v === null || v === undefined) return fallback;
 
-  // Supabase may return numeric/decimal as string. Also, some values can already be formatted with commas.
   if (typeof v === "string") {
     const s = v.trim();
     if (!s) return fallback;
-
-    // Remove thousands separators and any leading currency symbol.
     const cleaned = s.replace(/[$,]/g, "");
     const num = Number(cleaned);
     return Number.isFinite(num) ? num : fallback;
@@ -66,6 +99,77 @@ function fromCents(cents: number) {
   return cents / 100;
 }
 
+function normStr(v: any) {
+  return asText(v).trim().toUpperCase();
+}
+function normDate(v: any, dir: SortDir) {
+  const s = asText(v).trim();
+  if (!s) return dir === "ASC" ? "9999-12-31" : "0000-01-01";
+  return s.slice(0, 10);
+}
+function cmp(a: any, b: any) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+function cmpWithDir<T>(a: T, b: T, dir: SortDir) {
+  const c = cmp(a, b);
+  return dir === "ASC" ? c : -c;
+}
+function getSortValue(it: any, field: SortField, dir: SortDir) {
+  switch (field) {
+    case "REQ_SHIP_DATE":
+      return normDate(it.reqShipDate ?? it.requestedShipDate, dir);
+    case "ORDER_DATE":
+      return normDate(it.orderDate, dir);
+    case "BRAND":
+      return normStr(it.mainBuyerBrand ?? it.brand ?? it.buyerBrandName);
+    case "BUYER":
+      return normStr(it.buyerName);
+    case "PO_NO":
+      return normStr(it.poNo);
+    case "SHIP_MODE":
+      return normStr(it.shipMode);
+    case "SUBTOTAL":
+      return n(it.subtotal, 0);
+    case "NONE":
+    default:
+      return null;
+  }
+}
+function multiSortItems(
+  items: any[],
+  s1f: SortField,
+  s1d: SortDir,
+  s2f: SortField,
+  s2d: SortDir,
+  s3f: SortField,
+  s3d: SortDir
+) {
+  const arr = [...items];
+  arr.sort((A, B) => {
+    const fields: Array<[SortField, SortDir]> = [
+      [s1f, s1d],
+      [s2f, s2d],
+      [s3f, s3d],
+      ["PO_NO", "ASC"],
+    ];
+
+    for (const [f, d] of fields) {
+      if (f === "NONE") continue;
+      const av = getSortValue(A, f, d);
+      const bv = getSortValue(B, f, d);
+
+      if (f === "SUBTOTAL") {
+        const c = cmpWithDir(Number(av ?? 0), Number(bv ?? 0), d);
+        if (c !== 0) return c;
+      } else {
+        const c = cmpWithDir(String(av ?? ""), String(bv ?? ""), d);
+        if (c !== 0) return c;
+      }
+    }
+    return 0;
+  });
+  return arr;
+}
 
 // ---- image helpers ----
 function firstNonEmptyString(arr: any[]): string | null {
@@ -83,7 +187,6 @@ function asStringArray(v: any): string[] {
   if (typeof v === "string") {
     const s = v.trim();
     if (!s) return [];
-    // json string like ["url1","url2"]
     if (s.startsWith("[") && s.endsWith("]")) {
       try {
         const j = JSON.parse(s);
@@ -93,7 +196,6 @@ function asStringArray(v: any): string[] {
     if (s.includes(",")) return s.split(",").map((x) => x.trim()).filter(Boolean);
     return [s];
   }
-  // jsonb may come as object in some cases; best-effort stringify
   try {
     const s = JSON.stringify(v);
     if (s && s.startsWith("[") && s.endsWith("]")) {
@@ -136,7 +238,7 @@ type PoHeaderRow = {
   requested_ship_date?: string | null;
 
   currency?: string | null;
-  subtotal?: number | null; // header subtotal (legacy/optional)
+  subtotal?: number | null;
   status?: string | null;
 
   ship_mode?: string | null;
@@ -158,9 +260,8 @@ type PoLineRow = {
   line_no: number | null;
   buyer_style_no: string | null;
   jm_style_no: string | null;
-  // ✅ image columns (some deployments store URLs directly on po_lines)
   image_url?: string | null;
-  image_urls?: any | null; // jsonb (usually string[])
+  image_urls?: any | null;
   main_image_url?: string | null;
   description: string | null;
   color: string | null;
@@ -189,8 +290,10 @@ type PoLineImageRow = {
 };
 
 type ShipmentLineRow = {
+  id?: string | null;
   po_line_id: string | null;
   shipment_id: string | null;
+  shipped_qty?: number | null;
   is_deleted: boolean | null;
 };
 
@@ -206,6 +309,22 @@ type BuyerBrandRow = {
   name: string | null;
 };
 
+function classifyPoStatus(args: {
+  totalOrderQty: number;
+  totalAllocatedQty: number;
+  totalShippedQty: number;
+}): ComputedPoStatus {
+  const orderQty = n(args.totalOrderQty, 0);
+  const allocatedQty = n(args.totalAllocatedQty, 0);
+  const shippedQty = n(args.totalShippedQty, 0);
+
+  if (orderQty <= 0) return "OPEN";
+  if (shippedQty >= orderQty) return "SHIPPED";
+  if (allocatedQty >= orderQty) return "ALLOCATED";
+  if (allocatedQty > 0 || shippedQty > 0) return "PARTIAL";
+  return "OPEN";
+}
+
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -215,7 +334,6 @@ export async function GET(req: Request) {
     // ------------------------------------------------------------------
     const detailFor = (url.searchParams.get("detailFor") ?? "").trim();
     if (detailFor) {
-      // 0) header (STRICT: must exist and not deleted)
       const hdrRes = await supabaseAdmin
         .from("po_headers")
         .select(["id", "buyer_brand_name", "requested_ship_date", "is_deleted", "status"].join(","))
@@ -232,7 +350,6 @@ export async function GET(req: Request) {
       const headerBrand = asText(hdr.buyer_brand_name);
       const headerReqShip = hdr.requested_ship_date ?? null;
 
-      // 1) lines (STRICT: not deleted)
       const linesRes = await supabaseAdmin
         .from("po_lines")
         .select(
@@ -272,7 +389,6 @@ export async function GET(req: Request) {
       const lineRows = ((linesRes.data ?? []) as unknown as PoLineRow[]) || [];
       const lineIds = uniq(lineRows.map((r) => r.id).filter(Boolean));
 
-      // 2) images from po_line_images (best-effort)
       const imagesByLine: Record<string, string[]> = {};
       if (lineIds.length > 0) {
         const imgRes = await supabaseAdmin
@@ -305,7 +421,6 @@ export async function GET(req: Request) {
         }
       }
 
-      // 3) shipment info (best-effort)
       const shipmentByLine: Record<string, { shipmentNo?: string | null; status?: string | null }> =
         {};
 
@@ -389,15 +504,32 @@ export async function GET(req: Request) {
 
     // ------------------------------------------------------------------
     // LIST: headers list (STRICT: only alive rows)
-    // Subtotal = SUM(po_lines.amount) by header (fallback qty*unit_price)
+    // + computed PO status: OPEN / PARTIAL / ALLOCATED / SHIPPED
     // ------------------------------------------------------------------
     const qRaw = (url.searchParams.get("q") ?? url.searchParams.get("keyword") ?? "").trim();
-    const statusRaw = (url.searchParams.get("status") ?? "").trim();
+    const statusRaw = (url.searchParams.get("status") ?? "").trim().toUpperCase();
     const dateFrom = (url.searchParams.get("dateFrom") ?? "").trim();
     const dateTo = (url.searchParams.get("dateTo") ?? "").trim();
 
     const page = Math.max(1, toInt(url.searchParams.get("page") ?? "1", 1));
     const pageSize = Math.min(200, Math.max(1, toInt(url.searchParams.get("pageSize") ?? "20", 20)));
+
+    const s1Field = (url.searchParams.get("s1Field") ?? "REQ_SHIP_DATE") as SortField;
+    const s1Dir = ((url.searchParams.get("s1Dir") ?? "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC") as SortDir;
+    const s2Field = (url.searchParams.get("s2Field") ?? "BRAND") as SortField;
+    const s2Dir = ((url.searchParams.get("s2Dir") ?? "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC") as SortDir;
+    const s3Field = (url.searchParams.get("s3Field") ?? "ORDER_DATE") as SortField;
+    const s3Dir = ((url.searchParams.get("s3Dir") ?? "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC") as SortDir;
+
+    const computedStatusFilter = COMPUTED_STATUS_SET.has(statusRaw as ComputedPoStatus)
+      ? (statusRaw as ComputedPoStatus)
+      : null;
+    const legacyHeaderStatusFilter =
+      !computedStatusFilter &&
+      statusRaw &&
+      !["ALL", "ALL STATUS", "ALLSTATUSES"].includes(statusRaw)
+        ? statusRaw
+        : "";
 
     let q = supabaseAdmin
       .from("po_headers")
@@ -424,14 +556,13 @@ export async function GET(req: Request) {
           "is_deleted",
           "created_at",
           "updated_at",
-        ].join(","),
-        { count: "exact" } as any
+        ].join(",")
       )
       .eq("is_deleted", false)
       .neq("status", "DELETED");
 
-    if (statusRaw && !["ALL", "ALL STATUS", "ALLSTATUSES"].includes(statusRaw.toUpperCase())) {
-      q = q.eq("status", statusRaw);
+    if (legacyHeaderStatusFilter) {
+      q = q.eq("status", legacyHeaderStatusFilter);
     }
     if (dateFrom) q = q.gte("order_date", dateFrom);
     if (dateTo) q = q.lte("order_date", dateTo);
@@ -449,19 +580,13 @@ export async function GET(req: Request) {
       );
     }
 
-    const from = (page - 1) * pageSize;
-    const to = from + pageSize - 1;
-
-    const listRes = await q.order("order_date", { ascending: false, nullsFirst: false }).range(from, to);
+    const listRes = await q.order("order_date", { ascending: false, nullsFirst: false });
 
     if (listRes.error) return bad(listRes.error.message || "Failed to load PO list", 500);
 
     const headerRows = ((listRes.data ?? []) as unknown as PoHeaderRow[]) || [];
-    const count = (listRes as any).count ?? headerRows.length;
-
     const headerIds = uniq(headerRows.map((h) => h.id).filter(Boolean));
 
-    // Optional: brand name fallback from buyer_brands (best-effort)
     const brandIdList = uniq(headerRows.map((h) => h.buyer_brand_id).filter((v) => !!v)) as string[];
     const brandNameById: Record<string, string> = {};
     if (brandIdList.length > 0) {
@@ -476,13 +601,27 @@ export async function GET(req: Request) {
       }
     }
 
-    // Line summary + TOTAL AMOUNT per header (best-effort)
-    const lineSummaryByHeader: Record<string, { lineCount: number; firstLine: any | null; totalAmountCents: number }> = {};
+    const lineSummaryByHeader: Record<
+      string,
+      { lineCount: number; firstLine: any | null; totalAmountCents: number; totalOrderQty: number; lineIds: string[] }
+    > = {};
 
+    const allPoLineIds: string[] = [];
     if (headerIds.length > 0) {
       const sumRes = await supabaseAdmin
         .from("po_lines")
-        .select(["id", "po_header_id", "line_no", "buyer_style_no", "jm_style_no", "qty", "unit_price", "amount", "is_deleted"].join(","))
+        .select([
+          "id",
+          "po_header_id",
+          "line_no",
+          "buyer_style_no",
+          "jm_style_no",
+          "qty",
+          "unit_price",
+          "amount",
+          "is_deleted",
+          "ship_mode",
+        ].join(","))
         .in("po_header_id", headerIds)
         .eq("is_deleted", false)
         .order("po_header_id", { ascending: true })
@@ -495,33 +634,98 @@ export async function GET(req: Request) {
           if (!hid) continue;
 
           const bucket =
-            (lineSummaryByHeader[hid] ||= { lineCount: 0, firstLine: null, totalAmountCents: 0 });
+            (lineSummaryByHeader[hid] ||= {
+              lineCount: 0,
+              firstLine: null,
+              totalAmountCents: 0,
+              totalOrderQty: 0,
+              lineIds: [],
+            });
 
           bucket.lineCount += 1;
           if (!bucket.firstLine) bucket.firstLine = r;
 
-          // amount 합계: amount 우선, 없으면 qty*unit_price
           const lineAmount =
             r.amount !== null && r.amount !== undefined
               ? n(r.amount, 0)
               : n(r.qty, 0) * n(r.unit_price, 0);
 
           bucket.totalAmountCents += toCents(lineAmount);
+          bucket.totalOrderQty += n(r.qty, 0);
+          if (r.id) {
+            bucket.lineIds.push(r.id);
+            allPoLineIds.push(r.id);
+          }
         }
       }
     }
 
-    const items = headerRows.map((h) => {
-      const s = lineSummaryByHeader[h.id] ?? { lineCount: 0, firstLine: null, totalAmountCents: 0 };
-      const fl = s.firstLine;
+    const allocQtyByLineId: Record<string, number> = {};
+    const shippedQtyByLineId: Record<string, number> = {};
 
+    if (allPoLineIds.length > 0) {
+      const sLineRes = await supabaseAdmin
+        .from("shipment_lines")
+        .select(["id", "po_line_id", "shipment_id", "shipped_qty", "is_deleted"].join(","))
+        .in("po_line_id", uniq(allPoLineIds))
+        .eq("is_deleted", false);
+
+      if (!sLineRes.error) {
+        const sLines = ((sLineRes.data ?? []) as unknown as ShipmentLineRow[]) || [];
+        const shipmentIds = uniq(sLines.map((r) => r.shipment_id).filter(Boolean)) as string[];
+
+        let shipmentById: Record<string, ShipmentRow> = {};
+        if (shipmentIds.length > 0) {
+          const shipRes = await supabaseAdmin
+            .from("shipments")
+            .select(["id", "shipment_no", "status", "is_deleted"].join(","))
+            .in("id", shipmentIds)
+            .eq("is_deleted", false);
+
+          if (!shipRes.error) {
+            const ships = ((shipRes.data ?? []) as unknown as ShipmentRow[]) || [];
+            for (const sh of ships) {
+              shipmentById[sh.id] = sh;
+            }
+          }
+        }
+
+        for (const sl of sLines) {
+          const lineId = sl.po_line_id;
+          const shipmentId = sl.shipment_id;
+          if (!lineId || !shipmentId) continue;
+
+          const sh = shipmentById[shipmentId];
+          if (!sh) continue;
+          const shStatus = asText(sh.status).trim().toUpperCase();
+
+          if (EXCLUDED_SHIPMENT_STATUSES.has(shStatus)) continue;
+
+          const qty = n(sl.shipped_qty, 0);
+          allocQtyByLineId[lineId] = (allocQtyByLineId[lineId] ?? 0) + qty;
+
+          if (SHIPPED_COMPLETE_SHIPMENT_STATUSES.has(shStatus)) {
+            shippedQtyByLineId[lineId] = (shippedQtyByLineId[lineId] ?? 0) + qty;
+          }
+        }
+      }
+    }
+
+    const itemsAll = headerRows.map((h) => {
+      const s = lineSummaryByHeader[h.id] ?? {
+        lineCount: 0,
+        firstLine: null,
+        totalAmountCents: 0,
+        totalOrderQty: 0,
+        lineIds: [],
+      };
+
+      const fl = s.firstLine;
       const brandName =
         asText(h.buyer_brand_name) ||
         (h.buyer_brand_id ? asText(brandNameById[h.buyer_brand_id]) : "") ||
         "";
-      // ✅ 핵심: subtotal 기준을 "po_headers.subtotal"로 통일 (Grand Total과 1:1 일치)
-      // - header subtotal이 존재(>0 또는 0 포함)하면 그것을 우선 사용
-      // - 만약 header subtotal이 비어있거나(예: null) 계산이 불가능하면 라인 합계로 fallback
+
       const headerSubtotalNum =
         h.subtotal !== null && h.subtotal !== undefined ? n(h.subtotal, NaN) : NaN;
 
@@ -532,6 +736,19 @@ export async function GET(req: Request) {
         headerSubtotalCents !== null ? headerSubtotalCents : lineSubtotalCents !== null ? lineSubtotalCents : 0;
 
       const computedSubtotal = fromCents(subtotalCents);
+
+      let allocatedQty = 0;
+      let shippedQty = 0;
+      for (const lineId of s.lineIds) {
+        allocatedQty += allocQtyByLineId[lineId] ?? 0;
+        shippedQty += shippedQtyByLineId[lineId] ?? 0;
+      }
+
+      const computedStatus = classifyPoStatus({
+        totalOrderQty: s.totalOrderQty,
+        totalAllocatedQty: allocatedQty,
+        totalShippedQty: shippedQty,
+      });
 
       return {
         id: h.id,
@@ -544,19 +761,16 @@ export async function GET(req: Request) {
 
         buyerDeptName: h.buyer_dept_name,
         orderDate: h.order_date,
-        requestedShipDate: h.requested_ship_date ?? null,
+        reqShipDate: h.requested_ship_date ?? null,
 
         currency: h.currency,
-
-        // ✅ PO List 화면의 "Subtotal" 컬럼은 이 값을 쓰면 됨
         subtotal: computedSubtotal,
-
-        // ✅ Search modal/기타에서도 혼선 방지 위해 동일 값
         amount: computedSubtotal,
 
-        status: h.status,
+        status: computedStatus,
+        rawHeaderStatus: h.status ?? null,
 
-        shipMode: h.ship_mode,
+        shipMode: h.ship_mode ?? fl?.ship_mode ?? null,
         destination: h.destination,
         originCode: h.origin_code,
         shippingOriginCode: h.shipping_origin_code,
@@ -571,13 +785,35 @@ export async function GET(req: Request) {
         mainQty: fl?.qty ?? null,
         mainUnitPrice: fl?.unit_price ?? null,
         mainAmount: fl?.amount ?? null,
+
+        totals: {
+          orderQty: s.totalOrderQty,
+          allocatedQty,
+          shippedQty,
+          remainingQty: Math.max(0, s.totalOrderQty - allocatedQty),
+        },
       };
     });
 
-    
-        // ---- Totals ----
-    // Page subtotal: sum of current page items (changes by page)
-    // Use cents to avoid float drift and to tolerate comma-formatted numeric strings.
+    const itemsFiltered = computedStatusFilter
+      ? itemsAll.filter((it) => it.status === computedStatusFilter)
+      : itemsAll;
+
+    const itemsSorted = multiSortItems(
+      itemsFiltered,
+      s1Field,
+      s1Dir,
+      s2Field,
+      s2Dir,
+      s3Field,
+      s3Dir
+    );
+
+    const count = itemsSorted.length;
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize;
+    const items = itemsSorted.slice(from, to);
+
     const pageTotalsByCurrencyCents: Record<string, number> = {};
     for (const it of items) {
       const cur = asText(it.currency).trim() || "";
@@ -590,110 +826,18 @@ export async function GET(req: Request) {
       pageTotalsByCurrency[cur] = fromCents(cents ?? 0);
     }
 
-
-    // Grand total: sum of ALL matching rows (does NOT change by page)
-    async function computeGrandTotals(): Promise<{
-      grandTotal: number;
-      grandTotalsByCurrency: Record<string, number>;
-    }> {
-      const grandTotalsByCurrencyCents: Record<string, number> = {};
-      if (!count || count <= 0) return { grandTotal: 0, grandTotalsByCurrency: {} };
-
-      const CHUNK = 1000;
-
-      // Build the same filtered query (but selecting only what we need)
-      let qAll = supabaseAdmin
-        .from("po_headers")
-        .select(["id", "currency", "subtotal"].join(","))
-        .eq("is_deleted", false)
-        .neq("status", "DELETED");
-
-      if (statusRaw && !["ALL", "ALL STATUS", "ALLSTATUSES"].includes(statusRaw.toUpperCase())) {
-        qAll = qAll.eq("status", statusRaw);
-      }
-      if (dateFrom) qAll = qAll.gte("order_date", dateFrom);
-      if (dateTo) qAll = qAll.lte("order_date", dateTo);
-
-      if (qRaw) {
-        const kw = qRaw.replace(/%/g, "\\%").replace(/,/g, "");
-        const like = `%${kw}%`;
-        qAll = qAll.or(
-          [
-            `po_no.ilike.${like}`,
-            `buyer_name.ilike.${like}`,
-            `destination.ilike.${like}`,
-            `buyer_brand_name.ilike.${like}`,
-          ].join(",")
-        );
-      }
-
-      // Iterate all matching headers in chunks (stable order)
-      for (let offset = 0; offset < count; offset += CHUNK) {
-        const fromAll = offset;
-        const toAll = Math.min(count - 1, offset + CHUNK - 1);
-
-        const hdrChunkRes = await qAll.order("id", { ascending: true }).range(fromAll, toAll);
-        if (hdrChunkRes.error) {
-          // fail-safe: return what we have so far (but still allow list to work)
-          return {
-            grandTotal: fromCents(Object.values(grandTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0)),
-            grandTotalsByCurrency: Object.fromEntries(Object.entries(grandTotalsByCurrencyCents).map(([k,v])=>[k, fromCents(v??0)])),
-          };
-        }
-
-        const hdrs = ((hdrChunkRes.data ?? []) as unknown as { id: string; currency: string | null; subtotal: number | null }[]) || [];
-        const ids = uniq(hdrs.map((h) => h.id).filter(Boolean));
-
-        const headerSubtotalById: Record<string, number> = {};
-        const currencyById: Record<string, string> = {};
-        for (const h of hdrs) {
-          headerSubtotalById[h.id] = n(h.subtotal, 0);
-          currencyById[h.id] = asText(h.currency).trim() || "";
-        }
-
-        // Line totals for these headers (amount 우선, 없으면 qty*unit_price)
-        const lineSumByHeaderCents: Record<string, number> = {};
-        const lineCountByHeader: Record<string, number> = {};
-
-        if (ids.length > 0) {
-          const linesRes = await supabaseAdmin
-            .from("po_lines")
-            .select(["po_header_id", "qty", "unit_price", "amount", "is_deleted"].join(","))
-            .in("po_header_id", ids)
-            .eq("is_deleted", false);
-
-          if (!linesRes.error) {
-            const lines = (linesRes.data as any[]) ?? [];
-            for (const r of lines) {
-              const hid = r.po_header_id;
-              if (!hid) continue;
-              lineCountByHeader[hid] = n(lineCountByHeader[hid], 0) + 1;
-              const lineAmount =
-                r.amount !== null && r.amount !== undefined
-                  ? n(r.amount, 0)
-                  : n(r.qty, 0) * n(r.unit_price, 0);
-              lineSumByHeaderCents[hid] = (lineSumByHeaderCents[hid] ?? 0) + toCents(lineAmount);
-            }
-          }
-        }
-
-        // Apply the same subtotal rule as list items:
-        // - if header has >=1 line: use line sum
-        // - else: fallback to header.subtotal
-        for (const hid of ids) {
-          const hasLines = n(lineCountByHeader[hid], 0) > 0;
-          const computedCents = hasLines ? (lineSumByHeaderCents[hid] ?? 0) : toCents(headerSubtotalById[hid]);
-          const cur = asText(currencyById[hid]).trim() || "";
-          grandTotalsByCurrencyCents[cur] = (grandTotalsByCurrencyCents[cur] ?? 0) + computedCents;
-        }
-      }
-
-      const grandTotal = fromCents(Object.values(grandTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0));
-      const grandTotalsByCurrency = Object.fromEntries(Object.entries(grandTotalsByCurrencyCents).map(([k,v])=>[k, fromCents(v??0)]));
-      return { grandTotal, grandTotalsByCurrency };
+    const grandTotalsByCurrencyCents: Record<string, number> = {};
+    for (const it of itemsFiltered) {
+      const cur = asText(it.currency).trim() || "";
+      grandTotalsByCurrencyCents[cur] = (grandTotalsByCurrencyCents[cur] ?? 0) + toCents(it.subtotal);
     }
-
-    const grand = await computeGrandTotals();
+    const grandTotal = fromCents(
+      Object.values(grandTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0)
+    );
+    const grandTotalsByCurrency: Record<string, number> = {};
+    for (const [cur, cents] of Object.entries(grandTotalsByCurrencyCents)) {
+      grandTotalsByCurrency[cur] = fromCents(cents ?? 0);
+    }
 
     return ok({
       items,
@@ -702,8 +846,16 @@ export async function GET(req: Request) {
       total: count,
       pageSubtotal,
       pageTotalsByCurrency,
-      grandTotal: grand.grandTotal,
-      grandTotalsByCurrency: grand.grandTotalsByCurrency,
+      grandTotal,
+      grandTotalsByCurrency,
+      statusLogic: {
+        open: "No non-cancelled shipment allocation exists",
+        partial: "Allocated qty > 0 but allocated qty < order qty",
+        allocated: "Allocated qty >= order qty but shipped-complete qty < order qty",
+        shipped: "Shipped-complete qty >= order qty",
+        excludedShipmentStatuses: Array.from(EXCLUDED_SHIPMENT_STATUSES),
+        shippedCompleteShipmentStatuses: Array.from(SHIPPED_COMPLETE_SHIPMENT_STATUSES),
+      },
     });
 
   } catch (err: any) {

@@ -20,9 +20,6 @@ import {
   AlertDialogCancel,
   AlertDialogAction,
 } from "@/components/ui/alert-dialog";
-import { Separator } from "@/components/ui/separator";
-
-type DevRole = AppRole;
 
 type ShipmentSummary = {
   shipment_id: string;
@@ -47,8 +44,6 @@ type ShipmentLine = {
   cartons: any;
   gw: any;
   nw: any;
-
-  // optional fields that may exist from API
   shipped_qty?: any;
   order_qty?: any;
   unit_price?: any;
@@ -68,7 +63,7 @@ type ApiResponse = {
   success: boolean;
   error?: string;
   shipment?: any;
-  summary?: ShipmentSummary | null; // (legacy) may be missing from API
+  summary?: ShipmentSummary | null;
   lines?: ShipmentLine[];
   invoice?: any;
 };
@@ -83,34 +78,32 @@ function asNum(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
-
 function round1(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? Number(n.toFixed(1)) : 0;
 }
-
 function fmt1(v: any) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "-";
   return n.toFixed(1);
 }
-
+function fmtInt(v: any) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return Math.round(n).toLocaleString();
+}
 function safeText(v: any) {
   const s = (v ?? "").toString().trim();
   return s && s !== "-" ? s : "";
 }
-
 function poSort(a: string, b: string) {
-  // 숫자처럼 보이는 PO도 자연 정렬되게
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
-
 function normalizeLine(raw: any): ShipmentLine {
-  const shippedQty = raw?.qty ?? raw?.shipped_qty ?? raw?.shippedQty ?? raw?.order_qty ?? raw?.orderQty ?? 0;
+  const shippedQty =
+    raw?.qty ?? raw?.shipped_qty ?? raw?.shippedQty ?? raw?.order_qty ?? raw?.orderQty ?? 0;
 
-  // GW/NW: 라인에 gw/nw가 없고 per-ctn만 있을 수 있음 (cartons도 0/NULL 가능)
   const cartons = raw?.cartons ?? 0;
-
   const gwPer =
     raw?.gw_per_carton ?? raw?.gwPerCarton ?? raw?.gw_per_ctn ?? raw?.gwPerCtn ?? null;
   const nwPer =
@@ -123,17 +116,14 @@ function normalizeLine(raw: any): ShipmentLine {
     raw?.nw ??
     (nwPer !== null && nwPer !== undefined ? round1(asNum(cartons) * asNum(nwPer)) : null);
 
-  // Style fallback: API에서 style_no가 "-"로 올 때 po_lines.jm_style_no가 진짜 값
   const style =
     safeText(raw?.style_no) ||
-    // ✅ 우선순위: Buyer Style No/Code → JM Style No/Code
     safeText(raw?.po_lines?.buyer_style_no) ||
     safeText(raw?.po_lines?.buyer_style_code) ||
     safeText(raw?.po_lines?.jm_style_no) ||
     safeText(raw?.po_lines?.jm_style_code) ||
     "-";
 
-  // Color/Size fallback
   const color =
     safeText(raw?.color) ||
     safeText(raw?.po_lines?.plating_color) ||
@@ -157,61 +147,35 @@ export default function ShipmentDetailPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const shipmentId = params?.id;
+  const role: AppRole = "admin";
 
   const [loading, setLoading] = React.useState(false);
   const [shipment, setShipment] = React.useState<any>(null);
   const [lines, setLines] = React.useState<ShipmentLine[]>([]);
 
-const [cancelling, setCancelling] = React.useState(false);
+  const [cancelling, setCancelling] = React.useState(false);
+  const [confirming, setConfirming] = React.useState(false);
+  const [shipping, setShipping] = React.useState(false);
 
-async function cancelShipment() {
-  const id = shipmentId;
-  if (!id) return;
-  try {
-    setCancelling(true);
-    const res = await fetch(`/api/shipments/${id}/cancel`, { method: "POST" });
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok || !j?.success) {
-      alert(j?.error || `Cancel failed (HTTP ${res.status})`);
-      return;
-    }
-    // go back to list so user doesn't re-create duplicates
-    router.push("/shipments");
-  } catch (e: any) {
-    alert(e?.message || "Cancel failed");
-  } finally {
-    setCancelling(false);
-  }
-}
-
-  // Edit Mode (partial / split)
   const [editMode, setEditMode] = React.useState(false);
   const [draftShipment, setDraftShipment] = React.useState<any>(null);
   const [draftLines, setDraftLines] = React.useState<DraftShipmentLine[]>([]);
   const [saving, setSaving] = React.useState(false);
 
-  // Split modal state
-  const [splitOpen, setSplitOpen] = React.useState(false);
-  const [splitLine, setSplitLine] = React.useState<DraftShipmentLine | null>(null);
-  const [splitQty, setSplitQty] = React.useState<number>(0);
-  const [splitMode, setSplitMode] = React.useState<"SEA" | "AIR" | "COURIER">("AIR");
-  const [splitCarrier, setSplitCarrier] = React.useState("");
-  const [splitTracking, setSplitTracking] = React.useState("");
-
-  // Invoice link
   const [linkedInvoice, setLinkedInvoice] = React.useState<any>(null);
   const [creatingInvoice, setCreatingInvoice] = React.useState(false);
 
-  // Packing List link
   const [linkedPackingList, setLinkedPackingList] = React.useState<any>(null);
   const [creatingPackingList, setCreatingPackingList] = React.useState(false);
+
+  const currentStatus = (editMode ? draftShipment?.status : shipment?.status ?? "")
+    .toString()
+    .toUpperCase();
 
   const loadPackingLink = React.useCallback(async () => {
     if (!shipmentId) return;
     try {
-      const res = await fetch(`/api/shipments/${shipmentId}/packing-list`, {
-        cache: "no-store",
-      });
+      const res = await fetch(`/api/shipments/${shipmentId}/packing-list`, { cache: "no-store" });
       const j: PackingLinkResponse = await res.json();
       if (!res.ok || !j?.success) {
         setLinkedPackingList(null);
@@ -225,7 +189,6 @@ async function cancelShipment() {
 
   const load = React.useCallback(async () => {
     if (!shipmentId) return;
-
     setLoading(true);
     try {
       const res = await fetch(`/api/shipments/${shipmentId}`, { cache: "no-store" });
@@ -257,7 +220,58 @@ async function cancelShipment() {
     load();
   }, [load]);
 
-  // ===== Invoice
+  async function cancelShipment() {
+    if (!shipmentId) return;
+    try {
+      setCancelling(true);
+      const res = await fetch(`/api/shipments/${shipmentId}/cancel`, { method: "POST" });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j?.success) {
+        alert(j?.error || `Cancel failed (HTTP ${res.status})`);
+        return;
+      }
+      router.push("/shipments");
+    } catch (e: any) {
+      alert(e?.message || "Cancel failed");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  const onConfirmShipment = React.useCallback(async () => {
+    if (!shipmentId) return;
+    try {
+      setConfirming(true);
+      const res = await fetch(`/api/shipments/${shipmentId}/confirm`, { method: "POST" });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j?.success) throw new Error(j?.error || "Confirm shipment failed");
+      await load();
+      alert(j?.already_done ? "Shipment already confirmed." : "Shipment confirmed.");
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message || "Confirm shipment error");
+    } finally {
+      setConfirming(false);
+    }
+  }, [shipmentId, load]);
+
+  const onMarkAsShipped = React.useCallback(async () => {
+    if (!shipmentId) return;
+    try {
+      setShipping(true);
+      const res = await fetch(`/api/shipments/${shipmentId}/ship`, { method: "POST" });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j?.success) throw new Error(j?.error || "Mark as shipped failed");
+      await load();
+      alert(j?.already_done ? "Shipment already marked as shipped." : "Shipment marked as shipped.");
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message || "Mark as shipped error");
+    } finally {
+      setShipping(false);
+    }
+  }, [shipmentId, load]);
+
   const onCreateInvoice = React.useCallback(async () => {
     if (!shipmentId) return;
 
@@ -267,8 +281,12 @@ async function cancelShipment() {
       const j = await res.json();
       if (!res.ok || !j?.success) throw new Error(j?.error || "Failed to create invoice");
 
+      try {
+        await fetch(`/api/shipments/${shipmentId}/ship`, { method: "POST" });
+      } catch {}
+
       const invoiceId = j.invoice_id ?? j.invoice?.id ?? j.invoice?.invoice_id ?? null;
-      alert(j.already_exists ? "Invoice already exists." : "Invoice created.");
+      alert(j.already_exists ? "Invoice already exists. Shipment marked as SHIPPED." : "Invoice created. Shipment marked as SHIPPED.");
 
       if (invoiceId) {
         router.push(`/invoices/${invoiceId}`);
@@ -295,21 +313,15 @@ async function cancelShipment() {
     window.open(`/api/invoices/${id}/pdf`, "_blank");
   }, [linkedInvoice]);
 
-  // ===== Packing List
   const onCreatePackingList = React.useCallback(async () => {
     if (!shipmentId) return;
-
     setCreatingPackingList(true);
     try {
       const res = await fetch(`/api/shipments/${shipmentId}/packing-list`, { method: "POST" });
       const j = await res.json();
       if (!res.ok || !j?.success) throw new Error(j?.error || "Failed to create packing list");
-
-      const plId =
-        j.packing_list_id ?? j.packing_list?.id ?? j.packing_list?.packing_list_id ?? null;
-
+      const plId = j.packing_list_id ?? j.packing_list?.id ?? j.packing_list?.packing_list_id ?? null;
       alert(j.already_exists ? "Packing List already exists." : "Packing List created.");
-
       if (plId) {
         router.push(`/packing-lists/${plId}`);
         return;
@@ -335,19 +347,24 @@ async function cancelShipment() {
     window.open(`/api/packing-lists/${id}/pdf`, "_blank");
   }, [linkedPackingList]);
 
-  const role: AppRole = "admin";
-
   const displayShipment = editMode ? draftShipment : shipment;
   const displayLines = (editMode ? draftLines : lines).filter((l: any) => !l?._removed);
 
-  // ✅ Summary 카드가 API의 "summary"를 보지 않도록, shipment에서 직접 파생 (summary가 없어서 '-' 나오던 문제 해결)
   const S: ShipmentSummary | null = React.useMemo(() => {
     const sh = displayShipment ?? shipment;
     if (!sh) return null;
 
-    const totalCartons = asNum(sh?.total_cartons ?? sh?.totalCartons);
-    const totalGw = asNum(sh?.total_gw ?? sh?.totalGw);
-    const totalNw = asNum(sh?.total_nw ?? sh?.totalNw);
+    const headerCartons = asNum(sh?.total_cartons ?? sh?.totalCartons);
+    const headerGw = asNum(sh?.total_gw ?? sh?.totalGw);
+    const headerNw = asNum(sh?.total_nw ?? sh?.totalNw);
+
+    const lineCartons = (displayLines ?? []).reduce((sum, r) => sum + asNum(r?.cartons), 0);
+    const lineGw = round1((displayLines ?? []).reduce((sum, r) => sum + asNum(r?.gw), 0));
+    const lineNw = round1((displayLines ?? []).reduce((sum, r) => sum + asNum(r?.nw), 0));
+
+    const totalCartons = headerCartons > 0 ? headerCartons : lineCartons;
+    const totalGw = headerGw > 0 ? headerGw : lineGw;
+    const totalNw = headerNw > 0 ? headerNw : lineNw;
 
     return {
       shipment_id: (sh?.id ?? sh?.shipment_id ?? shipmentId ?? "").toString(),
@@ -355,13 +372,11 @@ async function cancelShipment() {
       buyer_id: sh?.buyer_id ?? sh?.buyerId ?? null,
       buyer_name: sh?.buyer_name ?? sh?.buyerName ?? null,
       currency: sh?.currency ?? sh?.currency_code ?? sh?.currencyCode ?? null,
-
-      // totals는 사용자가 일부러 안 쓰는 상태라면, 0일 때는 '-'로 보이도록 null 처리
       total_cartons: totalCartons > 0 ? totalCartons : null,
       total_gw: totalGw > 0 ? totalGw : null,
       total_nw: totalNw > 0 ? totalNw : null,
     };
-  }, [displayShipment, shipment, shipmentId]);
+  }, [displayShipment, shipment, shipmentId, displayLines]);
 
   const shipmentNo =
     displayShipment?.shipment_no ??
@@ -373,7 +388,6 @@ async function cancelShipment() {
   const isInvoiceLinked = !!(linkedInvoice?.id || linkedInvoice?.invoice_id);
   const isPlLinked = !!(linkedPackingList?.id || linkedPackingList?.packing_list_id);
 
-  // ✅ 핵심: PO별 그룹 + 정렬
   const poGroups = React.useMemo(() => {
     const map = new Map<string, ShipmentLine[]>();
     for (const r of displayLines as any) {
@@ -381,8 +395,7 @@ async function cancelShipment() {
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(r);
     }
-
-    const groups = Array.from(map.entries())
+    return Array.from(map.entries())
       .map(([poNo, rows]) => ({
         poNo,
         rows: rows
@@ -394,44 +407,23 @@ async function cancelShipment() {
           ),
       }))
       .sort((a, b) => poSort(a.poNo, b.poNo));
-
-    return groups;
   }, [displayLines]);
 
   const poSummary = React.useMemo(() => {
     const poList = poGroups
       .map((g) => (g.poNo || "").trim())
       .filter((v) => v && v !== "(NO PO)");
-
     const unique = Array.from(new Set(poList)).sort(poSort);
 
-    if (unique.length === 0) {
-      return {
-        label: "-",
-        detail: "",
-      };
-    }
-
-    if (unique.length === 1) {
-      return {
-        label: unique[0],
-        detail: "",
-      };
-    }
-
-    return {
-      label: `Multiple (${unique.length})`,
-      detail: unique.join(", "),
-    };
+    if (unique.length === 0) return { label: "-", detail: "" };
+    if (unique.length === 1) return { label: unique[0], detail: "" };
+    return { label: `Multiple (${unique.length})`, detail: unique.join(", ") };
   }, [poGroups]);
 
   const currentShipMode = (displayShipment?.ship_mode ?? displayShipment?.shipMode ?? "")
     .toString()
     .toUpperCase();
-  const editableShipMode = (draftShipment?.ship_mode ??
-    draftShipment?.shipMode ??
-    currentShipMode ??
-    "")
+  const editableShipMode = (draftShipment?.ship_mode ?? draftShipment?.shipMode ?? currentShipMode ?? "")
     .toString()
     .toUpperCase();
 
@@ -445,78 +437,51 @@ async function cancelShipment() {
     setEditMode(false);
     setDraftShipment(shipment);
     setDraftLines(lines as any);
-    setSplitOpen(false);
-    setSplitLine(null);
-    setSplitQty(0);
-    setSplitCarrier("");
-    setSplitTracking("");
   };
 
-  const onChangeLineQty = (id: string, v: any) => {
-    const n = asNum(v);
-    setDraftLines((prev) => prev.map((r) => (r.id === id ? { ...r, qty: n } : r)));
+  const updateDraftQty = (id: string, qty: number) => {
+    setDraftLines((prev) => prev.map((r) => (r.id === id ? { ...r, qty } : r)));
   };
 
   const onRemoveLine = (id: string) => {
-    setDraftLines((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, _removed: true, qty: 0 } : r))
-    );
+    setDraftLines((prev) => prev.map((r) => (r.id === id ? { ...r, _removed: true, qty: 0 } : r)));
   };
 
   const openSplit = (line: DraftShipmentLine) => {
-    setSplitLine(line);
-    setSplitQty(0); // 사용자가 직접 입력하도록 0부터
-    setSplitMode("AIR");
-    setSplitCarrier("");
-    setSplitTracking("");
-    setSplitOpen(true);
-  };
-
-  const confirmSplit = async () => {
-    if (!shipmentId || !splitLine) return;
-
-    const maxQty = asNum(splitLine.qty);
-    const qty = Math.max(0, Math.min(maxQty, asNum(splitQty)));
-    if (!qty || qty <= 0) {
-      alert("Split Qty must be greater than 0.");
+    const maxQty = asNum(line.qty);
+    if (maxQty <= 1) {
+      alert("Qty must be greater than 1 to split.");
+      return;
+    }
+    const input = window.prompt(`Split Qty (1 ~ ${maxQty - 1})`, String(Math.floor(maxQty / 2)));
+    if (input === null) return;
+    const splitQty = Math.max(1, Math.min(maxQty - 1, asNum(input)));
+    if (!splitQty || splitQty >= maxQty) {
+      alert("Invalid split qty.");
       return;
     }
 
-    // optimistic update: decrease current line qty
-    setDraftLines((prev) =>
-      prev.map((r) =>
-        r.id === splitLine.id ? { ...r, qty: Math.max(0, asNum(r.qty) - qty) } : r
-      )
-    );
-
-    setSplitOpen(false);
-
-    try {
-      const res = await fetch(`/api/shipments/${shipmentId}/split`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          shipment_line_id: splitLine.id,
-          split_qty: qty,
-          new_ship_mode: splitMode,
-          carrier: splitMode === "COURIER" ? splitCarrier : null,
-          tracking_no: splitMode === "COURIER" ? splitTracking : null,
-        }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j?.success) {
-        alert(j?.error || "Split failed (API not implemented yet).");
-      } else {
-        await load();
+    setDraftLines((prev) => {
+      const out: DraftShipmentLine[] = [];
+      for (const r of prev) {
+        if (r.id !== line.id) {
+          out.push(r);
+          continue;
+        }
+        out.push({ ...r, qty: maxQty - splitQty });
+        out.push({
+          ...r,
+          id: `${r.id}__split__${Date.now()}`,
+          qty: splitQty,
+          line_no: r.line_no,
+        });
       }
-    } catch (e: any) {
-      alert(e?.message || "Split failed.");
-    }
+      return out;
+    });
   };
 
   const saveEdits = async () => {
     if (!shipmentId) return;
-
     setSaving(true);
     try {
       const payload = {
@@ -540,7 +505,7 @@ async function cancelShipment() {
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j?.success) {
-        alert(j?.error || "Save failed (API not implemented yet).");
+        alert(j?.error || "Save failed.");
         return;
       }
 
@@ -553,38 +518,49 @@ async function cancelShipment() {
     }
   };
 
+  const disableConfirm = ["CONFIRMED", "SHIPPED", "CANCELLED", "CANCELED", "DELETED"].includes(currentStatus);
+  const disableShip = ["SHIPPED", "CANCELLED", "CANCELED", "DELETED"].includes(currentStatus);
+
   return (
     <AppShell role={role} title="Shipment Detail">
-      <div className="flex items-center justify-end gap-2 mb-4">
+      <div className="flex flex-wrap items-center justify-end gap-2 mb-4">
         <Button variant="outline" asChild>
-                <Link href="/shipments">Back to Shipments List</Link>
-              </Button>
+          <Link href="/shipments">Back to Shipments List</Link>
+        </Button>
 
-      <Button variant="outline" onClick={() => router.back()}>
+        <Button variant="outline" onClick={() => router.back()}>
           Back
         </Button>
 
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <Button variant="destructive" disabled={cancelling}>
-            {cancelling ? "Cancelling..." : "Cancel Shipment"}
-          </Button>
-        </AlertDialogTrigger>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Cancel this shipment?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will mark the shipment as CANCELLED (soft delete). Only DRAFT shipments can be cancelled.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep</AlertDialogCancel>
-            <AlertDialogAction onClick={cancelShipment}>Cancel Shipment</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button variant="destructive" disabled={cancelling}>
+              {cancelling ? "Cancelling..." : "Cancel Shipment"}
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Cancel this shipment?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will mark the shipment as CANCELLED (soft delete). Only DRAFT shipments can be cancelled.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep</AlertDialogCancel>
+              <AlertDialogAction onClick={cancelShipment}>Cancel Shipment</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
-      <Button onClick={load} disabled={loading}>
+        <Button variant="outline" onClick={onConfirmShipment} disabled={confirming || disableConfirm}>
+          {confirming ? "Confirming..." : "Confirm Shipment"}
+        </Button>
+
+        <Button onClick={onMarkAsShipped} disabled={shipping || disableShip}>
+          {shipping ? "Updating..." : "Mark as Shipped"}
+        </Button>
+
+        <Button onClick={load} disabled={loading}>
           Refresh
         </Button>
       </div>
@@ -594,7 +570,7 @@ async function cancelShipment() {
           <CardTitle>Shipment Summary</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div>
               <div className="text-sm text-muted-foreground mb-1">Shipment No</div>
               <div className="break-all">{shipmentNo}</div>
@@ -604,13 +580,15 @@ async function cancelShipment() {
               <div className="text-sm text-muted-foreground mb-1">PO No</div>
               <div>{poSummary.label}</div>
               {poSummary.detail ? (
-                <div
-                  className="mt-1 text-xs text-muted-foreground break-all"
-                  title={poSummary.detail}
-                >
+                <div className="mt-1 text-xs text-muted-foreground break-all" title={poSummary.detail}>
                   {poSummary.detail}
                 </div>
               ) : null}
+            </div>
+
+            <div>
+              <div className="text-sm text-muted-foreground mb-1">Status</div>
+              <div>{currentStatus || "-"}</div>
             </div>
 
             <div>
@@ -621,13 +599,12 @@ async function cancelShipment() {
                 <select
                   className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                   value={(editableShipMode || "").toString()}
-                  onChange={(e) => {
-                    const v = e.target.value;
+                  onChange={(e) =>
                     setDraftShipment((prev: any) => ({
                       ...(prev ?? {}),
-                      ship_mode: v,
-                    }));
-                  }}
+                      ship_mode: e.target.value,
+                    }))
+                  }
                 >
                   <option value="">(Default)</option>
                   <option value="SEA">SEA</option>
@@ -680,7 +657,7 @@ async function cancelShipment() {
             {!isInvoiceLinked ? (
               <>
                 <Button onClick={onCreateInvoice} disabled={creatingInvoice}>
-                  Create Invoice
+                  {creatingInvoice ? "Creating..." : "Create Invoice"}
                 </Button>
                 <Button variant="outline" onClick={load} disabled={loading}>
                   Refresh Status
@@ -722,7 +699,7 @@ async function cancelShipment() {
             {!isPlLinked ? (
               <>
                 <Button onClick={onCreatePackingList} disabled={creatingPackingList}>
-                  Create Packing List
+                  {creatingPackingList ? "Creating..." : "Create Packing List"}
                 </Button>
                 <Button variant="outline" onClick={load} disabled={loading}>
                   Refresh Status
@@ -814,28 +791,25 @@ async function cancelShipment() {
                           <td className="p-2">{r.size ?? "-"}</td>
                           <td className="p-2 text-right">
                             {!editMode ? (
-                              asNum((r as any).qty)
+                              fmtInt(r.qty)
                             ) : (
                               <input
-                                className="h-8 w-24 rounded-md border bg-background px-2 text-right text-sm"
-                                type="number"
-                                step="1"
-                                min="0"
-                                value={asNum((r as any).qty)}
-                                onChange={(e) => onChangeLineQty(r.id, e.target.value)}
+                                className="h-9 w-24 rounded-md border px-2 text-right"
+                                value={String(asNum(r.qty))}
+                                onChange={(e) => updateDraftQty(r.id, asNum(e.target.value))}
                               />
                             )}
                           </td>
-                          <td className="p-2 text-right">{asNum((r as any).cartons)}</td>
-                          <td className="p-2 text-right">{fmt1((r as any).gw)}</td>
-                          <td className="p-2 text-right">{fmt1((r as any).nw)}</td>
+                          <td className="p-2 text-right">{fmtInt(r.cartons)}</td>
+                          <td className="p-2 text-right">{fmt1(r.gw)}</td>
+                          <td className="p-2 text-right">{fmt1(r.nw)}</td>
                           {editMode && (
                             <td className="p-2 text-right">
                               <div className="flex justify-end gap-2">
-                                <Button size="sm" variant="outline" onClick={() => openSplit(r as any)}>
+                                <Button variant="outline" size="sm" onClick={() => openSplit(r as DraftShipmentLine)}>
                                   Split
                                 </Button>
-                                <Button size="sm" variant="destructive" onClick={() => onRemoveLine(r.id)}>
+                                <Button variant="destructive" size="sm" onClick={() => onRemoveLine(r.id)}>
                                   Remove
                                 </Button>
                               </div>
@@ -849,91 +823,8 @@ async function cancelShipment() {
               </tbody>
             </table>
           </div>
-
-          <Separator className="my-4" />
-          <div className="text-sm text-muted-foreground">
-            Lines are loaded from /api/shipments/[id]. Display is grouped by PO and sorted by line_no.
-          </div>
         </CardContent>
       </Card>
-
-      {splitOpen && splitLine && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-lg bg-background shadow-lg border">
-            <div className="p-4 border-b">
-              <div className="font-semibold">Split Line</div>
-              <div className="text-sm text-muted-foreground mt-1">
-                PO: {splitLine.po_no ?? "-"} • Style: {splitLine.style_no ?? "-"} • Available:{" "}
-                {asNum((splitLine as any).qty)}
-              </div>
-            </div>
-
-            <div className="p-4 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="text-sm text-muted-foreground mb-1">Split Qty</div>
-                  <input
-                    className="h-9 w-full rounded-md border bg-background px-3 text-sm text-right"
-                    type="number"
-                    min="1"
-                    step="1"
-                    value={splitQty}
-                    onChange={(e) => setSplitQty(asNum(e.target.value))}
-                  />
-                </div>
-                <div>
-                  <div className="text-sm text-muted-foreground mb-1">New Ship Mode</div>
-                  <select
-                    className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-                    value={splitMode}
-                    onChange={(e) => setSplitMode(e.target.value as any)}
-                  >
-                    <option value="SEA">SEA</option>
-                    <option value="AIR">AIR</option>
-                    <option value="COURIER">COURIER</option>
-                  </select>
-                </div>
-              </div>
-
-              {splitMode === "COURIER" && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <div className="text-sm text-muted-foreground mb-1">Carrier</div>
-                    <input
-                      className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-                      value={splitCarrier}
-                      onChange={(e) => setSplitCarrier(e.target.value)}
-                      placeholder="DHL / UPS / FedEx..."
-                    />
-                  </div>
-                  <div>
-                    <div className="text-sm text-muted-foreground mb-1">Tracking No</div>
-                    <input
-                      className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-                      value={splitTracking}
-                      onChange={(e) => setSplitTracking(e.target.value)}
-                      placeholder="Tracking number"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="p-4 border-t flex items-center justify-end gap-2">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setSplitOpen(false);
-                  setSplitLine(null);
-                }}
-              >
-                Cancel
-              </Button>
-              <Button onClick={confirmSplit}>Confirm Split</Button>
-            </div>
-          </div>
-        </div>
-      )}
     </AppShell>
   );
 }

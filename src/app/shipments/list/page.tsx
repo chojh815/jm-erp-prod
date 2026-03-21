@@ -15,6 +15,7 @@ type ShipmentRow = {
   id: string;
   shipment_no?: string | null;
   po_no?: string | null;
+  po_display?: string | null;
   buyer_name?: string | null;
   ship_mode?: string | null;
   etd?: string | null;
@@ -36,25 +37,20 @@ type ListResponse = {
 function safe(v: any) {
   return (v ?? "").toString().trim();
 }
-
 function fmtInt(v: any) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "-";
   return Math.round(n).toLocaleString();
 }
-
 function fmtNum(v: any, digits = 2) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "-";
   return n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
-
 function fmtDate10(v: any) {
   const s = safe(v);
   if (!s) return "-";
-  // already YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // ISO datetime
   const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
   if (m?.[1]) return m[1];
   return s;
@@ -88,7 +84,6 @@ export default function ShipmentListPage() {
       setItems(Array.isArray(j.items) ? j.items : []);
       setTotal(Number(j.total ?? (j.items?.length ?? 0)) || 0);
 
-      // URL sync (검색/필터 유지)
       const next = new URLSearchParams();
       if (safe(q)) next.set("q", safe(q));
       if (safe(status) && status !== "ALL") next.set("status", status);
@@ -104,8 +99,7 @@ export default function ShipmentListPage() {
 
   React.useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [load]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") load();
@@ -118,9 +112,15 @@ export default function ShipmentListPage() {
       const res = await fetch(`/api/shipments/${shipmentId}/invoice`, { method: "POST" });
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j?.success) throw new Error(j?.error || "Failed to create invoice");
+
+      try {
+        await fetch(`/api/shipments/${shipmentId}/ship`, { method: "POST" });
+      } catch {}
+
       const invoiceId = j.invoice_id ?? j.invoice?.id ?? j.invoice?.invoice_id ?? null;
-      alert(j.already_exists ? "Invoice already exists." : "Invoice created.");
+      alert(j.already_exists ? "Invoice already exists. Shipment marked as SHIPPED." : "Invoice created. Shipment marked as SHIPPED.");
       if (invoiceId) router.push(`/invoices/${invoiceId}`);
+      else load();
     } catch (e: any) {
       console.error(e);
       alert(e?.message || "Create invoice error");
@@ -189,6 +189,7 @@ export default function ShipmentListPage() {
                 <option value="ALL">ALL</option>
                 <option value="DRAFT">DRAFT</option>
                 <option value="CONFIRMED">CONFIRMED</option>
+                <option value="SHIPPED">SHIPPED</option>
                 <option value="CLOSED">CLOSED</option>
               </select>
 
@@ -238,7 +239,9 @@ export default function ShipmentListPage() {
                         </button>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">{safe(r.buyer_name) || "-"}</td>
-                      <td className="px-3 py-2 whitespace-nowrap">{safe(r.po_no) || "-"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {safe(r.po_display) || safe(r.po_no) || "-"}
+                      </td>
                       <td className="px-3 py-2 whitespace-nowrap">{safe(r.ship_mode)?.toUpperCase() || "-"}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{fmtDate10(r.etd)}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{safe(r.destination) || "-"}</td>
