@@ -94,7 +94,6 @@ function originCodeToCooText(code: string | null | undefined) {
   if (v.startsWith("KR_")) return "MADE IN KOREA";
   return "";
 }
-
 function clamp(n: number, min: number, max: number) {
   return Math.min(Math.max(n, min), max);
 }
@@ -179,56 +178,6 @@ export default function ShipmentsCreateFromPoPage() {
     return pickFirst(h, ["buyer_company_id", "buyer_id", "company_id"]) || "";
   }, [selectedHeaders]);
 
-  const handleSearchPo = React.useCallback(
-    async (q?: string) => {
-      const keyword = (q ?? searchText).trim();
-      if (!keyword) {
-        setPoList([]);
-        return;
-      }
-      setPoLoading(true);
-      try {
-        const like = `%${keyword}%`;
-
-        let qq = supabase
-          .from("po_headers")
-          .select("*")
-          .or(
-            [
-              `po_no.ilike.${like}`,
-              `buyer_name.ilike.${like}`,
-              `buyer_brand_name.ilike.${like}`,
-              `final_destination.ilike.${like}`,
-              `destination.ilike.${like}`,
-            ].join(",")
-          )
-          .order("created_at", { ascending: false })
-          .limit(100);
-
-        try {
-          const { data, error } = await qq.eq("status", "CONFIRMED");
-          if (!error) {
-            setPoList(data ?? []);
-          } else {
-            const { data: data2, error: error2 } = await qq;
-            if (error2) throw error2;
-            setPoList(data2 ?? []);
-          }
-        } catch (e: any) {
-          console.error(e);
-          alert(`PO 검색 오류: ${e?.message ?? e}`);
-        }
-      } finally {
-        setPoLoading(false);
-      }
-    },
-    [searchText, supabase]
-  );
-
-  const onKeyDownSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") handleSearchPo();
-  };
-
   const loadShippedAggByPoLine = React.useCallback(
     async (poLineIds: string[]) => {
       const shippedByLineId = new Map<string, number>();
@@ -286,6 +235,130 @@ export default function ShipmentsCreateFromPoPage() {
     [supabase]
   );
 
+  const handleSearchPo = React.useCallback(
+    async (q?: string) => {
+      const keyword = (q ?? searchText).trim();
+      if (!keyword) {
+        setPoList([]);
+        return;
+      }
+
+      setPoLoading(true);
+      try {
+        const like = `%${keyword}%`;
+
+        let qq = supabase
+          .from("po_headers")
+          .select("*")
+          .or(
+            [
+              `po_no.ilike.${like}`,
+              `buyer_name.ilike.${like}`,
+              `buyer_brand_name.ilike.${like}`,
+              `final_destination.ilike.${like}`,
+              `destination.ilike.${like}`,
+            ].join(",")
+          )
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        let headers: any[] = [];
+        try {
+          const { data, error } = await qq.eq("status", "CONFIRMED");
+          if (!error) headers = data ?? [];
+          else {
+            const { data: data2, error: error2 } = await qq;
+            if (error2) throw error2;
+            headers = data2 ?? [];
+          }
+        } catch (e: any) {
+          console.error(e);
+          alert(`PO 검색 오류: ${e?.message ?? e}`);
+          setPoList([]);
+          return;
+        }
+
+        if (!headers.length) {
+          setPoList([]);
+          return;
+        }
+
+        const blockedStatuses = new Set([
+          "CANCELLED",
+          "CANCELED",
+          "DELETED",
+          "CLOSED",
+          "CLOSE",
+          "DONE",
+          "COMPLETED",
+          "SHIPPED",
+        ]);
+
+        const activeHeaders = headers.filter((h: any) => {
+          if (Boolean(h?.is_deleted)) return false;
+          const st = safe(h?.status).toUpperCase();
+          if (st && blockedStatuses.has(st)) return false;
+          return true;
+        });
+
+        if (!activeHeaders.length) {
+          setPoList([]);
+          return;
+        }
+
+        const poIds = activeHeaders.map((h: any) => safe(h.id)).filter(Boolean);
+
+        const { data: poLines, error: lineErr } = await supabase
+          .from("po_lines")
+          .select("*")
+          .in("po_header_id", poIds);
+
+        if (lineErr) throw lineErr;
+
+        const activeLines = (poLines ?? []).filter((ln: any) =>
+          ln?.is_deleted === undefined ? true : ln.is_deleted === false
+        );
+
+        const lineIds = activeLines.map((ln: any) => safe(ln?.id)).filter(Boolean);
+        const shippedAgg = await loadShippedAggByPoLine(lineIds);
+
+        const remainingByPo = new Map<string, number>();
+        for (const ln of activeLines) {
+          const poId = safe((ln as any)?.po_header_id);
+          const lineId = safe((ln as any)?.id);
+          if (!poId || !lineId) continue;
+
+          const orderQty = num(
+            (ln as any)?.qty ?? (ln as any)?.order_qty ?? (ln as any)?.orderQty,
+            0
+          );
+          const shippedQty = num(shippedAgg.get(lineId), 0);
+          const remainingQty = Math.max(0, orderQty - shippedQty);
+
+          remainingByPo.set(poId, num(remainingByPo.get(poId), 0) + remainingQty);
+        }
+
+        const filtered = activeHeaders.filter((h: any) => {
+          const poId = safe(h?.id);
+          return num(remainingByPo.get(poId), 0) > 0;
+        });
+
+        setPoList(filtered);
+      } catch (e: any) {
+        console.error(e);
+        alert(`PO 검색 오류: ${e?.message ?? e}`);
+        setPoList([]);
+      } finally {
+        setPoLoading(false);
+      }
+    },
+    [searchText, supabase, loadShippedAggByPoLine]
+  );
+
+  const onKeyDownSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") handleSearchPo();
+  };
+
   const loadPoLines = React.useCallback(
     async (po: PoHeader) => {
       let fixedPo = po;
@@ -304,9 +377,7 @@ export default function ShipmentsCreateFromPoPage() {
 
       if (error) throw error;
 
-      const lineIds = (data ?? [])
-        .map((ln: any) => safe(ln?.id))
-        .filter(Boolean);
+      const lineIds = (data ?? []).map((ln: any) => safe(ln?.id)).filter(Boolean);
       const shippedAgg = await loadShippedAggByPoLine(lineIds);
 
       const headerMode = normalizeMode(pickFirst(fixedPo, ["ship_mode", "shipMode", "shipmode"]));
@@ -950,38 +1021,34 @@ export default function ShipmentsCreateFromPoPage() {
 
                         <TableCell>
                           <Button
-                            type="button"
-                            variant="secondary"
+                            variant="ghost"
                             size="sm"
                             onClick={() => splitRow(r.id)}
-                            disabled={!r.include || num(r.shipped_qty, 0) <= 0}
+                            disabled={!r.include || num(r.shipped_qty, 0) <= 1}
                           >
                             Split
                           </Button>
                         </TableCell>
 
                         <TableCell>
-                          <Button type="button" variant="ghost" size="sm" onClick={() => removeRow(r.id)}>
-                            ✕
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive"
+                            onClick={() => removeRow(r.id)}
+                          >
+                            Del
                           </Button>
                         </TableCell>
                       </TableRow>
                     ))}
-
-                    {allocs.length === 0 && (
-                      <TableRow>
-                        <TableCell colSpan={21} className="text-muted-foreground">
-                          No lines. Select PO(s) first.
-                        </TableCell>
-                      </TableRow>
-                    )}
                   </TableBody>
                 </Table>
               </div>
 
               <div className="flex justify-end">
-                <Button onClick={save} disabled={saving || loading || allocs.length === 0}>
-                  {saving ? "Saving..." : "Save Shipment"}
+                <Button size="lg" onClick={save} disabled={saving || loading}>
+                  {saving ? "Saving..." : "Create Shipment"}
                 </Button>
               </div>
             </CardContent>
