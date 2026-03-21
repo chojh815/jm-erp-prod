@@ -84,6 +84,17 @@ function asNum(v: any) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function round1(v: any) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Number(n.toFixed(1)) : 0;
+}
+
+function fmt1(v: any) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return n.toFixed(1);
+}
+
 function safeText(v: any) {
   const s = (v ?? "").toString().trim();
   return s && s !== "-" ? s : "";
@@ -107,10 +118,10 @@ function normalizeLine(raw: any): ShipmentLine {
 
   const gw =
     raw?.gw ??
-    (gwPer !== null && gwPer !== undefined ? asNum(cartons) * asNum(gwPer) : null);
+    (gwPer !== null && gwPer !== undefined ? round1(asNum(cartons) * asNum(gwPer)) : null);
   const nw =
     raw?.nw ??
-    (nwPer !== null && nwPer !== undefined ? asNum(cartons) * asNum(nwPer) : null);
+    (nwPer !== null && nwPer !== undefined ? round1(asNum(cartons) * asNum(nwPer)) : null);
 
   // Style fallback: API에서 style_no가 "-"로 올 때 po_lines.jm_style_no가 진짜 값
   const style =
@@ -387,6 +398,33 @@ async function cancelShipment() {
     return groups;
   }, [displayLines]);
 
+  const poSummary = React.useMemo(() => {
+    const poList = poGroups
+      .map((g) => (g.poNo || "").trim())
+      .filter((v) => v && v !== "(NO PO)");
+
+    const unique = Array.from(new Set(poList)).sort(poSort);
+
+    if (unique.length === 0) {
+      return {
+        label: "-",
+        detail: "",
+      };
+    }
+
+    if (unique.length === 1) {
+      return {
+        label: unique[0],
+        detail: "",
+      };
+    }
+
+    return {
+      label: `Multiple (${unique.length})`,
+      detail: unique.join(", "),
+    };
+  }, [poGroups]);
+
   const currentShipMode = (displayShipment?.ship_mode ?? displayShipment?.shipMode ?? "")
     .toString()
     .toUpperCase();
@@ -564,7 +602,15 @@ async function cancelShipment() {
 
             <div>
               <div className="text-sm text-muted-foreground mb-1">PO No</div>
-              <div>{S?.po_no ?? "-"}</div>
+              <div>{poSummary.label}</div>
+              {poSummary.detail ? (
+                <div
+                  className="mt-1 text-xs text-muted-foreground break-all"
+                  title={poSummary.detail}
+                >
+                  {poSummary.detail}
+                </div>
+              ) : null}
             </div>
 
             <div>
@@ -608,12 +654,12 @@ async function cancelShipment() {
 
             <div>
               <div className="text-sm text-muted-foreground mb-1">Total G.W.</div>
-              <div>{S?.total_gw ?? "-"}</div>
+              <div>{S?.total_gw != null ? fmt1(S.total_gw) : "-"}</div>
             </div>
 
             <div>
               <div className="text-sm text-muted-foreground mb-1">Total N.W.</div>
-              <div>{S?.total_nw ?? "-"}</div>
+              <div>{S?.total_nw != null ? fmt1(S.total_nw) : "-"}</div>
             </div>
           </div>
         </CardContent>
@@ -781,8 +827,8 @@ async function cancelShipment() {
                             )}
                           </td>
                           <td className="p-2 text-right">{asNum((r as any).cartons)}</td>
-                          <td className="p-2 text-right">{asNum((r as any).gw)}</td>
-                          <td className="p-2 text-right">{asNum((r as any).nw)}</td>
+                          <td className="p-2 text-right">{fmt1((r as any).gw)}</td>
+                          <td className="p-2 text-right">{fmt1((r as any).nw)}</td>
                           {editMode && (
                             <td className="p-2 text-right">
                               <div className="flex justify-end gap-2">
