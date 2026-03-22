@@ -212,8 +212,6 @@ function isNonEmptyString(v: any): v is string {
 }
 
 // --------- Image URL resolver (supports images[] / storage paths) ---------
-// If your API already returns a full https URL, it will be used as-is.
-// If your API returns an array (images[]) or a Storage object path, we try to convert it.
 const IMAGE_BUCKET_CANDIDATES = [
   "po-line-images",
   "po_line_images",
@@ -276,7 +274,6 @@ function extractFirstImageLike(raw: any): string | null {
     if (s) return s;
   }
 
-  // comma separated string like "url1, url2"
   if (isNonEmptyString(arrLike) && arrLike.includes(",")) {
     const first = arrLike
       .split(",")
@@ -295,17 +292,10 @@ function looksLikeHttpUrl(v: string) {
 function cleanStoragePath(p: string) {
   let s = p.trim();
   if (s.startsWith("/")) s = s.slice(1);
-  // remove common prefixes
   s = s.replace(/^public\//i, "");
   return s;
 }
 
-/**
- * Convert a storage-like path to a public URL.
- * - If input is already a full URL, return as-is.
- * - If input looks like "bucket/path/to/file.jpg", use that bucket.
- * - Otherwise, fall back to the first candidate bucket.
- */
 function resolveImageUrlFromStorage(
   supabase: ReturnType<typeof createSupabaseBrowserClient>,
   maybeUrl: string | null
@@ -326,7 +316,6 @@ function resolveImageUrlFromStorage(
     }
   }
 
-  // fallback: assume first candidate bucket
   const fallbackBucket = IMAGE_BUCKET_CANDIDATES[0];
   const { data } = supabase.storage.from(fallbackBucket).getPublicUrl(cleaned);
   return data?.publicUrl ?? null;
@@ -351,7 +340,7 @@ function normStr(v: any) {
 function normDate(v: any, dir: SortDir) {
   const s = (v ?? "").toString().trim();
   if (!s) return dir === "ASC" ? "9999-12-31" : "0000-01-01";
-  return s; // YYYY-MM-DD string compare OK
+  return s;
 }
 function normNum(v: any) {
   const n = Number(v ?? 0);
@@ -399,7 +388,6 @@ function multiSortItems(
       [s1f, s1d],
       [s2f, s2d],
       [s3f, s3d],
-      // 항상 마지막 tie-breaker로 PO_NO 고정(안정성)
       ["PO_NO", "ASC"],
     ];
 
@@ -428,21 +416,43 @@ function fmtMoney2(v: any) {
   return ok.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-
 function fmtTotalsByCurrency(totals: Record<string, number> | null | undefined) {
   if (!totals) return "";
   const entries = Object.entries(totals).filter(([cur, v]) => (cur ?? "").trim() !== "" || Number.isFinite(Number(v)));
   if (entries.length === 0) return "";
-  // normalize: empty currency => 'N/A'
   const norm = entries.map(([cur, v]) => [ (cur ?? "").trim() || "N/A", Number(v ?? 0) ] as const);
   if (norm.length === 1) {
     const [c, v] = norm[0];
     return `${c} ${fmtMoney2(v)}`;
   }
-  // multi-currency: show as "USD 1,000.00 | CNY 2,000.00"
   return norm.map(([c, v]) => `${c} ${fmtMoney2(v)}`).join(" | ");
 }
 
+function getStatusBadgeClass(status: string | null | undefined) {
+  const s = (status ?? "").toString().trim().toUpperCase();
+
+  switch (s) {
+    case "OPEN":
+      return "inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700";
+    case "PARTIAL":
+      return "inline-flex items-center rounded-full border border-orange-300 bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700";
+    case "ALLOCATED":
+      return "inline-flex items-center rounded-full border border-blue-300 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700";
+    case "SHIPPED":
+      return "inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700";
+    case "CLOSED":
+      return "inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-700";
+    case "CANCELED":
+    case "CANCELLED":
+      return "inline-flex items-center rounded-full border border-rose-300 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700";
+    case "DRAFT":
+      return "inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700";
+    case "CONFIRMED":
+      return "inline-flex items-center rounded-full border border-cyan-300 bg-cyan-50 px-2.5 py-1 text-xs font-semibold text-cyan-700";
+    default:
+      return "inline-flex items-center rounded-full border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700";
+  }
+}
 
 export default function PurchaseOrderListPage() {
   const router = useRouter();
@@ -528,7 +538,6 @@ export default function PurchaseOrderListPage() {
       if (dateFrom) params.set("dateFrom", dateFrom);
       if (dateTo) params.set("dateTo", dateTo);
 
-      // ✅ keep pagination consistent with sorting: let server sort before paging
       params.set("s1Field", s1Field);
       params.set("s1Dir", s1Dir);
       params.set("s2Field", s2Field);
@@ -551,7 +560,6 @@ export default function PurchaseOrderListPage() {
       setTotal(json?.total ?? 0);
       setPage(json?.page ?? p);
 
-      // totals from API (filter-wide)
       const gt = json?.grandTotal;
       const gtc = json?.grandTotalsByCurrency;
       const ptc = json?.pageTotalsByCurrency;
@@ -640,14 +648,12 @@ export default function PurchaseOrderListPage() {
   const handlePrev = () => page > 1 && fetchList(page - 1);
   const handleNext = () => page < totalPages && fetchList(page + 1);
 
-  // ✅ items are already sorted by server (to keep pagination consistent)
   const sortedItems = useMemo(() => items, [items]);
-
 
   // ---------- fetch ALL headers for export (ignores pagination) ----------
   async function fetchAllHeadersForExport(): Promise<PoHeaderItem[]> {
     const all: PoHeaderItem[] = [];
-    const EXPORT_PAGE_SIZE = 200; // API cap
+    const EXPORT_PAGE_SIZE = 200;
 
     let p = 1;
     while (true) {
@@ -659,7 +665,6 @@ export default function PurchaseOrderListPage() {
       if (dateFrom) params.set("dateFrom", dateFrom);
       if (dateTo) params.set("dateTo", dateTo);
 
-      // keep same sorting as screen
       params.set("s1Field", s1Field);
       params.set("s1Dir", s1Dir);
       params.set("s2Field", s2Field);
@@ -675,22 +680,19 @@ export default function PurchaseOrderListPage() {
       const batch = rawItems.map(normalizeHeader) as PoHeaderItem[];
       all.push(...batch);
 
-      // stop condition
       if (!batch.length || batch.length < EXPORT_PAGE_SIZE) break;
 
       p += 1;
-      // hard safety to prevent infinite loops in case of buggy API
       if (p > 500) break;
     }
 
     return all;
   }
 
-// ---------- export excel ----------
+  // ---------- export excel ----------
   const handleExportExcel = async () => {
     if (total === 0) return alert("No data to export.");
 
-    // 각 PO별 라인 전체를 다시 받아서 "라인 단위"로 export
     async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
       const params = new URLSearchParams();
       params.set("detailFor", headerId);
@@ -722,8 +724,6 @@ export default function PurchaseOrderListPage() {
     ];
 
     const rows: string[][] = [];
-
-    // ✅ number formatters (used in CSV cells)
     const nf0 = new Intl.NumberFormat("en-US");
     const nf2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -736,10 +736,8 @@ export default function PurchaseOrderListPage() {
       for (const it of allSorted) {
         const lines = await fetchLinesForHeaderId(it.id);
 
-        // PO별 합계(라인 기반)
         let poSum = 0;
 
-        // 라인이 없으면(데이터 비정상/삭제 등) 헤더 정보만 1줄로 남김
         if (!lines || lines.length === 0) {
           const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
           poSum = headerSubtotal;
@@ -760,7 +758,6 @@ export default function PurchaseOrderListPage() {
             it.status ?? "-",
           ]);
 
-          // PO Subtotal row
           rows.push([
             it.poNo,
             "",
@@ -776,7 +773,6 @@ export default function PurchaseOrderListPage() {
             "",
           ]);
 
-          // blank separator
           rows.push(["", "", "", "", "", "", "", "", "", "", "", ""]);
           continue;
         }
@@ -807,7 +803,6 @@ export default function PurchaseOrderListPage() {
           if (typeof amount === "number") poSum += amount;
 
           rows.push([
-            // Excel은 필터/정렬을 위해 PO 정보는 매 라인마다 반복 표기
             it.poNo,
             it.buyerName ?? "-",
             it.mainBuyerBrand ?? "-",
@@ -825,7 +820,6 @@ export default function PurchaseOrderListPage() {
 
         grandSum += poSum;
 
-        // ✅ PO Subtotal row (라인 아래 1줄)
         rows.push([
           it.poNo,
           "",
@@ -841,12 +835,10 @@ export default function PurchaseOrderListPage() {
           "",
         ]);
 
-        // blank separator
         rows.push(["", "", "", "", "", "", "", "", "", "", "", ""]);
       }
 
-      // ✅ Grand Total row (맨 마지막 1줄)
-      const curSet = new Set(allSorted.map((x) => (x.currency ?? "").trim()).filter(Boolean));
+      const curSet = new Set(allHeaders.map((x) => (x.currency ?? "").trim()).filter(Boolean));
       const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
       rows.push([
         "",
@@ -873,7 +865,6 @@ export default function PurchaseOrderListPage() {
         arr
           .map((cell) => {
             const v = (cell ?? "").toString();
-            // CSV 안전 처리: 쉼표/따옴표/개행 포함 시 "..."로 감싸고 내부 "는 ""로 이스케이프
             if (/[,"\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
             return v;
           })
@@ -892,11 +883,10 @@ export default function PurchaseOrderListPage() {
     URL.revokeObjectURL(url);
   };
 
-  // ---------- export pdf (jsPDF + autoTable + print) ----------
+  // ---------- export pdf ----------
   const handleExportPdf = async () => {
     if (total === 0) return alert("No data to export.");
 
-    // 각 PO별 라인 전체를 다시 받아서 "라인 단위"로 export
     async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
       const params = new URLSearchParams();
       params.set("detailFor", headerId);
@@ -918,8 +908,6 @@ export default function PurchaseOrderListPage() {
     doc.text("Purchase Order List", 40, 40);
 
     const sortLabel = `1) ${s1Field} ${s1Dir}  2) ${s2Field} ${s2Dir}  3) ${s3Field} ${s3Dir}`;
-
-    // 라인 단위 테이블 바디 생성
     const body: any[] = [];
 
     const nf0 = new Intl.NumberFormat("en-US");
@@ -960,7 +948,6 @@ export default function PurchaseOrderListPage() {
             it.status ?? "-",
           ]);
 
-          // PO Subtotal row (marker)
           body.push([
             "__PO_SUBTOTAL__",
             it.poNo,
@@ -1007,7 +994,6 @@ export default function PurchaseOrderListPage() {
 
           if (typeof amount === "number") poSum += amount;
 
-          // PDF는 같은 PO가 연속으로 나오니 2번째 라인부터는 헤더 컬럼은 공백 처리(가독성)
           const showHeaderCols = idx === 0;
 
           body.push([
@@ -1026,7 +1012,6 @@ export default function PurchaseOrderListPage() {
           ]);
         });
 
-        // PO Subtotal row (marker)
         body.push([
           "__PO_SUBTOTAL__",
           it.poNo,
@@ -1045,7 +1030,6 @@ export default function PurchaseOrderListPage() {
         grandSum += poSum;
       }
 
-      // Grand Total row (marker)
       const curSet = new Set(allSorted.map((x) => (x.currency ?? "").trim()).filter(Boolean));
       const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
       body.push([
@@ -1096,37 +1080,32 @@ export default function PurchaseOrderListPage() {
       margin: { left: 24, right: 24 },
       headStyles: { fillColor: [40, 130, 180], textColor: 255 },
       columnStyles: {
-        0: { cellWidth: 68 },   // PO No
-        1: { cellWidth: 95 },   // Buyer
-        2: { cellWidth: 68 },   // Brand
-        3: { cellWidth: 95 },   // Buyer Style No
-        4: { cellWidth: 60 },   // Order Date
-        5: { cellWidth: 66 },   // Req. Ship Date
-        6: { cellWidth: 52 },   // Ship Mode
-        7: { cellWidth: 34 },   // Cur.
-        8: { cellWidth: 46, halign: "right" }, // Qty
-        9: { cellWidth: 52, halign: "right" }, // Unit Price
-        10: { cellWidth: 62, halign: "right" }, // Subtotal
-        11: { cellWidth: 60, halign: "center", overflow: "ellipsize" },  // Status
+        0: { cellWidth: 68 },
+        1: { cellWidth: 95 },
+        2: { cellWidth: 68 },
+        3: { cellWidth: 95 },
+        4: { cellWidth: 60 },
+        5: { cellWidth: 66 },
+        6: { cellWidth: 52 },
+        7: { cellWidth: 34 },
+        8: { cellWidth: 46, halign: "right" },
+        9: { cellWidth: 52, halign: "right" },
+        10: { cellWidth: 62, halign: "right" },
+        11: { cellWidth: 60, halign: "center", overflow: "ellipsize" },
       },
       didParseCell: (data) => {
-        // Marker rows styling for PO Subtotal / Grand Total
         const rawRow = (data.row as any)?.raw as any[];
         const marker = rawRow?.[0];
         if (data.section === "body" && (marker === "__PO_SUBTOTAL__" || marker === "__GRAND_TOTAL__")) {
-          // Clear all cells by default
           data.cell.text = [""];
-          // Put labels and values in specific columns
           if (data.column.index === 3) data.cell.text = [marker === "__GRAND_TOTAL__" ? "Grand Total" : "PO Subtotal"];
           if (data.column.index === 10) data.cell.text = [String(rawRow?.[10] ?? "")];
           if (data.column.index === 7) data.cell.text = [String(rawRow?.[7] ?? "")];
 
-          // Style
           data.cell.styles.fontStyle = "bold";
           data.cell.styles.fillColor = marker === "__GRAND_TOTAL__" ? [230, 230, 230] : [245, 245, 245];
         }
 
-        // Hide marker text in first column (safety)
         if (data.section === "body" && data.column.index === 0) {
           const v = String((data.cell.raw as any) ?? "");
           if (v === "__PO_SUBTOTAL__" || v === "__GRAND_TOTAL__") data.cell.text = [""];
@@ -1304,9 +1283,9 @@ export default function PurchaseOrderListPage() {
                   </SelectTrigger>
                   <SelectContent className="z-50">
                     <SelectItem value="ALL">All Status</SelectItem>
-                    <SelectItem value="DRAFT">DRAFT</SelectItem>
-                    <SelectItem value="CONFIRMED">CONFIRMED</SelectItem>
-                    <SelectItem value="IN_PRODUCTION">IN PRODUCTION</SelectItem>
+                    <SelectItem value="OPEN">OPEN</SelectItem>
+                    <SelectItem value="PARTIAL">PARTIAL</SelectItem>
+                    <SelectItem value="ALLOCATED">ALLOCATED</SelectItem>
                     <SelectItem value="SHIPPED">SHIPPED</SelectItem>
                     <SelectItem value="CLOSED">CLOSED</SelectItem>
                     <SelectItem value="CANCELED">CANCELED</SelectItem>
@@ -1447,7 +1426,9 @@ export default function PurchaseOrderListPage() {
                           <td className="px-4 py-2 text-right">
                             {typeof it.subtotal === "number" ? fmtMoney2(it.subtotal) : "0.00"}
                           </td>
-                          <td className="px-4 py-2">{it.status ?? "-"}</td>
+                          <td className="px-4 py-2">
+                            <span className={getStatusBadgeClass(it.status)}>{it.status ?? "-"}</span>
+                          </td>
 
                           <td className="px-4 py-2" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-2">
@@ -1472,13 +1453,11 @@ export default function PurchaseOrderListPage() {
                   Page Subtotal:{" "}
                   <span className="font-semibold">
                     {(() => {
-                      // Page subtotal should match server logic (pageTotalsByCurrency).
                       const entries = Object.entries(pageTotalsByCurrency ?? {}).filter(
                         ([cur, val]) => !!cur && typeof val === "number" && Number.isFinite(val)
                       );
 
                       if (entries.length === 0) {
-                        // Fallback: sum visible rows (should be rare)
                         const sum = items.reduce(
                           (acc, it) =>
                             acc +
@@ -1496,7 +1475,6 @@ export default function PurchaseOrderListPage() {
                         return `${cur} ${fmtMoney2(val)}`;
                       }
 
-                      // Multi-currency: show compact "USD 1,000.00 / CNY 2,000.00"
                       const shown = entries
                         .slice(0, 3)
                         .map(([cur, val]) => `${cur} ${fmtMoney2(val as number)}`)
@@ -1512,7 +1490,7 @@ export default function PurchaseOrderListPage() {
                     {fmtTotalsByCurrency(grandTotalsByCurrency) || "-"}
                   </span>
                 </div>
-<div className="flex gap-2">
+                <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={handleExportExcel}>
                     Export Excel
                   </Button>
@@ -1637,7 +1615,6 @@ export default function PurchaseOrderListPage() {
                                       title={imgSrc ? imgSrc : "Open detail"}
                                     >
                                       {isNonEmptyString(imgSrc) ? (
-                                        // eslint-disable-next-line @next/next/no-img-element
                                         <img
                                           src={imgSrc}
                                           alt="Style"
@@ -1694,7 +1671,6 @@ export default function PurchaseOrderListPage() {
       {/* Right Drawer: Line Detail */}
       {drawerOpen && selectedPo && selectedLine && (
         <div className="fixed inset-0 z-50">
-          {/* backdrop */}
           <div
             className="absolute inset-0 bg-black/30"
             onClick={() => {
@@ -1703,7 +1679,6 @@ export default function PurchaseOrderListPage() {
             }}
           />
 
-          {/* panel */}
           <div className="absolute right-0 top-0 h-full w-full sm:w-[420px] bg-white shadow-xl flex flex-col">
             <div className="px-4 py-3 border-b flex items-center justify-between">
               <div>
@@ -1729,13 +1704,11 @@ export default function PurchaseOrderListPage() {
                 <span className="font-semibold">PO:</span> {selectedPo.poNo} / {selectedPo.buyerName ?? "-"}
               </div>
 
-              {/* Image (placeholder for now) */}
               <div className="border rounded-xl bg-slate-50 p-3">
                 <div className="text-xs text-slate-500 mb-2">Style Image</div>
                 {(() => {
                   const imgSrc = resolveImageUrlFromStorage(supabase, selectedLine.imageUrl);
                   return isNonEmptyString(imgSrc) ? (
-                  // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={imgSrc}
                     alt="Style"
@@ -1752,7 +1725,6 @@ export default function PurchaseOrderListPage() {
                 </div>
               </div>
 
-              {/* Info */}
               <div className="border rounded-xl p-3">
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
@@ -1788,7 +1760,6 @@ export default function PurchaseOrderListPage() {
                 </div>
               </div>
 
-              {/* Actions */}
               <div className="flex gap-2">
                 {(() => {
                   const existing = wsMap[selectedLine.id] || selectedLine.work_sheet_id || null;
