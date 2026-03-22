@@ -161,7 +161,29 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   try {
     const shipmentId = params.id;
     if (!shipmentId) return bad("Shipment ID is required", 400);
+    // 🔒 DUPLICATE INVOICE GUARD
+const { data: existingInvoice, error: existingErr } = await supabaseAdmin
+  .from("invoice_headers")
+  .select("id, invoice_no, shipment_id, is_deleted")
+  .eq("shipment_id", shipmentId)
+  .eq("is_deleted", false)
+  .maybeSingle();
 
+if (existingErr) {
+  return NextResponse.json(
+    { success: false, error: existingErr.message },
+    { status: 500 }
+  );
+}
+
+if (existingInvoice?.id) {
+  return NextResponse.json({
+    success: true,
+    already_exists: true,
+    invoice_id: existingInvoice.id,
+    invoice: existingInvoice,
+  });
+}
     const body = await req.json().catch(() => ({}));
     const shipMode = String(body?.ship_mode || "").toUpperCase().trim(); // optional
 

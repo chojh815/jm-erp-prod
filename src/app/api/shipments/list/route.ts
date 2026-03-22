@@ -1,18 +1,4 @@
 // src/app/api/shipments/list/route.ts
-// Shipment List API (multi-PO aware)
-//
-// Supports query params:
-// - shipment_no: shipment number search
-// - po_no: PO search (matches aggregated shipment_pos / shipment_lines POs)
-// - buyer: buyer search
-// - status: exact status filter (ALL means no filter)
-// - q: optional generic search across shipment no / buyer / destination / POs
-//
-// Notes:
-// - Always filters soft-deleted rows (is_deleted != true)
-// - Uses select("*") for schema drift safety
-// - Returns po_nos[] and po_display for list UI
-
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -33,11 +19,9 @@ function bad(message: string, status = 400, extra?: any) {
 function safe(v: any) {
   return (v ?? "").toString().trim();
 }
-
 function lc(v: any) {
   return safe(v).toLowerCase();
 }
-
 function uniqStrings(values: any[]) {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -50,11 +34,9 @@ function uniqStrings(values: any[]) {
   }
   return out;
 }
-
 function sortPo(a: string, b: string) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
-
 function buildPoDisplay(poNos: string[]) {
   if (!poNos.length) return "-";
   if (poNos.length === 1) return poNos[0];
@@ -76,14 +58,8 @@ export async function GET(req: NextRequest) {
       .select("*", { count: "exact" })
       .or("is_deleted.is.null,is_deleted.eq.false");
 
-    if (status && status !== "ALL") {
-      qb = qb.eq("status", status);
-    }
-
-    if (shipmentNo) {
-      qb = qb.ilike("shipment_no", `%${shipmentNo}%`);
-    }
-
+    if (status && status !== "ALL") qb = qb.eq("status", status);
+    if (shipmentNo) qb = qb.ilike("shipment_no", `%${shipmentNo}%`);
     if (buyer) {
       qb = qb.or(
         [
@@ -94,22 +70,17 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    qb = qb
-      .order("created_at", { ascending: false })
-      .order("shipment_no", { ascending: false });
+    qb = qb.order("created_at", { ascending: false }).order("shipment_no", { ascending: false });
 
     const { data, error, count } = await qb.limit(500);
     if (error) return bad(error.message, 500);
 
     const baseItems = (data || []) as any[];
-    if (!baseItems.length) {
-      return ok({ items: [], total: 0 });
-    }
+    if (!baseItems.length) return ok({ items: [], total: 0 });
 
     const shipmentIds = uniqStrings(baseItems.map((x) => x?.id));
     const poMap = new Map<string, string[]>();
 
-    // 1) Preferred source: shipment_pos
     try {
       const { data: spRows, error: spErr } = await supabaseAdmin
         .from("shipment_pos")
@@ -127,11 +98,8 @@ export async function GET(req: NextRequest) {
           poMap.set(shipmentId, arr);
         }
       }
-    } catch {
-      // ignore and fallback below
-    }
+    } catch {}
 
-    // 2) Fallback / supplement: shipment_lines.po_no
     try {
       const { data: lineRows, error: lineErr } = await supabaseAdmin
         .from("shipment_lines")
@@ -149,25 +117,74 @@ export async function GET(req: NextRequest) {
           poMap.set(shipmentId, arr);
         }
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
+
+    const invoiceMap = new Map<string, any>();
+    try {
+      const { data: invRows, error: invErr } = await supabaseAdmin
+        .from("invoice_headers")
+        .select("*")
+        .in("shipment_id", shipmentIds)
+        .or("is_deleted.is.null,is_deleted.eq.false");
+
+      if (!invErr && Array.isArray(invRows)) {
+        for (const row of invRows) {
+          const shipmentId = safe((row as any)?.shipment_id);
+          if (!shipmentId) continue;
+          const prev = invoiceMap.get(shipmentId);
+          if (!prev) {
+            invoiceMap.set(shipmentId, row);
+          } else {
+            const prevTs = safe(prev?.created_at);
+            const curTs = safe((row as any)?.created_at);
+            if (curTs > prevTs) invoiceMap.set(shipmentId, row);
+          }
+        }
+      }
+    } catch {}
+
+    const packingMap = new Map<string, any>();
+    try {
+      const { data: plRows, error: plErr } = await supabaseAdmin
+        .from("packing_list_headers")
+        .select("*")
+        .in("shipment_id", shipmentIds)
+        .or("is_deleted.is.null,is_deleted.eq.false");
+
+      if (!plErr && Array.isArray(plRows)) {
+        for (const row of plRows) {
+          const shipmentId = safe((row as any)?.shipment_id);
+          if (!shipmentId) continue;
+          const prev = packingMap.get(shipmentId);
+          if (!prev) {
+            packingMap.set(shipmentId, row);
+          } else {
+            const prevTs = safe(prev?.created_at);
+            const curTs = safe((row as any)?.created_at);
+            if (curTs > prevTs) packingMap.set(shipmentId, row);
+          }
+        }
+      }
+    } catch {}
 
     let items = baseItems.map((row) => {
       const shipmentId = safe(row?.id);
-      const poNos = uniqStrings([
-        ...(poMap.get(shipmentId) || []),
-        row?.po_no,
-      ]).sort(sortPo);
+      const poNos = uniqStrings([...(poMap.get(shipmentId) || []), row?.po_no]).sort(sortPo);
+
+      const invoice = invoiceMap.get(shipmentId) || null;
+      const packing = packingMap.get(shipmentId) || null;
 
       return {
         ...row,
         po_nos: poNos,
         po_display: buildPoDisplay(poNos),
+        invoice_id: invoice?.id ?? null,
+        invoice_no: invoice?.invoice_no ?? invoice?.invoiceNo ?? null,
+        packing_list_id: packing?.id ?? null,
+        packing_list_no: packing?.packing_list_no ?? packing?.packingListNo ?? null,
       };
     });
 
-    // Post-filter for PO and generic q because these depend on aggregated po_nos.
     if (poNo) {
       const needle = lc(poNo);
       items = items.filter((row) => {
@@ -184,10 +201,10 @@ export async function GET(req: NextRequest) {
           row?.buyer_name,
           row?.destination,
           row?.final_destination,
+          row?.invoice_no,
+          row?.packing_list_no,
           ...(Array.isArray(row?.po_nos) ? row.po_nos : []),
-        ]
-          .map(lc)
-          .join(" | ");
+        ].map(lc).join(" | ");
         return hay.includes(needle);
       });
     }
