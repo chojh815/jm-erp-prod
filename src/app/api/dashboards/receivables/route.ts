@@ -9,29 +9,24 @@ function num(v: any): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
-
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
-
 function ymd(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
-
 function monthKey(v?: string | null): string {
   if (!v) return "";
   return String(v).slice(0, 7);
 }
-
 function daysDiff(a: string, b: string): number {
   const aa = new Date(`${a}T00:00:00Z`).getTime();
   const bb = new Date(`${b}T00:00:00Z`).getTime();
   return Math.floor((aa - bb) / 86400000);
 }
-
 function calcNetReceived(row: any): number {
   return round2(
     Math.max(
@@ -43,7 +38,6 @@ function calcNetReceived(row: any): number {
     )
   );
 }
-
 const NO_STORE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
   Pragma: "no-cache",
@@ -54,6 +48,7 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const buyerId = searchParams.get("buyer_id") || "";
+    const agingBucket = searchParams.get("aging_bucket") || "";
 
     const now = new Date();
     const defaultEnd = ymd(now);
@@ -67,6 +62,8 @@ export async function GET(req: NextRequest) {
 
     const headerSelect = [
       "id",
+      "invoice_id",
+      "invoice_no",
       "buyer_id",
       "buyer_name",
       "buyer_code",
@@ -121,7 +118,10 @@ export async function GET(req: NextRequest) {
       lines = (data || []) as any[];
     }
 
-    const invoiceIdsFromReceipts = Array.from(new Set(lines.map((x) => x.invoice_id).filter(Boolean)));
+    const invoiceIdsFromReceipts = Array.from(
+      new Set(lines.map((x) => String(x.invoice_id || "")).filter(Boolean))
+    );
+
     let receiptInvoiceRows: any[] = [];
     if (invoiceIdsFromReceipts.length) {
       const { data, error } = await supabaseAdmin
@@ -131,7 +131,9 @@ export async function GET(req: NextRequest) {
       if (error) throw error;
       receiptInvoiceRows = (data || []) as any[];
     }
-    const receiptInvoiceById = new Map<string, any>(receiptInvoiceRows.map((x) => [String(x.id), x]));
+    const receiptInvoiceById = new Map<string, any>(
+      receiptInvoiceRows.map((x) => [String(x.id), x])
+    );
 
     const detailRows: any[] = [];
     const linesByHeader = new Map<string, any[]>();
@@ -145,15 +147,25 @@ export async function GET(req: NextRequest) {
     for (const h of headers) {
       const hLines = linesByHeader.get(String(h.id)) || [];
       const totalApplied = round2(hLines.reduce((s, x) => s + num(x.applied_amount), 0));
-      const feeTotalBase = totalApplied || 1;
+      const feeBase = totalApplied || 1;
+
       for (const line of hLines) {
         const inv = receiptInvoiceById.get(String(line.invoice_id));
-        const ratio = totalApplied > 0 ? num(line.applied_amount) / feeTotalBase : 0;
+        const ratio = totalApplied > 0 ? num(line.applied_amount) / feeBase : 0;
         const allocatedOurFee = round2(num(h.bank_fee_amount) * ratio);
         const allocatedBuyerFee = round2(
-          num(h.buyer_bank_fee_amount) * ratio + num(h.buyer_wire_fee_writeoff_amount) * ratio
+          num(h.buyer_bank_fee_amount) * ratio +
+            num(h.buyer_wire_fee_writeoff_amount) * ratio
         );
         const allocatedClaim = round2(num(h.claim_deduction_amount) * ratio);
+        const settled = round2(
+          num(line.applied_amount) +
+            num(line.writeoff_amount) +
+            allocatedOurFee +
+            allocatedBuyerFee +
+            allocatedClaim
+        );
+
         detailRows.push({
           receipt_id: h.id,
           deposit_date: h.deposit_date,
@@ -170,7 +182,7 @@ export async function GET(req: NextRequest) {
           buyer_bank_fee_amount: h.buyer_bank_fee_amount,
           claim_deduction_amount: h.claim_deduction_amount,
           invoice_id: line.invoice_id,
-          invoice_no: inv?.invoice_no ?? "",
+          invoice_no: inv?.invoice_no ?? h.invoice_no ?? "",
           invoice_date: inv?.invoice_date ?? inv?.created_at ?? null,
           invoice_total: round2(num(inv?.total_amount)),
           applied_amount: round2(num(line.applied_amount)),
@@ -178,15 +190,17 @@ export async function GET(req: NextRequest) {
           allocated_our_fee: allocatedOurFee,
           allocated_buyer_fee: allocatedBuyerFee,
           allocated_claim: allocatedClaim,
-          settled_amount: round2(
-            num(line.applied_amount) +
-              num(line.writeoff_amount) +
-              allocatedOurFee +
-              allocatedBuyerFee +
-              allocatedClaim
-          ),
+          settled_amount: settled,
         });
       }
+    }
+
+    const receiptDetailsByInvoice = new Map<string, any[]>();
+    for (const row of detailRows) {
+      const key = String(row.invoice_id || "");
+      const arr = receiptDetailsByInvoice.get(key) || [];
+      arr.push(row);
+      receiptDetailsByInvoice.set(key, arr);
     }
 
     const kpis = {
@@ -194,7 +208,10 @@ export async function GET(req: NextRequest) {
       gross_received: round2(headers.reduce((s, x) => s + num(x.total_received), 0)),
       our_fee: round2(headers.reduce((s, x) => s + num(x.bank_fee_amount), 0)),
       buyer_fee: round2(
-        headers.reduce((s, x) => s + num(x.buyer_bank_fee_amount) + num(x.buyer_wire_fee_writeoff_amount), 0)
+        headers.reduce(
+          (s, x) => s + num(x.buyer_bank_fee_amount) + num(x.buyer_wire_fee_writeoff_amount),
+          0
+        )
       ),
       claim_deduction: round2(headers.reduce((s, x) => s + num(x.claim_deduction_amount), 0)),
       net_received: round2(headers.reduce((s, x) => s + num(x.net_received_amount), 0)),
@@ -270,7 +287,9 @@ export async function GET(req: NextRequest) {
 
     let invQ = supabaseAdmin
       .from("invoice_headers")
-      .select("id, invoice_no, invoice_date, created_at, total_amount, paid_amount, balance_amount, buyer_id, status, currency, is_deleted")
+      .select(
+        "id, invoice_no, invoice_date, created_at, total_amount, paid_amount, balance_amount, buyer_id, status, currency, is_deleted"
+      )
       .eq("is_deleted", false)
       .lte("invoice_date", end)
       .order("invoice_date", { ascending: false })
@@ -294,22 +313,63 @@ export async function GET(req: NextRequest) {
     }
     const buyerById = new Map<string, any>(buyerRows.map((x) => [String(x.id), x]));
 
-    const openInvoices = rawInvoices
+    const openInvoicesAll = rawInvoices
       .filter((x) => !["DELETED", "CANCELLED"].includes(String(x.status || "").toUpperCase()))
-      .map((x) => ({
-        id: x.id,
-        invoice_no: x.invoice_no,
-        invoice_date: x.invoice_date || x.created_at || null,
-        buyer_id: x.buyer_id,
-        buyer_name: buyerById.get(String(x.buyer_id))?.company_name || null,
-        buyer_code: buyerById.get(String(x.buyer_id))?.code || null,
-        total_amount: round2(num(x.total_amount)),
-        paid_amount: round2(num(x.paid_amount)),
-        balance_amount: round2(num(x.balance_amount)),
-        currency: x.currency || null,
-        status: x.status || null,
-      }))
-      .filter((x) => x.balance_amount > 0.000001);
+      .map((x) => {
+        const invoiceId = String(x.id);
+        const receiptTrace = (receiptDetailsByInvoice.get(invoiceId) || []).sort(
+          (a, b) =>
+            String(a.deposit_date || a.created_at).localeCompare(
+              String(b.deposit_date || b.created_at)
+            )
+        );
+        const appliedHistory = receiptTrace.map((r, idx) => ({
+          seq: idx + 1,
+          receipt_id: r.receipt_id,
+          deposit_date: r.deposit_date,
+          applied_amount: round2(num(r.applied_amount)),
+          writeoff_amount: round2(num(r.writeoff_amount)),
+          settled_amount: round2(num(r.settled_amount)),
+          cumulative_paid: round2(
+            receiptTrace
+              .slice(0, idx + 1)
+              .reduce((s, x) => s + num(x.applied_amount) + num(x.writeoff_amount), 0)
+          ),
+        }));
+
+        return {
+          id: x.id,
+          invoice_no: x.invoice_no,
+          invoice_date: x.invoice_date || x.created_at || null,
+          buyer_id: x.buyer_id,
+          buyer_name: buyerById.get(String(x.buyer_id))?.company_name || null,
+          buyer_code: buyerById.get(String(x.buyer_id))?.code || null,
+          total_amount: round2(num(x.total_amount)),
+          paid_amount: round2(num(x.paid_amount)),
+          balance_amount: round2(num(x.balance_amount)),
+          currency: x.currency || null,
+          status: x.status || null,
+          receipt_trace_count: receiptTrace.length,
+          partial_payment_count: appliedHistory.length,
+          receipt_trace: receiptTrace,
+          partial_payment_history: appliedHistory,
+        };
+      });
+
+    const agingOf = (invoiceDate: string | null) => {
+      const d = String(invoiceDate || "").slice(0, 10);
+      const ageDays = d ? daysDiff(end, d) : 0;
+      if (ageDays <= 0) return "current";
+      if (ageDays <= 30) return "d1_30";
+      if (ageDays <= 60) return "d31_60";
+      if (ageDays <= 90) return "d61_90";
+      return "d90_plus";
+    };
+
+    let openInvoices = openInvoicesAll.filter((x) => x.balance_amount > 0.000001);
+    if (agingBucket && ["current", "d1_30", "d31_60", "d61_90", "d90_plus"].includes(agingBucket)) {
+      openInvoices = openInvoices.filter((x) => agingOf(x.invoice_date) === agingBucket);
+    }
 
     const outstandingByBuyerMap = new Map<string, any>();
     const outstandingByMonthMap = new Map<string, any>();
@@ -321,7 +381,7 @@ export async function GET(req: NextRequest) {
       d90_plus: 0,
     };
 
-    for (const inv of openInvoices) {
+    for (const inv of openInvoicesAll.filter((x) => x.balance_amount > 0.000001)) {
       const bKey = String(inv.buyer_id || "UNKNOWN");
       const bRow = outstandingByBuyerMap.get(bKey) || {
         buyer_id: inv.buyer_id,
@@ -346,13 +406,8 @@ export async function GET(req: NextRequest) {
         outstandingByMonthMap.set(m, mRow);
       }
 
-      const invoiceDate = String(inv.invoice_date || "").slice(0, 10);
-      const ageDays = invoiceDate ? daysDiff(end, invoiceDate) : 0;
-      if (ageDays <= 0) aging.current += num(inv.balance_amount);
-      else if (ageDays <= 30) aging.d1_30 += num(inv.balance_amount);
-      else if (ageDays <= 60) aging.d31_60 += num(inv.balance_amount);
-      else if (ageDays <= 90) aging.d61_90 += num(inv.balance_amount);
-      else aging.d90_plus += num(inv.balance_amount);
+      const bucket = agingOf(inv.invoice_date);
+      aging[bucket] += num(inv.balance_amount);
     }
 
     const outstanding_by_buyer = Array.from(outstandingByBuyerMap.values())
@@ -363,16 +418,35 @@ export async function GET(req: NextRequest) {
       .map((x) => ({ ...x, outstanding_amount: round2(x.outstanding_amount) }))
       .sort((a, b) => String(a.month).localeCompare(String(b.month)));
 
+    const invoice_trace_index = openInvoicesAll
+      .map((x) => ({
+        invoice_id: x.id,
+        invoice_no: x.invoice_no,
+        invoice_date: x.invoice_date,
+        buyer_name: x.buyer_name,
+        total_amount: x.total_amount,
+        paid_amount: x.paid_amount,
+        balance_amount: x.balance_amount,
+        partial_payment_count: x.partial_payment_count,
+        receipt_trace_count: x.receipt_trace_count,
+      }))
+      .sort((a, b) => String(a.invoice_no || "").localeCompare(String(b.invoice_no || "")));
+
     const ar_kpis = {
-      open_invoice_count: openInvoices.length,
-      outstanding_amount: round2(openInvoices.reduce((s, x) => s + num(x.balance_amount), 0)),
+      open_invoice_count: openInvoicesAll.filter((x) => x.balance_amount > 0.000001).length,
+      outstanding_amount: round2(
+        openInvoicesAll
+          .filter((x) => x.balance_amount > 0.000001)
+          .reduce((s, x) => s + num(x.balance_amount), 0)
+      ),
       overdue_amount: round2(aging.d1_30 + aging.d31_60 + aging.d61_90 + aging.d90_plus),
+      traced_invoice_count: openInvoicesAll.filter((x) => x.receipt_trace_count > 0).length,
     };
 
     return NextResponse.json(
       {
         success: true,
-        filters_echo: { start, end, buyer_id: buyerId || null },
+        filters_echo: { start, end, buyer_id: buyerId || null, aging_bucket: agingBucket || null },
         kpis,
         ar_kpis,
         receipts_by_month,
@@ -400,8 +474,9 @@ export async function GET(req: NextRequest) {
           net_received_amount: round2(num(h.net_received_amount)),
           note: h.note,
         })),
-        receipt_details: detailRows.slice(0, 500),
-        open_invoices: openInvoices.slice(0, 500),
+        receipt_details: detailRows.slice(0, 1000),
+        open_invoices: openInvoices.slice(0, 1000),
+        invoice_trace_index: invoice_trace_index.slice(0, 1000),
       },
       { headers: NO_STORE_HEADERS }
     );
