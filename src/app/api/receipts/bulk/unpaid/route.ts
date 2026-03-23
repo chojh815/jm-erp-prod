@@ -1,101 +1,66 @@
-// src/app/api/receipts/bulk/unpaid/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { createRouteClient } from "@/lib/supabaseRouteClient";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-function num(v: any): number {
+function num(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
-}
-function pickNumber(row: any, keys: string[]): number {
-  for (const k of keys) {
-    if (row && row[k] !== undefined && row[k] !== null && row[k] !== "") {
-      const n = Number(row[k]);
-      if (Number.isFinite(n)) return n;
-    }
-  }
-  return 0;
 }
 
 export async function GET(req: NextRequest) {
   try {
-    // Auth (fixes 401)
-    const supabase = createRouteClient();
-    const { data: u } = await supabase.auth.getUser();
-    if (!u?.user) {
-      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
-    }
-
     const { searchParams } = new URL(req.url);
-    const buyer_id = searchParams.get("buyer_id");
-    if (!buyer_id) {
-      return NextResponse.json({ success: false, error: "buyer_id is required" }, { status: 400 });
+    const buyerId = String(searchParams.get("buyer_id") || "").trim();
+
+    if (!buyerId) {
+      return NextResponse.json({ rows: [] });
     }
 
-    // 1) invoices for buyer
-    const invSel = "id, invoice_no, invoice_date, created_at, total_amount, currency, status, is_deleted";
-    const { data: invoices, error: invErr } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from("invoice_headers")
-      .select(invSel)
-      .eq("buyer_id", buyer_id)
-      .eq("is_deleted", false);
+      .select(
+        "id, invoice_no, invoice_date, total_amount, paid_amount, balance_amount, status, buyer_id, is_deleted"
+      )
+      .eq("buyer_id", buyerId)
+      .eq("is_deleted", false)
+      .order("invoice_date", { ascending: false })
+      .order("invoice_no", { ascending: false });
 
-    if (invErr) return NextResponse.json({ success: false, error: invErr.message }, { status: 400 });
-
-    const invoiceList = (invoices ?? []).filter((r: any) => {
-      const st = (r?.status ?? "").toString().toUpperCase();
-      return st !== "DELETED" && st !== "CANCELLED";
-    });
-
-    // 2) receipt_lines aggregate in JS (schema-safe fallback)
-    const invoiceIds = invoiceList.map((r: any) => r.id).filter(Boolean);
-    const paidBy: Record<string, number> = {};
-    if (invoiceIds.length) {
-      const { data: rlines, error: rlErr } = await supabaseAdmin
-        .from("receipt_lines")
-        .select("*")
-        .in("invoice_id", invoiceIds);
-
-      if (!rlErr && Array.isArray(rlines)) {
-        for (const row of rlines) {
-          const iid = row.invoice_id;
-          if (!iid) continue;
-          const amt = pickNumber(row, [
-            "apply_amount",
-            "applied_amount",
-            "allocated_amount",
-            "amount",
-            "received_amount",
-            "net_received_amount",
-          ]);
-          paidBy[iid] = (paidBy[iid] ?? 0) + num(amt);
-        }
-      }
+    if (error) {
+      return NextResponse.json(
+        { error: error.message || "Failed to load unpaid invoices" },
+        { status: 500 }
+      );
     }
 
-    const items = invoiceList
-      .map((inv: any) => {
-        const total = num(inv.total_amount);
-        const paid = num(paidBy[inv.id] ?? 0);
-        const balance = Math.max(0, total - paid);
+    const rows = (data || [])
+      .filter((r: any) => {
+        const st = String(r?.status || "").toUpperCase();
+        return st !== "DELETED" && st !== "CANCELLED";
+      })
+      .map((r: any) => {
+        const total = num(r.total_amount);
+        const paid = num(r.paid_amount);
+        const balanceRaw =
+          r.balance_amount == null ? total - paid : num(r.balance_amount);
+        const balance = Math.max(0, Math.round(balanceRaw * 100) / 100);
+
         return {
-          id: inv.id,
-          invoice_no: inv.invoice_no,
-          invoice_date: inv.invoice_date ?? inv.created_at ?? null,
+          invoice_id: r.id,
+          invoice_no: r.invoice_no || "",
+          invoice_date: r.invoice_date || "",
           total_amount: total,
           paid_amount: paid,
           balance_amount: balance,
-          currency: inv.currency ?? null,
-          status: inv.status ?? null,
+          status: r.status || "",
         };
       })
-      .filter((x: any) => x.balance_amount > 0.000001);
+      .filter((r: any) => r.balance_amount > 0.0001);
 
-    return NextResponse.json({ success: true, items });
+    return NextResponse.json({ rows });
   } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message ?? "Unknown error" }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || "Unexpected server error" },
+      { status: 500 }
+    );
   }
 }

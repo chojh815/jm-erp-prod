@@ -156,6 +156,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "dashboard.performance",
       },
       {
+  label: "Receivables",
+  href: "/dashboards/receivables",
+  perm: ["receipts.view", "dashboard.finance", "dashboard.profitability"],
+},
+      {
         label: "Sample Dashboard",
         href: "/dashboards/samples",
         perm: "dashboard.samples",
