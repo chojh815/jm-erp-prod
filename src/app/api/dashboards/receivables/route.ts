@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function num(v: any): number {
   const n = Number(v);
@@ -30,6 +31,24 @@ function daysDiff(a: string, b: string): number {
   const bb = new Date(`${b}T00:00:00Z`).getTime();
   return Math.floor((aa - bb) / 86400000);
 }
+
+function calcNetReceived(row: any): number {
+  return round2(
+    Math.max(
+      0,
+      num(row?.total_received) -
+        num(row?.bank_fee_amount) -
+        num(row?.buyer_bank_fee_amount) -
+        num(row?.claim_deduction_amount)
+    )
+  );
+}
+
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+};
 
 export async function GET(req: NextRequest) {
   try {
@@ -79,7 +98,16 @@ export async function GET(req: NextRequest) {
     const { data: receiptHeaders, error: headerErr } = await headerQ;
     if (headerErr) throw headerErr;
 
-    const headers = (receiptHeaders || []) as any[];
+    const headers = ((receiptHeaders || []) as any[]).map((h) => ({
+      ...h,
+      total_received: round2(num(h.total_received)),
+      bank_fee_amount: round2(num(h.bank_fee_amount)),
+      buyer_bank_fee_amount: round2(num(h.buyer_bank_fee_amount)),
+      buyer_wire_fee_writeoff_amount: round2(num(h.buyer_wire_fee_writeoff_amount)),
+      claim_deduction_amount: round2(num(h.claim_deduction_amount)),
+      net_received_amount: calcNetReceived(h),
+    }));
+
     const receiptIds = headers.map((x) => x.id).filter(Boolean);
 
     let lines: any[] = [];
@@ -117,13 +145,14 @@ export async function GET(req: NextRequest) {
     for (const h of headers) {
       const hLines = linesByHeader.get(String(h.id)) || [];
       const totalApplied = round2(hLines.reduce((s, x) => s + num(x.applied_amount), 0));
-      const totalWriteoff = round2(hLines.reduce((s, x) => s + num(x.writeoff_amount), 0));
       const feeTotalBase = totalApplied || 1;
       for (const line of hLines) {
         const inv = receiptInvoiceById.get(String(line.invoice_id));
         const ratio = totalApplied > 0 ? num(line.applied_amount) / feeTotalBase : 0;
         const allocatedOurFee = round2(num(h.bank_fee_amount) * ratio);
-        const allocatedBuyerFee = round2(num(h.buyer_bank_fee_amount) * ratio + num(h.buyer_wire_fee_writeoff_amount) * ratio);
+        const allocatedBuyerFee = round2(
+          num(h.buyer_bank_fee_amount) * ratio + num(h.buyer_wire_fee_writeoff_amount) * ratio
+        );
         const allocatedClaim = round2(num(h.claim_deduction_amount) * ratio);
         detailRows.push({
           receipt_id: h.id,
@@ -135,11 +164,11 @@ export async function GET(req: NextRequest) {
           reference_no: h.reference_no,
           note: h.note,
           created_at: h.created_at,
-          total_received: round2(num(h.total_received)),
-          net_received_amount: round2(num(h.net_received_amount)),
-          bank_fee_amount: round2(num(h.bank_fee_amount)),
-          buyer_bank_fee_amount: round2(num(h.buyer_bank_fee_amount)),
-          claim_deduction_amount: round2(num(h.claim_deduction_amount)),
+          total_received: h.total_received,
+          net_received_amount: h.net_received_amount,
+          bank_fee_amount: h.bank_fee_amount,
+          buyer_bank_fee_amount: h.buyer_bank_fee_amount,
+          claim_deduction_amount: h.claim_deduction_amount,
           invoice_id: line.invoice_id,
           invoice_no: inv?.invoice_no ?? "",
           invoice_date: inv?.invoice_date ?? inv?.created_at ?? null,
@@ -149,7 +178,13 @@ export async function GET(req: NextRequest) {
           allocated_our_fee: allocatedOurFee,
           allocated_buyer_fee: allocatedBuyerFee,
           allocated_claim: allocatedClaim,
-          settled_amount: round2(num(line.applied_amount) + num(line.writeoff_amount) + allocatedOurFee + allocatedBuyerFee + allocatedClaim),
+          settled_amount: round2(
+            num(line.applied_amount) +
+              num(line.writeoff_amount) +
+              allocatedOurFee +
+              allocatedBuyerFee +
+              allocatedClaim
+          ),
         });
       }
     }
@@ -158,7 +193,9 @@ export async function GET(req: NextRequest) {
       receipt_count: headers.length,
       gross_received: round2(headers.reduce((s, x) => s + num(x.total_received), 0)),
       our_fee: round2(headers.reduce((s, x) => s + num(x.bank_fee_amount), 0)),
-      buyer_fee: round2(headers.reduce((s, x) => s + num(x.buyer_bank_fee_amount) + num(x.buyer_wire_fee_writeoff_amount), 0)),
+      buyer_fee: round2(
+        headers.reduce((s, x) => s + num(x.buyer_bank_fee_amount) + num(x.buyer_wire_fee_writeoff_amount), 0)
+      ),
       claim_deduction: round2(headers.reduce((s, x) => s + num(x.claim_deduction_amount), 0)),
       net_received: round2(headers.reduce((s, x) => s + num(x.net_received_amount), 0)),
       applied_total: round2(lines.reduce((s, x) => s + num(x.applied_amount), 0)),
@@ -332,44 +369,47 @@ export async function GET(req: NextRequest) {
       overdue_amount: round2(aging.d1_30 + aging.d31_60 + aging.d61_90 + aging.d90_plus),
     };
 
-    return NextResponse.json({
-      success: true,
-      filters_echo: { start, end, buyer_id: buyerId || null },
-      kpis,
-      ar_kpis,
-      receipts_by_month,
-      receipts_by_buyer,
-      outstanding_by_buyer,
-      outstanding_by_month,
-      aging: {
-        current: round2(aging.current),
-        d1_30: round2(aging.d1_30),
-        d31_60: round2(aging.d31_60),
-        d61_90: round2(aging.d61_90),
-        d90_plus: round2(aging.d90_plus),
+    return NextResponse.json(
+      {
+        success: true,
+        filters_echo: { start, end, buyer_id: buyerId || null },
+        kpis,
+        ar_kpis,
+        receipts_by_month,
+        receipts_by_buyer,
+        outstanding_by_buyer,
+        outstanding_by_month,
+        aging: {
+          current: round2(aging.current),
+          d1_30: round2(aging.d1_30),
+          d31_60: round2(aging.d31_60),
+          d61_90: round2(aging.d61_90),
+          d90_plus: round2(aging.d90_plus),
+        },
+        recent_receipts: headers.slice(0, 100).map((h) => ({
+          id: h.id,
+          deposit_date: h.deposit_date,
+          buyer_name: h.buyer_name,
+          buyer_code: h.buyer_code,
+          method: h.method,
+          reference_no: h.reference_no,
+          total_received: round2(num(h.total_received)),
+          bank_fee_amount: round2(num(h.bank_fee_amount)),
+          buyer_bank_fee_amount: round2(num(h.buyer_bank_fee_amount)),
+          claim_deduction_amount: round2(num(h.claim_deduction_amount)),
+          net_received_amount: round2(num(h.net_received_amount)),
+          note: h.note,
+        })),
+        receipt_details: detailRows.slice(0, 500),
+        open_invoices: openInvoices.slice(0, 500),
       },
-      recent_receipts: headers.slice(0, 100).map((h) => ({
-        id: h.id,
-        deposit_date: h.deposit_date,
-        buyer_name: h.buyer_name,
-        buyer_code: h.buyer_code,
-        method: h.method,
-        reference_no: h.reference_no,
-        total_received: round2(num(h.total_received)),
-        bank_fee_amount: round2(num(h.bank_fee_amount)),
-        buyer_bank_fee_amount: round2(num(h.buyer_bank_fee_amount)),
-        claim_deduction_amount: round2(num(h.claim_deduction_amount)),
-        net_received_amount: round2(num(h.net_received_amount)),
-        note: h.note,
-      })),
-      receipt_details: detailRows.slice(0, 500),
-      open_invoices: openInvoices.slice(0, 500),
-    });
+      { headers: NO_STORE_HEADERS }
+    );
   } catch (e: any) {
     console.error("[dashboards/receivables]", e);
     return NextResponse.json(
       { success: false, error: e?.message || "Failed to load receivables dashboard" },
-      { status: 500 }
+      { status: 500, headers: NO_STORE_HEADERS }
     );
   }
 }
