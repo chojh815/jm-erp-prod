@@ -224,6 +224,7 @@ React.useEffect(() => {
   // ✅ Track the loaded PO identity to prevent accidental overwrite when PO No changes
   const loadedPoNoRef = React.useRef<string | null>(null);
   const loadedHeaderIdRef = React.useRef<string | null>(null);
+  const skipNextBuyerDefaultsRef = React.useRef(false);
 
   const [orderType, setOrderType] = React.useState<OrderType>("NEW");
   const [status, setStatus] = React.useState<POStatus>("DRAFT");
@@ -567,6 +568,11 @@ const hasAnyShipped = React.useMemo(() => {
   React.useEffect(() => {
     if (!buyerId) return;
 
+    if (skipNextBuyerDefaultsRef.current) {
+      skipNextBuyerDefaultsRef.current = false;
+      return;
+    }
+
     (async () => {
       try {
         const { data, error } = await supabase
@@ -584,74 +590,84 @@ const hasAnyShipped = React.useMemo(() => {
 
         const row = data as any;
 
-        // Payment Term: id 우선, 없으면 텍스트 기준으로 생성
-        if (row.buyer_payment_term_id) {
-          const id = row.buyer_payment_term_id as string;
-          setPaymentTermId(id);
+        // Payment Term: 신규/빈값 상태에서만 buyer default 적용
+        const hasPaymentTermValue =
+          !!String(paymentTermId ?? "").trim() ||
+          !!String(paymentTermName ?? "").trim();
 
-          setPaymentTerms((prev) => {
-            const found = prev.find((t) => t.id === id);
-            if (found) {
-              setPaymentTermName(found.label);
-              return prev;
-            }
-            const txt = (row.buyer_payment_term as string | null) ?? null;
-            const opt: PaymentTermOption = {
-              id,
-              code: null,
-              name: txt,
-              label: txt || "(Unknown Payment Term)",
-            };
-            setPaymentTermName(opt.label);
-            return [opt, ...prev];
-          });
-        } else if (row.buyer_payment_term) {
-          const term = row.buyer_payment_term as string;
-          setPaymentTerms((prev) => {
-            const existing = prev.find(
-              (t) => t.name === term || t.label === term
-            );
-            if (existing) {
-              setPaymentTermId(existing.id);
-              setPaymentTermName(existing.label);
-              return prev;
-            }
-            const opt: PaymentTermOption = {
-              id: `TEMP-${term}`,
-              code: null,
-              name: term,
-              label: term,
-            };
-            setPaymentTermId(opt.id);
-            setPaymentTermName(opt.label);
-            return [opt, ...prev];
-          });
-        } else {
-          setPaymentTermId(null);
-          setPaymentTermName("");
+        if (!hasPaymentTermValue) {
+          if (row.buyer_payment_term_id) {
+            const id = row.buyer_payment_term_id as string;
+            setPaymentTermId(id);
+
+            setPaymentTerms((prev) => {
+              const found = prev.find((t) => t.id === id);
+              if (found) {
+                setPaymentTermName(found.label);
+                return prev;
+              }
+              const txt = (row.buyer_payment_term as string | null) ?? null;
+              const opt: PaymentTermOption = {
+                id,
+                code: null,
+                name: txt,
+                label: txt || "(Unknown Payment Term)",
+              };
+              setPaymentTermName(opt.label);
+              return [opt, ...prev];
+            });
+          } else if (row.buyer_payment_term) {
+            const term = row.buyer_payment_term as string;
+            setPaymentTerms((prev) => {
+              const existing = prev.find(
+                (t) => t.name === term || t.label === term
+              );
+              if (existing) {
+                setPaymentTermId(existing.id);
+                setPaymentTermName(existing.label);
+                return prev;
+              }
+              const opt: PaymentTermOption = {
+                id: `TEMP-${term}`,
+                code: null,
+                name: term,
+                label: term,
+              };
+              setPaymentTermId(opt.id);
+              setPaymentTermName(opt.label);
+              return [opt, ...prev];
+            });
+          } else {
+            setPaymentTermId(null);
+            setPaymentTermName("");
+          }
         }
 
-        // Ship Mode 자동 세팅 (SEA / AIR / COURIER 등)
-        if (row.buyer_default_ship_mode) {
-          setShipMode(row.buyer_default_ship_mode as string);
-        }
+        // Ship Mode 기본값: 현재 값이 비어 있을 때만 적용
+        setShipMode((prev) => {
+          if (String(prev ?? "").trim()) return prev;
+          return (row.buyer_default_ship_mode as string) || "SEA";
+        });
 
-        // Preferred Origins 가 있으면 첫 번째를 기본 Shipping Origin 으로 사용
+        // Preferred Origins 기본값: 현재 값이 비어 있을 때만 적용
         if (
           row.preferred_origins &&
           Array.isArray(row.preferred_origins) &&
           row.preferred_origins.length > 0
         ) {
-          setSelectedOrigin(
-            row.preferred_origins[0] as ShippingOriginCode
-          );
+          setSelectedOrigin((prev) => {
+            if (prev) return prev;
+            return row.preferred_origins[0] as ShippingOriginCode;
+          });
         }
-        // ================================
-// Buyer Final Destination
-// ================================
-if (row.buyer_final_destination) {
-  setDestination(row.buyer_final_destination);
-}
+
+        // Buyer Final Destination 기본값: 현재 값이 비어 있을 때만 적용
+        if (row.buyer_final_destination) {
+          setDestination((prev) => {
+            if (String(prev ?? "").trim()) return prev;
+            return row.buyer_final_destination as string;
+          });
+        }
       } catch (err) {
         console.error(
           "Unexpected error loading buyer defaults:",
@@ -1229,6 +1245,7 @@ const fetchPoList = React.useCallback(
         setPoNo(header.po_no || "");
         setOrderType((header.order_type as OrderType) || "NEW");
         setStatus((header.status as POStatus) || "DRAFT");
+        skipNextBuyerDefaultsRef.current = true;
         setBuyerId(header.buyer_id || "");
         setDept(header.department || "");
         setBrand(header.brand || "");
