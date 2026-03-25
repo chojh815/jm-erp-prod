@@ -10,15 +10,48 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
+
 type DevRole = AppRole;
 
-interface PoItem {
+type PoHeader = {
+  id?: string;
   po_no: string;
-  buyer_name: string;
-  buyer_company_id?: string | null;
+  buyer_id?: string | null;
+  buyer_name?: string | null;
   currency?: string | null;
-  total_amount?: number | null;
+  payment_term?: string | null;
+  ship_mode?: string | null;
+  destination?: string | null;
+  incoterm?: string | null;
+  subtotal?: number | null;
   created_at?: string | null;
+};
+
+type PoLine = {
+  id?: string;
+  buyer_style_no?: string | null;
+  jm_style_no?: string | null;
+  description?: string | null;
+  color?: string | null;
+  size?: string | null;
+  plating_color?: string | null;
+  hs_code?: string | null;
+  qty?: number | null;
+  uom?: string | null;
+  unit_price?: number | null;
+  currency?: string | null;
+  amount?: number | null;
+  upc?: string | null;
+};
+
+type LoadedPo = {
+  header: PoHeader;
+  lines: PoLine[];
+};
+
+function toNumber(v: unknown, fallback = 0): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export default function ProformaCreatePage() {
@@ -30,12 +63,9 @@ export default function ProformaCreatePage() {
   const [role, setRole] = React.useState<DevRole | null>(null);
 
   const [poNo, setPoNo] = React.useState(searchParams.get("poNo") || "");
-  const [po, setPo] = React.useState<PoItem | null>(null);
+  const [po, setPo] = React.useState<LoadedPo | null>(null);
   const [creating, setCreating] = React.useState(false);
 
-  // =========================
-  // Auth & Role
-  // =========================
   React.useEffect(() => {
     (async () => {
       const {
@@ -61,11 +91,9 @@ export default function ProformaCreatePage() {
     })();
   }, [router, supabase]);
 
-  // =========================
-  // Load PO header
-  // =========================
-  const loadPo = async () => {
-    if (!poNo.trim()) {
+  const loadPo = React.useCallback(async () => {
+    const trimmed = poNo.trim();
+    if (!trimmed) {
       alert("Please enter PO No.");
       return;
     }
@@ -73,32 +101,59 @@ export default function ProformaCreatePage() {
     setPo(null);
 
     try {
-      const res = await fetch(`/api/orders?poNo=${encodeURIComponent(poNo)}`, {
+      const res = await fetch(`/api/orders?poNo=${encodeURIComponent(trimmed)}`, {
         cache: "no-store",
       });
       const data = await res.json().catch(() => null);
 
       if (!res.ok || !data?.header) {
-        alert("PO not found.");
+        alert(data?.error || "PO not found.");
         return;
       }
 
-      setPo(data.header as PoItem);
+      const loaded: LoadedPo = {
+        header: data.header as PoHeader,
+        lines: Array.isArray(data.lines) ? (data.lines as PoLine[]) : [],
+      };
+
+      if (!loaded.lines.length) {
+        alert("PO loaded, but no lines were found.");
+        return;
+      }
+
+      setPo(loaded);
     } catch (err) {
       console.error(err);
       alert("Failed to load PO.");
     }
-  };
+  }, [poNo]);
 
-  // =========================
-  // Create Proforma
-  // =========================
+  React.useEffect(() => {
+    if (!searchParams.get("poNo")) return;
+    void loadPo();
+  }, [searchParams, loadPo]);
+
   const createProforma = async () => {
-    if (!po) return;
+    if (!po?.header || !po.lines.length) {
+      alert("Please load a valid PO first.");
+      return;
+    }
+
+    const h = po.header;
+
+    if (!h.buyer_id) {
+      alert("This PO is missing buyer_id, so Proforma cannot be created.");
+      return;
+    }
+
+    if (!h.currency) {
+      alert("This PO is missing currency, so Proforma cannot be created.");
+      return;
+    }
 
     if (
       !confirm(
-        `Create Proforma Invoice from PO ${po.po_no}?\n\nThis will copy PO snapshot.`
+        `Create Proforma Invoice from PO ${h.po_no}?\n\nThis will copy the current PO header and lines snapshot.`
       )
     ) {
       return;
@@ -106,12 +161,52 @@ export default function ProformaCreatePage() {
 
     setCreating(true);
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const payload = {
+        header: {
+          po_no: h.po_no || undefined,
+          buyer_id: h.buyer_id || undefined,
+          buyer_name: h.buyer_name || undefined,
+          currency: h.currency || undefined,
+          payment_term: h.payment_term || undefined,
+          ship_mode: h.ship_mode || undefined,
+          destination: h.destination || undefined,
+          incoterm: h.incoterm || undefined,
+        },
+        lines: (po.lines || []).map((line) => ({
+          buyerStyleNo: line.buyer_style_no || null,
+          jmStyleNo: line.jm_style_no || null,
+          description: line.description || null,
+          color: line.color || null,
+          size: line.size || null,
+          plating_color: line.plating_color || null,
+          hsCode: line.hs_code || null,
+          qty: toNumber(line.qty, 0),
+          uom: line.uom || null,
+          unitPrice: toNumber(line.unit_price, 0),
+          currency: line.currency || h.currency || null,
+          amount:
+            line.amount != null
+              ? toNumber(line.amount, 0)
+              : toNumber(line.qty, 0) * toNumber(line.unit_price, 0),
+          upcCode: line.upc || null,
+        })),
+        audit: {
+          created_by: session?.user?.id || null,
+          created_by_email: session?.user?.email || null,
+          created_at: new Date().toISOString(),
+        },
+      };
+
+      console.log("PROFORMA CREATE PAYLOAD:", payload);
+
       const res = await fetch("/api/proforma/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          poNo: po.po_no,
-        }),
+        body: JSON.stringify(payload),
       });
 
       const data = await res.json().catch(() => null);
@@ -121,9 +216,9 @@ export default function ProformaCreatePage() {
         return;
       }
 
-      const invoiceNo = data?.invoiceNo;
+      const invoiceNo = data?.invoice_no || data?.invoiceNo || null;
       if (!invoiceNo) {
-        alert("Proforma created but invoiceNo missing.");
+        alert("Proforma created but invoice number is missing.");
         return;
       }
 
@@ -144,6 +239,9 @@ export default function ProformaCreatePage() {
     );
   }
 
+  const header = po?.header ?? null;
+  const lineCount = po?.lines?.length ?? 0;
+
   return (
     <AppShell
       role={role}
@@ -155,42 +253,55 @@ export default function ProformaCreatePage() {
           <CardHeader>
             <CardTitle className="text-xl">Create Proforma Invoice</CardTitle>
             <p className="text-xs text-zinc-500 mt-1">
-              Proforma Invoice is created by copying Purchase Order snapshot.
+              Proforma Invoice is created by copying the current Purchase Order snapshot.
             </p>
           </CardHeader>
 
           <CardContent className="space-y-4">
-            {/* PO Input */}
             <div className="flex items-center gap-2">
               <Input
                 value={poNo}
                 onChange={(e) => setPoNo(e.target.value)}
                 placeholder="Enter PO No"
                 className="text-sm"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void loadPo();
+                }}
               />
-              <Button size="sm" onClick={loadPo}>
+              <Button size="sm" onClick={() => void loadPo()}>
                 Load PO
               </Button>
             </div>
 
-            {/* PO Summary */}
-            {po && (
+            {header && (
               <div className="border rounded-lg p-3 text-sm space-y-1 bg-zinc-50">
                 <div>
-                  <span className="text-zinc-500">PO No:</span>{" "}
-                  <strong>{po.po_no}</strong>
+                  <span className="text-zinc-500">PO No:</span> <strong>{header.po_no}</strong>
                 </div>
                 <div>
-                  <span className="text-zinc-500">Buyer:</span>{" "}
-                  {po.buyer_name || "-"}
+                  <span className="text-zinc-500">Buyer:</span> {header.buyer_name || "-"}
                 </div>
                 <div>
-                  <span className="text-zinc-500">Currency:</span>{" "}
-                  {po.currency || "USD"}
+                  <span className="text-zinc-500">Currency:</span> {header.currency || "USD"}
+                </div>
+                <div>
+                  <span className="text-zinc-500">Incoterm:</span> {header.incoterm || "-"}
+                </div>
+                <div>
+                  <span className="text-zinc-500">Ship Mode:</span> {header.ship_mode || "-"}
+                </div>
+                <div>
+                  <span className="text-zinc-500">Payment Term:</span> {header.payment_term || "-"}
+                </div>
+                <div>
+                  <span className="text-zinc-500">Destination:</span> {header.destination || "-"}
+                </div>
+                <div>
+                  <span className="text-zinc-500">Lines:</span> {lineCount}
                 </div>
                 <div>
                   <span className="text-zinc-500">Total Amount:</span>{" "}
-                  {Number(po.total_amount || 0).toLocaleString(undefined, {
+                  {toNumber(header.subtotal, 0).toLocaleString(undefined, {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2,
                   })}
@@ -198,18 +309,11 @@ export default function ProformaCreatePage() {
               </div>
             )}
 
-            {/* Actions */}
             <div className="flex justify-end gap-2 pt-2">
-              <Button
-                variant="ghost"
-                onClick={() => router.push("/proforma")}
-              >
+              <Button variant="ghost" onClick={() => router.push("/proforma")}>
                 Cancel
               </Button>
-              <Button
-                onClick={createProforma}
-                disabled={!po || creating}
-              >
+              <Button onClick={createProforma} disabled={!po || creating}>
                 {creating ? "Creating..." : "Create Proforma"}
               </Button>
             </div>

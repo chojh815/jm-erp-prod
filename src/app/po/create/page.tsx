@@ -233,6 +233,7 @@ React.useEffect(() => {
   const [dept, setDept] = React.useState("");
   const [brand, setBrand] = React.useState("");
   const [currency, setCurrency] = React.useState("USD");
+  const [incoterm, setIncoterm] = React.useState("FOB");
 
   // 🔐 Payment Term: 화면은 라벨, DB에는 id + name 둘 다 저장
   const [paymentTerms, setPaymentTerms] = React.useState<PaymentTermOption[]>(
@@ -320,6 +321,7 @@ React.useEffect(() => {
   }, [paymentTermId, paymentTermName, paymentTerms, findPaymentTermByText]);
 
   const [shipMode, setShipMode] = React.useState("SEA");
+  const INCOTERM_OPTIONS = ["FOB", "EXW", "FCA", "CFR", "CIF", "DAP", "DDP"] as const;
   // COURIER일 때만 사용 (DHL/FEDEX/UPS)
   const [courierCarrier, setCourierCarrier] = React.useState("FEDEX");
   const [destination, setDestination] = React.useState("");
@@ -642,6 +644,12 @@ const hasAnyShipped = React.useMemo(() => {
             setPaymentTermName("");
           }
         }
+
+        // Incoterm 기본값: 현재 값이 비어 있을 때만 적용
+        setIncoterm((prev) => {
+          if (String(prev ?? "").trim()) return prev;
+          return (row.buyer_default_incoterm as string) || "FOB";
+        });
 
         // Ship Mode 기본값: 현재 값이 비어 있을 때만 적용
         setShipMode((prev) => {
@@ -1191,6 +1199,7 @@ const fetchPoList = React.useCallback(
     setDept("");
     setBrand("");
     setCurrency("USD");
+    setIncoterm("FOB");
     setPaymentTermId(null);
     setPaymentTermName("");
     setShipMode("SEA");
@@ -1253,6 +1262,7 @@ const fetchPoList = React.useCallback(
         setDept(header.buyer_dept_name || "");
 
         setCurrency(header.currency || "USD");
+        setIncoterm(header.incoterm || "FOB");
 
         const headerPTText =
       header.payment_term ||
@@ -1419,6 +1429,8 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
       if (typeof draft.brand === "string") setBrand(draft.brand);
       if (typeof draft.currency === "string")
         setCurrency(draft.currency);
+      if (typeof draft.incoterm === "string")
+        setIncoterm(draft.incoterm);
       if (typeof draft.paymentTermId === "string")
         setPaymentTermId(draft.paymentTermId);
       if (typeof draft.paymentTermName === "string")
@@ -1503,6 +1515,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
       dept,
       brand,
       currency,
+      incoterm,
       paymentTermId,
       paymentTermName,
       shipMode,
@@ -1533,6 +1546,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
     dept,
     brand,
     currency,
+    incoterm,
     paymentTermId,
     paymentTermName,
     shipMode,
@@ -1822,6 +1836,7 @@ if (targetStatus === "CANCELLED" && hasAnyShipped) {
   buyer_dept_name: dept || null,
 
       currency,
+      incoterm: incoterm || null,
       payment_term_id:
         paymentTermId &&
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
@@ -2028,7 +2043,7 @@ if (!buyerId) {
       created_by_email: currentUserEmail,
       created_at: nowIso,
     };
-
+console.log("INCOTERM CHECK:", incoterm);
     const payload = {
       header: {
         po_no: poNo || undefined,
@@ -2038,7 +2053,7 @@ if (!buyerId) {
         payment_term: paymentTermName || undefined,
         ship_mode: shipMode || undefined,
         destination: destination || undefined,
-        incoterm: undefined as string | undefined,
+        incoterm: incoterm || undefined,
       },
       lines: (lines || []).map((l) => ({
         buyerStyleNo: l.buyerStyleNo || null,
@@ -2151,6 +2166,7 @@ if (!buyerId) {
         <div>Order Date: ${orderDate || "-"}</div>
         <div>Req. Ship Date: ${reqShipDate || "-"}</div>
         <div>Ship Mode: ${shipMode || "-"}</div>
+        <div>Incoterm: ${incoterm || "-"}</div>
         <div>Destination: ${destination || "-"}</div>
       </div>
     `);
@@ -2522,6 +2538,28 @@ const canCreateProforma =
     </Select>
   </div>
 )}
+
+                          {/* Incoterm */}
+                          <div className="space-y-2">
+                            <Label className="text-xs text-slate-600">
+                              Incoterm
+                            </Label>
+                            <Select
+                              value={incoterm}
+                              onValueChange={(v) => setIncoterm(v)}
+                            >
+                              <SelectTrigger className="h-9 text-sm">
+                                <SelectValue placeholder="Select incoterm" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {INCOTERM_OPTIONS.map((term) => (
+                                  <SelectItem key={term} value={term}>
+                                    {term}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
 
                           {/* Destination */}
                           <div className="space-y-2">
