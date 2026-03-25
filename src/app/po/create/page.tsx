@@ -2043,7 +2043,7 @@ if (!buyerId) {
       created_by_email: currentUserEmail,
       created_at: nowIso,
     };
-console.log("INCOTERM CHECK:", incoterm);
+
     const payload = {
       header: {
         po_no: poNo || undefined,
