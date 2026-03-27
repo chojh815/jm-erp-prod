@@ -224,7 +224,6 @@ React.useEffect(() => {
   // ✅ Track the loaded PO identity to prevent accidental overwrite when PO No changes
   const loadedPoNoRef = React.useRef<string | null>(null);
   const loadedHeaderIdRef = React.useRef<string | null>(null);
-  const skipNextBuyerDefaultsRef = React.useRef(false);
 
   const [orderType, setOrderType] = React.useState<OrderType>("NEW");
   const [status, setStatus] = React.useState<POStatus>("DRAFT");
@@ -249,7 +248,10 @@ React.useEffect(() => {
     String(v ?? "")
       .trim()
       .toLowerCase()
-      .replace(/\s+/g, " ");
+      .replace(/[\s\-_/]+/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/days\b/g, "days")
+      .trim();
 
   const findPaymentTermByText = React.useCallback(
     (textValue: string) => {
@@ -318,6 +320,23 @@ React.useEffect(() => {
     // id/라벨 모두 맞춰주면 Select가 정상 표시됨
     setPaymentTermId(found.id);
     setPaymentTermName(found.label);
+  }, [paymentTermId, paymentTermName, paymentTerms, findPaymentTermByText]);
+
+  const resolvedPaymentTermId = React.useMemo(() => {
+    if (
+      paymentTermId &&
+      paymentTerms.some((t) => t.id === paymentTermId)
+    ) {
+      return paymentTermId;
+    }
+
+    const txt = String(paymentTermName || "").trim();
+    if (!txt) return "";
+
+    const found = findPaymentTermByText(txt);
+    if (found?.id) return found.id;
+
+    return "";
   }, [paymentTermId, paymentTermName, paymentTerms, findPaymentTermByText]);
 
   const [shipMode, setShipMode] = React.useState("SEA");
@@ -570,11 +589,6 @@ const hasAnyShipped = React.useMemo(() => {
   React.useEffect(() => {
     if (!buyerId) return;
 
-    if (skipNextBuyerDefaultsRef.current) {
-      skipNextBuyerDefaultsRef.current = false;
-      return;
-    }
-
     (async () => {
       try {
         const { data, error } = await supabase
@@ -598,37 +612,24 @@ const hasAnyShipped = React.useMemo(() => {
           !!String(paymentTermName ?? "").trim();
 
         if (!hasPaymentTermValue) {
-          if (row.buyer_payment_term_id) {
-            const id = row.buyer_payment_term_id as string;
-            setPaymentTermId(id);
+          const term = String(row.buyer_payment_term || "").trim();
 
+          if (term) {
             setPaymentTerms((prev) => {
-              const found = prev.find((t) => t.id === id);
-              if (found) {
-                setPaymentTermName(found.label);
-                return prev;
-              }
-              const txt = (row.buyer_payment_term as string | null) ?? null;
-              const opt: PaymentTermOption = {
-                id,
-                code: null,
-                name: txt,
-                label: txt || "(Unknown Payment Term)",
-              };
-              setPaymentTermName(opt.label);
-              return [opt, ...prev];
-            });
-          } else if (row.buyer_payment_term) {
-            const term = row.buyer_payment_term as string;
-            setPaymentTerms((prev) => {
-              const existing = prev.find(
-                (t) => t.name === term || t.label === term
-              );
+              const x = normalizePT(term);
+              const existing = prev.find((t) => {
+                const a = normalizePT(t.label);
+                const b = normalizePT(t.name);
+                const c = normalizePT(t.code);
+                return a === x || b === x || c === x || a.includes(x) || b.includes(x);
+              });
+
               if (existing) {
                 setPaymentTermId(existing.id);
                 setPaymentTermName(existing.label);
                 return prev;
               }
+
               const opt: PaymentTermOption = {
                 id: `TEMP-${term}`,
                 code: null,
@@ -683,7 +684,7 @@ const hasAnyShipped = React.useMemo(() => {
         );
       }
     })();
-  }, [buyerId, supabase]);
+  }, [buyerId, supabase, paymentTermId, paymentTermName, paymentTerms, findPaymentTermByText]);
 
   // 바이어별 Dept/Brand 로딩 (companies.buyer_brand / buyer_dept 에서)
   React.useEffect(() => {
@@ -1254,7 +1255,6 @@ const fetchPoList = React.useCallback(
         setPoNo(header.po_no || "");
         setOrderType((header.order_type as OrderType) || "NEW");
         setStatus((header.status as POStatus) || "DRAFT");
-        skipNextBuyerDefaultsRef.current = true;
         setBuyerId(header.buyer_id || "");
         setDept(header.department || "");
         setBrand(header.brand || "");
@@ -1272,7 +1272,6 @@ const fetchPoList = React.useCallback(
       "";
         const headerPTId =
       header.payment_term_id ||
-      header.buyer_payment_term_id ||
       header.paymentTermId ||
       null;
 
@@ -1395,7 +1394,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
         alert("Unexpected error while loading PO.");
       }
     },
-    [makeEmptyLine]
+    [makeEmptyLine, findPaymentTermByText]
   );
 
   // URL의 ?poNo= 값으로 자동 로드 (한 번만)
@@ -2589,7 +2588,17 @@ const canCreateProforma =
                           </Label>
                           <Select
                             value={buyerId}
-                            onValueChange={(v) => setBuyerId(v)}
+                            onValueChange={(v) => {
+                              setBuyerId(v);
+                              setPaymentTermId(null);
+                              setPaymentTermName("");
+                              setBrand("");
+                              setDept("");
+                              setIncoterm("");
+                              setShipMode("");
+                              setDestination("");
+                              setSelectedOrigin(undefined);
+                            }}
                           >
                             <SelectTrigger className="h-9 text-sm">
                               <SelectValue placeholder="Select buyer" />
@@ -2705,7 +2714,8 @@ const canCreateProforma =
                             Payment Term
                           </Label>
                           <Select
-                            value={paymentTermId ?? ""}
+                            key={`pt-${resolvedPaymentTermId || "empty"}-${paymentTerms.length}`}
+                            value={resolvedPaymentTermId}
                             onValueChange={(id) => {
                               const opt = paymentTerms.find(
                                 (t) => t.id === id

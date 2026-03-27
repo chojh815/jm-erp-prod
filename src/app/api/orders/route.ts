@@ -74,6 +74,43 @@ function pickDate(obj: any, keys: string[]): string | undefined {
   return undefined;
 }
 
+function normalizePT(v: any): string {
+  return String(v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+async function loadBuyerDefaultsForHeader(buyerId: string) {
+  if (!buyerId || !isUuid(buyerId)) return null;
+  const { data, error } = await supabaseAdmin
+    .from("companies")
+    .select("buyer_payment_term, buyer_default_incoterm, buyer_default_ship_mode, buyer_final_destination, preferred_origins")
+    .eq("id", buyerId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as any) ?? null;
+}
+
+async function resolvePaymentTermIdByText(textValue: string | null | undefined) {
+  const txt = String(textValue ?? "").trim();
+  if (!txt) return null;
+
+  const { data, error } = await supabaseAdmin
+    .from("payment_terms")
+    .select("id, code, name, is_active")
+    .neq("is_active", false)
+    .order("name");
+  if (error) throw error;
+
+  const t = normalizePT(txt);
+  const found = ((data as any[]) || []).find((row: any) => {
+    const a = normalizePT([row?.code, row?.name].filter(Boolean).join(" "));
+    const b = normalizePT(row?.name);
+    const c = normalizePT(row?.code);
+    return a === t || b === t || c === t || a.includes(t) || b.includes(t);
+  });
+
+  return found?.id ?? null;
+}
+
 async function upsertByConflict(table: string, row: any, onConflict: string) {
   const { data, error } = await supabaseAdmin.from(table).upsert(row, { onConflict }).select("*").single();
   if (error) throw error;
@@ -124,6 +161,34 @@ export async function GET(req: Request) {
     if (hErr) return bad(hErr.message, 500);
     if (!header) return bad("PO not found", 404);
 
+    const headerAny = { ...(header as any) };
+    try {
+      const buyerDefaults = await loadBuyerDefaultsForHeader(String(headerAny.buyer_id || ""));
+      if (buyerDefaults) {
+        if (!str(headerAny.payment_term) && str(buyerDefaults.buyer_payment_term)) {
+          headerAny.payment_term = str(buyerDefaults.buyer_payment_term);
+        }
+        if (!str(headerAny.incoterm) && str(buyerDefaults.buyer_default_incoterm)) {
+          headerAny.incoterm = str(buyerDefaults.buyer_default_incoterm);
+        }
+        if (!str(headerAny.ship_mode) && str(buyerDefaults.buyer_default_ship_mode)) {
+          headerAny.ship_mode = str(buyerDefaults.buyer_default_ship_mode);
+        }
+        if (!str(headerAny.destination) && str(buyerDefaults.buyer_final_destination)) {
+          headerAny.destination = str(buyerDefaults.buyer_final_destination);
+        }
+        if (!str(headerAny.shipping_origin_code) && Array.isArray((buyerDefaults as any).preferred_origins) && (buyerDefaults as any).preferred_origins.length > 0) {
+          headerAny.shipping_origin_code = String((buyerDefaults as any).preferred_origins[0] || "").trim() || null;
+        }
+      }
+
+      if (!str(headerAny.payment_term_id) && str(headerAny.payment_term)) {
+        headerAny.payment_term_id = await resolvePaymentTermIdByText(headerAny.payment_term);
+      }
+    } catch (fallbackErr) {
+      console.warn("PO GET fallback warning:", (fallbackErr as any)?.message || fallbackErr);
+    }
+
     const { data: lines, error: lErr } = await supabaseAdmin
       .from("po_lines")
       .select("*")
@@ -133,7 +198,7 @@ export async function GET(req: Request) {
 
     if (lErr) return bad(lErr.message, 500);
 
-    return ok({ header, lines: lines || [] });
+    return ok({ header: headerAny, lines: lines || [] });
   } catch (e: any) {
     return bad(e?.message || "Unexpected error", 500);
   }

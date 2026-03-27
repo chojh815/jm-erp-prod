@@ -93,13 +93,45 @@ async function loadBuyerDefaults(buyerId: string) {
   const { data, error } = await supabaseAdmin
     .from("companies")
     .select(
-      "buyer_default_incoterm, buyer_consignee, buyer_notify_party, buyer_payment_term_id, buyer_payment_term, buyer_default_ship_mode, buyer_final_destination"
+      "buyer_default_incoterm, buyer_consignee, buyer_notify_party, buyer_payment_term, buyer_default_ship_mode, buyer_final_destination"
     )
     .eq("id", buyerId)
     .maybeSingle();
 
   if (error) throw error;
   return data ?? null;
+}
+
+async function resolvePaymentTermIdByText(paymentTermText: string) {
+  const term = safeTrim(paymentTermText);
+  if (!term) return null;
+
+  const { data, error } = await supabaseAdmin
+    .from("payment_terms")
+    .select("id, code, name")
+    .eq("is_active", true)
+    .order("name");
+
+  if (error) {
+    console.warn("resolvePaymentTermIdByText error:", error?.message);
+    return null;
+  }
+
+  const normalize = (v: any) =>
+    String(v ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
+  const target = normalize(term);
+  const hit = (data ?? []).find((row: any) => {
+    const a = normalize(row?.name);
+    const b = normalize(row?.code);
+    const c = normalize([row?.code, row?.name].filter(Boolean).join(" "));
+    return a === target || b === target || c === target || c.includes(target) || a.includes(target);
+  });
+
+  return hit?.id ? String(hit.id) : null;
 }
 
 async function resolveBrandName(brandId: string) {
@@ -201,6 +233,39 @@ export async function GET(
       );
     }
 
+    const buyerId = safeTrim((header as any)?.buyer_id);
+    const buyerDefaults = await loadBuyerDefaults(buyerId).catch((e) => {
+      console.error("GET loadBuyerDefaults error:", e);
+      return null;
+    });
+
+    const hydratedHeader: any = { ...(header as any) };
+
+    if (isEmpty(hydratedHeader.payment_term)) {
+      hydratedHeader.payment_term =
+        safeTrim(buyerDefaults?.buyer_payment_term) || hydratedHeader.payment_term || null;
+    }
+
+    if (!hydratedHeader.payment_term_id && !isEmpty(hydratedHeader.payment_term)) {
+      hydratedHeader.payment_term_id =
+        (await resolvePaymentTermIdByText(hydratedHeader.payment_term)) || null;
+    }
+
+    if (isEmpty(hydratedHeader.incoterm)) {
+      hydratedHeader.incoterm =
+        safeTrim(buyerDefaults?.buyer_default_incoterm) || hydratedHeader.incoterm || null;
+    }
+
+    if (isEmpty(hydratedHeader.ship_mode)) {
+      hydratedHeader.ship_mode =
+        safeTrim(buyerDefaults?.buyer_default_ship_mode) || hydratedHeader.ship_mode || null;
+    }
+
+    if (isEmpty(hydratedHeader.destination) && isEmpty(hydratedHeader.final_destination)) {
+      hydratedHeader.destination =
+        safeTrim(buyerDefaults?.buyer_final_destination) || hydratedHeader.destination || null;
+    }
+
     const { data: lines, error: linesErr } = await supabaseAdmin
       .from("po_lines")
       .select("*")
@@ -255,7 +320,7 @@ export async function GET(
       };
     });
 
-    return NextResponse.json({ success: true, header, lines: enrichedLines });
+    return NextResponse.json({ success: true, header: hydratedHeader, lines: enrichedLines });
   } catch (err: any) {
     console.error("Get PO Fatal:", err);
     return NextResponse.json(
@@ -436,6 +501,11 @@ export async function PUT(
         safeTrim(existing?.payment_term) ||
         safeTrim(buyerDefaults?.buyer_payment_term) ||
         null;
+    }
+
+    if (!patch.payment_term_id && !isEmpty(patch.payment_term)) {
+      patch.payment_term_id =
+        (await resolvePaymentTermIdByText(patch.payment_term)) || null;
     }
 
     if (patch.ship_mode === undefined) {
