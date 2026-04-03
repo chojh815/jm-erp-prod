@@ -567,18 +567,11 @@ export async function GET(req: Request) {
     if (dateFrom) q = q.gte("order_date", dateFrom);
     if (dateTo) q = q.lte("order_date", dateTo);
 
-    if (qRaw) {
-      const kw = qRaw.replace(/%/g, "\\%").replace(/,/g, "");
-      const like = `%${kw}%`;
-      q = q.or(
-        [
-          `po_no.ilike.${like}`,
-          `buyer_name.ilike.${like}`,
-          `destination.ilike.${like}`,
-          `buyer_brand_name.ilike.${like}`,
-        ].join(",")
-      );
-    }
+    // NOTE:
+    // Search by Buyer Style No / JM Style No cannot be handled reliably here
+    // with the current po_headers-only query builder.
+    // We load the alive headers first (already filtered by date/status),
+    // then apply the keyword filter after po_lines summary is collected below.
 
     const listRes = await q.order("order_date", { ascending: false, nullsFirst: false });
 
@@ -603,7 +596,15 @@ export async function GET(req: Request) {
 
     const lineSummaryByHeader: Record<
       string,
-      { lineCount: number; firstLine: any | null; totalAmountCents: number; totalOrderQty: number; lineIds: string[] }
+      {
+        lineCount: number;
+        firstLine: any | null;
+        totalAmountCents: number;
+        totalOrderQty: number;
+        lineIds: string[];
+        buyerStyleNos: string[];
+        jmStyleNos: string[];
+      }
     > = {};
 
     const allPoLineIds: string[] = [];
@@ -640,6 +641,8 @@ export async function GET(req: Request) {
               totalAmountCents: 0,
               totalOrderQty: 0,
               lineIds: [],
+              buyerStyleNos: [],
+              jmStyleNos: [],
             });
 
           bucket.lineCount += 1;
@@ -656,6 +659,12 @@ export async function GET(req: Request) {
             bucket.lineIds.push(r.id);
             allPoLineIds.push(r.id);
           }
+
+          const buyerStyleNo = asText(r.buyer_style_no).trim();
+          const jmStyleNo = asText(r.jm_style_no).trim();
+
+          if (buyerStyleNo) bucket.buyerStyleNos.push(buyerStyleNo);
+          if (jmStyleNo) bucket.jmStyleNos.push(jmStyleNo);
         }
       }
     }
@@ -718,6 +727,8 @@ export async function GET(req: Request) {
         totalAmountCents: 0,
         totalOrderQty: 0,
         lineIds: [],
+        buyerStyleNos: [],
+        jmStyleNos: [],
       };
 
       const fl = s.firstLine;
@@ -782,6 +793,8 @@ export async function GET(req: Request) {
         lineCount: s.lineCount,
         mainBuyerStyleNo: fl?.buyer_style_no ?? null,
         mainJmStyleNo: fl?.jm_style_no ?? null,
+        allBuyerStyleNos: uniq((s.buyerStyleNos ?? []).filter(Boolean)),
+        allJmStyleNos: uniq((s.jmStyleNos ?? []).filter(Boolean)),
         mainQty: fl?.qty ?? null,
         mainUnitPrice: fl?.unit_price ?? null,
         mainAmount: fl?.amount ?? null,
@@ -795,9 +808,27 @@ export async function GET(req: Request) {
       };
     });
 
-    const itemsFiltered = computedStatusFilter
-      ? itemsAll.filter((it) => it.status === computedStatusFilter)
+    const qNorm = qRaw.trim().toLowerCase();
+    const itemsKeywordFiltered = qNorm
+      ? itemsAll.filter((it) => {
+          const haystacks = [
+            asText(it.poNo),
+            asText(it.buyerName),
+            asText(it.destination),
+            asText(it.buyerBrandName),
+            asText(it.mainBuyerStyleNo),
+            asText(it.mainJmStyleNo),
+            ...((it.allBuyerStyleNos as string[]) ?? []),
+            ...((it.allJmStyleNos as string[]) ?? []),
+          ];
+
+          return haystacks.some((v) => asText(v).toLowerCase().includes(qNorm));
+        })
       : itemsAll;
+
+    const itemsFiltered = computedStatusFilter
+      ? itemsKeywordFiltered.filter((it) => it.status === computedStatusFilter)
+      : itemsKeywordFiltered;
 
     const itemsSorted = multiSortItems(
       itemsFiltered,
