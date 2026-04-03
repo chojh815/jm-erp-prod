@@ -103,6 +103,7 @@ export default function ProductRegisterPage() {
   const [productType, setProductType] = React.useState("");
   const [weight, setWeight] = React.useState<string>("");
   const [size, setSize] = React.useState("");
+  const [platingColor, setPlatingColor] = React.useState("");
   const [devDate, setDevDate] = React.useState<string>(
     new Date().toISOString().slice(0, 10)
   );
@@ -512,6 +513,7 @@ export default function ProductRegisterPage() {
     setProductType("");
     setWeight("");
     setSize("");
+    setPlatingColor("");
     setDevDate(new Date().toISOString().slice(0, 10));
     setDeveloper("");
     setRemarks("");
@@ -604,6 +606,7 @@ export default function ProductRegisterPage() {
       ["Category", productCategory],
       ["Weight (g)", weight],
       ["Size", size],
+      ["Plating Color", platingColor],
       ["Development Date", devDate],
       ["Developer", developer],
       ["Currency", currency],
@@ -719,11 +722,11 @@ export default function ProductRegisterPage() {
     if (header.product_type) {
       setProductType(header.product_type as string);
     }
-    if (header.weight != null) {
-      setWeight(String(header.weight));
+    if (header.weight != null || header.weight_g != null) {
+      setWeight(String(header.weight ?? header.weight_g ?? ""));
     }
-    if (header.size) {
-      setSize(header.size as string);
+    if (header.size || header.size_text) {
+      setSize((header.size ?? header.size_text) as string);
     }
     if (header.dev_date) {
       setDevDate(header.dev_date as string);
@@ -731,6 +734,7 @@ export default function ProductRegisterPage() {
     if (header.developer) {
       setDeveloper(header.developer as string);
     }
+    setPlatingColor((header.plating_color ?? "") as string);
     if (header.remarks) {
       setRemarks(header.remarks as string);
     }
@@ -966,6 +970,7 @@ export default function ProductRegisterPage() {
       productType: productType.trim() || null,
       weight: weightNum,
       size: size.trim() || null,
+      platingColor: platingColor.trim() || null,
       devDate: devDate || null,
       developer: developer.trim() || null,
       remarks: remarks.trim() || null,
@@ -1543,6 +1548,21 @@ export default function ProductRegisterPage() {
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
+                    <Label className="mb-2 block">Plating Color</Label>
+                    {isPrintMode ? (
+                      <div className="min-h-[34px] flex items-center justify-center px-3 border rounded-md bg-white text-xs">
+                        {platingColor}
+                      </div>
+                    ) : (
+                      <Input
+                        className="h-9"
+                        placeholder="e.g. SHINY 12K GOLD"
+                        value={platingColor}
+                        onChange={(e) => setPlatingColor(e.target.value)}
+                      />
+                    )}
+                  </div>
+                  <div>
                     <Label className="mb-2 block">Developer</Label>
                     {isPrintMode ? (
                       <div className="min-h-[34px] flex items-center justify-center px-3 border rounded-md bg-white text-xs">
@@ -1557,48 +1577,49 @@ export default function ProductRegisterPage() {
                       />
                     )}
                   </div>
-
-                  {!isPrintMode && (
-                    <div className="border rounded-lg px-3 py-2 bg-slate-50">
-                      <p className="text-[11px] font-semibold mb-1">
-                        Color variation from base style
-                      </p>
-                      <div className="flex gap-2 items-center">
-                        <Input
-                          className="h-7 text-xs"
-                          placeholder="Base style no. (e.g. JN250001)"
-                          value={baseStyleNo}
-                          onChange={(e) =>
-                            setBaseStyleNo(e.target.value.toUpperCase())
-                          }
-                        />
-                        <span className="text-xs">+</span>
-                        <Input
-                          className="h-7 w-16 text-xs text-center"
-                          placeholder="A"
-                          value={colorSuffix}
-                          onChange={(e) =>
-                            setColorSuffix(e.target.value.toUpperCase())
-                          }
-                        />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-[11px]"
-                          onClick={handleGenerateColorStyle}
-                        >
-                          Apply
-                        </Button>
-                      </div>
-                      <p className="text-[10px] text-slate-500 mt-1">
-                        When the product is the same and only the color is
-                        different: use Base style + A/B/C… and copy costing and
-                        operations from the base style.
-                      </p>
-                    </div>
-                  )}
                 </div>
+
+                {!isPrintMode && (
+                  <div className="border rounded-lg px-3 py-2 bg-slate-50">
+                    <p className="text-[11px] font-semibold mb-1">
+                      Color variation from base style
+                    </p>
+                    <div className="flex gap-2 items-center">
+                      <Input
+                        className="h-7 text-xs"
+                        placeholder="Base style no. (e.g. JN250001)"
+                        value={baseStyleNo}
+                        onChange={(e) =>
+                          setBaseStyleNo(e.target.value.toUpperCase())
+                        }
+                      />
+                      <span className="text-xs">+</span>
+                      <Input
+                        className="h-7 w-16 text-xs text-center"
+                        placeholder="A"
+                        value={colorSuffix}
+                        onChange={(e) =>
+                          setColorSuffix(e.target.value.toUpperCase())
+                        }
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[11px]"
+                        onClick={handleGenerateColorStyle}
+                      >
+                        Apply
+                      </Button>
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      When the product is the same and only the color is
+                      different: use Base style + A/B/C… and copy costing and
+                      operations from the base style.
+                    </p>
+                  </div>
+                )
+}
 
                 <div>
                   <Label className="mb-2 block">Remarks / Description</Label>
@@ -2366,6 +2387,10 @@ export default function ProductRegisterPage() {
                       <div>
                         <span className="font-semibold">Developer:</span>{" "}
                         {selectedHistory.snapshot?.header?.developer || "-"}
+                      </div>
+                      <div>
+                        <span className="font-semibold">Plating Color:</span>{" "}
+                        {selectedHistory.snapshot?.header?.plating_color || "-"}
                       </div>
                       <div>
                         <span className="font-semibold">

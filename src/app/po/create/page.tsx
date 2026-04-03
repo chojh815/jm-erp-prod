@@ -84,6 +84,8 @@ type DbStyle = {
   default_unit_price?: number;
   image_url?: string;
   image_urls?: string[] | null;
+  upc?: string;
+  remark?: string;
 };
 
 // companies에서 buyer 타입만 사용
@@ -102,7 +104,6 @@ type PaymentTermOption = {
 type DbBuyerStyleMap = {
   id: string;
   buyer_style_no: string;
-  jm_style_no?: string | null;
   styles?: DbStyle | null;
 };
 
@@ -764,58 +765,97 @@ const hasAnyShipped = React.useMemo(() => {
     React.useState<string | null>(null);
   const [styleResults, setStyleResults] = React.useState<DbStyle[]>([]);
   const [styleLoading, setStyleLoading] = React.useState(false);
+  const fetchRecentPoLineDefaults = React.useCallback(
+    async (args: { jmStyleNo?: string | null; buyerStyleNo?: string | null }) => {
+      const jmStyleNo = String(args.jmStyleNo ?? "").trim();
+      const buyerStyleNo = String(args.buyerStyleNo ?? "").trim();
+
+      try {
+        let query = supabase
+          .from("po_lines")
+          .select(
+            "id,buyer_style_no,jm_style_no,description,color,size,plating_color,hs_code,unit_price,upc,remark,image_url,image_urls,main_image_url,is_deleted,updated_at,created_at,uom"
+          )
+          .eq("is_deleted", false)
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        if (jmStyleNo) {
+          query = query.eq("jm_style_no", jmStyleNo);
+        } else if (buyerStyleNo) {
+          query = query.eq("buyer_style_no", buyerStyleNo);
+        } else {
+          return null;
+        }
+
+        const { data, error } = await query;
+        if (error) {
+          console.error("Failed to load recent po_lines defaults:", error);
+          return null;
+        }
+
+        return (data && data[0]) || null;
+      } catch (err) {
+        console.error("Failed to load recent po_lines defaults:", err);
+        return null;
+      }
+    },
+    [supabase]
+  );
 
   const searchStyles = React.useCallback(
     async (q: string) => {
-const query = (q || "").trim();
-if (!query || query.length < 2) {
-  setStyleResults([]);
-  return;
-}
+      const query = (q || "").trim();
+      if (!query || query.length < 2) {
+        setStyleResults([]);
+        return;
+      }
 
-try {
-  setStyleLoading(true);
+      try {
+        setStyleLoading(true);
 
-  // ✅ JM Style 검색은 dev master 테이블(product_development_headers)에서 조회
-  // (기존 코드가 styles 테이블을 찾다가 404 나는 문제 해결)
-  const { data, error } = await supabase
-    .from("product_development_headers")
-    .select(
-      "id,style_no,remarks,size_text,hs_code,material_content,image_urls,is_deleted"
-    )
-    .eq("is_deleted", false)
-    .ilike("style_no", `%${query}%`)
-    .order("style_no", { ascending: true })
-    .limit(20);
+        // JM Style No = DEV master only
+        const { data, error } = await supabase
+          .from("product_development_headers")
+          .select(
+            "id,style_no,remarks,size_text,hs_code,plating_color,material_content,image_urls,is_deleted"
+          )
+          .eq("is_deleted", false)
+          .ilike("style_no", `%${query}%`)
+          .order("style_no", { ascending: true })
+          .limit(20);
 
-  if (error) throw error;
+        if (error) throw error;
 
-  const rows = (data ?? []).map((r: any) => {
-    const image_urls = Array.isArray(r.image_urls) ? r.image_urls : null;
-    return {
-      id: String(r.id),
-      style_no: String(r.style_no ?? ""),
-      description: String(r.remarks ?? ""),
-      color: "",
-      size: String(r.size_text ?? ""),
-      plating_color: "",
-      hs_code: r.hs_code ?? null,
-      default_uom: "PCS",
-      default_unit_price: 0,
-      image_url: image_urls && image_urls.length ? image_urls[0] : null,
-      image_urls,
-      material_content: r.material_content ?? null,
-    } as DbStyle;
-  });
+        const rows = (data ?? []).map((r: any) => {
+          const image_urls = Array.isArray(r.image_urls) ? r.image_urls : null;
 
-  setStyleResults(rows);
-} catch (e: any) {
-  console.error("Failed to search styles:", e);
-  alert(`Failed to search styles: ${e?.message || e}`);
-} finally {
-  setStyleLoading(false);
-}
-},
+          return {
+            id: String(r.id),
+            style_no: String(r.style_no ?? ""),
+            description: String(r.remarks ?? ""),
+            color: "",
+            size: String(r.size_text ?? ""),
+            plating_color: String(r.plating_color ?? ""),
+            hs_code: r.hs_code ?? null,
+            default_uom: "PCS",
+            default_unit_price: 0,
+            image_url: image_urls && image_urls.length ? image_urls[0] : null,
+            image_urls,
+            material_content: r.material_content ?? null,
+            upc: "",
+            remark: "",
+          } as DbStyle;
+        });
+
+        setStyleResults(rows);
+      } catch (e: any) {
+        console.error("Failed to search styles:", e);
+        alert(`Failed to search styles: ${e?.message || e}`);
+      } finally {
+        setStyleLoading(false);
+      }
+    },
     [supabase]
   );
 
@@ -841,6 +881,8 @@ try {
           : 0,
       imageUrl: imagesArray[0],
       images: imagesArray,
+      upc: s.upc || "",
+      remark: s.remark || "",
     });
   };
 
@@ -872,35 +914,12 @@ try {
         setBuyerStyleLoading(true);
         const like = `%${keyword}%`;
 
-        const merged = new Map<string, { id: string; buyer_style_no: string; jm_style_no: string | null }>();
-
-        // 1) style_mappings 우선 조회
-        const { data: mapRows, error: mapErr } = await supabase
-          .from("style_mappings")
-          .select("id,buyer_style_no,jm_style_no")
-          .ilike("buyer_style_no", like)
-          .limit(20);
-
-        if (mapErr) {
-          console.error("Failed to search style_mappings:", mapErr);
-        } else {
-          for (const r of mapRows || []) {
-            const buyerStyleNo = String((r as any)?.buyer_style_no ?? "").trim();
-            const jmStyleNo = String((r as any)?.jm_style_no ?? "").trim() || null;
-            if (!buyerStyleNo) continue;
-            const key = `${buyerStyleNo}__${jmStyleNo ?? ""}`;
-            merged.set(key, {
-              id: String((r as any)?.id ?? key),
-              buyer_style_no: buyerStyleNo,
-              jm_style_no: jmStyleNo,
-            });
-          }
-        }
-
-        // 2) 없거나 부족할 수 있으니 po_lines도 fallback 조회
+        // Buyer Style No = PO history only
         const { data: poLineRows, error: poLineErr } = await supabase
           .from("po_lines")
-          .select("id,buyer_style_no,jm_style_no,is_deleted,updated_at")
+          .select(
+            "id,buyer_style_no,jm_style_no,description,color,size,plating_color,hs_code,unit_price,upc,remark,image_url,image_urls,main_image_url,is_deleted,updated_at,created_at,uom"
+          )
           .eq("is_deleted", false)
           .ilike("buyer_style_no", like)
           .order("updated_at", { ascending: false })
@@ -908,84 +927,50 @@ try {
 
         if (poLineErr) {
           console.error("Failed to search po_lines:", poLineErr);
-        } else {
-          for (const r of poLineRows || []) {
-            const buyerStyleNo = String((r as any)?.buyer_style_no ?? "").trim();
-            const jmStyleNo = String((r as any)?.jm_style_no ?? "").trim() || null;
-            if (!buyerStyleNo) continue;
-            const key = `${buyerStyleNo}__${jmStyleNo ?? ""}`;
-            if (!merged.has(key)) {
-              merged.set(key, {
-                id: String((r as any)?.id ?? key),
-                buyer_style_no: buyerStyleNo,
-                jm_style_no: jmStyleNo,
-              });
-            }
-          }
-        }
-
-        const baseRows = Array.from(merged.values()).slice(0, 20);
-        if (baseRows.length === 0) {
-          setBuyerStyleMessage("No matching buyer style found.");
+          setBuyerStyleMessage(`Search failed: ${poLineErr.message}`);
           setBuyerStyleResults([]);
           return;
         }
 
-        const jmStyleNos = Array.from(
-          new Set(
-            baseRows
-              .map((r) => String(r.jm_style_no ?? "").trim())
-              .filter(Boolean)
-          )
-        );
+        const merged = new Map<string, DbBuyerStyleMap>();
 
-        const pdhByStyleNo: Record<string, any> = {};
-        if (jmStyleNos.length > 0) {
-          const { data: pdhRows, error: pdhErr } = await supabase
-            .from("product_development_headers")
-            .select("id,style_no,remarks,size_text,hs_code,image_urls,is_deleted")
-            .in("style_no", jmStyleNos)
-            .eq("is_deleted", false);
+        for (const r of poLineRows || []) {
+          const buyerStyleNo = String((r as any)?.buyer_style_no ?? "").trim();
+          if (!buyerStyleNo) continue;
 
-          if (pdhErr) {
-            console.error("Failed to load product_development_headers:", pdhErr);
-          } else {
-            for (const r of pdhRows || []) {
-              const key = String((r as any)?.style_no ?? "").trim();
-              if (key) pdhByStyleNo[key] = r;
-            }
-          }
+          const key = buyerStyleNo.toUpperCase();
+          if (merged.has(key)) continue;
+
+          const imageArr = Array.isArray((r as any)?.image_urls)
+            ? (r as any).image_urls
+            : (r as any)?.image_url
+            ? [(r as any).image_url]
+            : (r as any)?.main_image_url
+            ? [(r as any).main_image_url]
+            : [];
+
+          merged.set(key, {
+            id: String((r as any)?.id ?? key),
+            buyer_style_no: buyerStyleNo,
+            styles: {
+              id: String((r as any)?.id ?? key),
+              style_no: String((r as any)?.jm_style_no ?? ""),
+              description: String((r as any)?.description ?? ""),
+              color: String((r as any)?.color ?? ""),
+              size: String((r as any)?.size ?? ""),
+              plating_color: String((r as any)?.plating_color ?? ""),
+              hs_code: (r as any)?.hs_code ?? null,
+              default_uom: String((r as any)?.uom ?? "PCS"),
+              default_unit_price: Number((r as any)?.unit_price ?? 0) || 0,
+              image_url: imageArr.length ? imageArr[0] : undefined,
+              image_urls: imageArr.length ? imageArr : null,
+              upc: String((r as any)?.upc ?? ""),
+              remark: String((r as any)?.remark ?? ""),
+            } as DbStyle,
+          });
         }
 
-        const mapped: DbBuyerStyleMap[] = baseRows.map((r) => {
-          const resolvedJmStyleNo = String(r.jm_style_no ?? "").trim();
-          const pdh = resolvedJmStyleNo ? pdhByStyleNo[resolvedJmStyleNo] : null;
-          const image_urls = Array.isArray((pdh as any)?.image_urls)
-            ? (pdh as any).image_urls
-            : null;
-
-          return {
-            id: r.id,
-            buyer_style_no: r.buyer_style_no,
-            jm_style_no: resolvedJmStyleNo || null,
-            styles: resolvedJmStyleNo
-              ? {
-                  id: String((pdh as any)?.id ?? resolvedJmStyleNo),
-                  style_no: String((pdh as any)?.style_no ?? resolvedJmStyleNo),
-                  description: String((pdh as any)?.remarks ?? ""),
-                  color: "",
-                  size: String((pdh as any)?.size_text ?? ""),
-                  plating_color: "",
-                  hs_code: (pdh as any)?.hs_code ?? null,
-                  default_uom: "PCS",
-                  default_unit_price: 0,
-                  image_url:
-                    image_urls && image_urls.length ? image_urls[0] : undefined,
-                  image_urls,
-                }
-              : null,
-          };
-        });
+        const mapped: DbBuyerStyleMap[] = Array.from(merged.values()).slice(0, 20);
 
         setBuyerStyleResults(mapped);
         setBuyerStyleMessage(mapped.length ? "" : "No matching buyer style found.");
@@ -1005,35 +990,40 @@ try {
     map: DbBuyerStyleMap
   ) => {
     const style = map.styles;
-    const resolvedJmStyleNo = String(
-      style?.style_no ?? map.jm_style_no ?? ""
-    ).trim();
+    if (!style) {
+      updateLine(lineId, {
+        buyerStyleNo: map.buyer_style_no,
+        buyerStyleMapId: map.id,
+      });
+      return;
+    }
 
     const imagesArray =
-      style?.image_urls && Array.isArray(style.image_urls)
+      style.image_urls && Array.isArray(style.image_urls)
         ? style.image_urls
-        : style?.image_url
+        : style.image_url
         ? [style.image_url]
         : [];
 
     updateLine(lineId, {
       buyerStyleNo: map.buyer_style_no,
       buyerStyleMapId: map.id,
-      jmStyleNo: resolvedJmStyleNo,
-      description: style?.description || "",
-      color: style?.color || "",
-      size: style?.size || "",
-      plating_color: style?.plating_color || "",
-      hsCode: style?.hs_code || "",
-      uom: style?.default_uom || "PCS",
+      jmStyleNo: style.style_no,
+      description: style.description || "",
+      color: style.color || "",
+      size: style.size || "",
+      plating_color: style.plating_color || "",
+      hsCode: style.hs_code || "",
+      uom: style.default_uom || "PCS",
       unitPrice:
-        typeof style?.default_unit_price === "number"
+        typeof style.default_unit_price === "number"
           ? style.default_unit_price
           : 0,
       imageUrl: imagesArray[0],
       images: imagesArray,
+      upc: style.upc || "",
+      remark: style.remark || "",
     });
-
     setBuyerStyleFocusId(null);
     setBuyerStyleMessage("");
   };
@@ -2997,14 +2987,15 @@ const canCreateProforma =
                                   </Button>
                                 </div>
                                 {/* Buyer Style Search Result */}
-                                {buyerStyleFocusId === line.id && (
-                                  <div className="mt-1 border rounded bg-white shadow-sm max-h-40 overflow-auto text-[11px]">
-                                    {buyerStyleLoading ? (
-                                      <div className="px-2 py-1 text-slate-400">
-                                        Loading...
-                                      </div>
-                                    ) : buyerStyleResults.length > 0 ? (
-                                      buyerStyleResults.map((bs) => (
+                                {buyerStyleFocusId === line.id &&
+                                  buyerStyleResults.length > 0 && (
+                                    <div className="mt-1 border rounded bg-white shadow-sm max-h-40 overflow-auto text-[11px]">
+                                      {buyerStyleLoading && (
+                                        <div className="px-2 py-1 text-slate-400">
+                                          Loading...
+                                        </div>
+                                      )}
+                                      {buyerStyleResults.map((bs) => (
                                         <button
                                           key={bs.id}
                                           type="button"
@@ -3019,28 +3010,16 @@ const canCreateProforma =
                                           <div className="font-medium">
                                             {bs.buyer_style_no}
                                           </div>
-                                          {bs.styles ? (
+                                          {bs.styles && (
                                             <div className="text-slate-500">
-                                              {bs.styles.style_no} – {bs.styles.description}
-                                            </div>
-                                          ) : bs.jm_style_no ? (
-                                            <div className="text-slate-500">
-                                              {bs.jm_style_no}
-                                            </div>
-                                          ) : (
-                                            <div className="text-amber-600">
-                                              Mapping found, but JM detail is missing.
+                                              {bs.styles.style_no} –{" "}
+                                              {bs.styles.description}
                                             </div>
                                           )}
                                         </button>
-                                      ))
-                                    ) : (
-                                      <div className="px-2 py-1 text-slate-400">
-                                        {buyerStyleMessage || "No results."}
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
+                                      ))}
+                                    </div>
+                                  )}
                               </div>
 
                               {/* JM Style No. */}
