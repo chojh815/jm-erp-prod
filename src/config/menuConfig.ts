@@ -78,6 +78,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "dev.costings.view",
       },
       {
+       label: "Sample Requests",
+       href: "/sample-requests",
+       perm: "dev.samples.view",
+      },
+      {
         label: "BOM Library",
         href: "/dev/bom-library",
         perm: "dev.bom.view",
