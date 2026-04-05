@@ -737,16 +737,8 @@ export async function GET(req: Request) {
         (h.buyer_brand_id ? asText(brandNameById[h.buyer_brand_id]) : "") ||
         "";
 
-      const headerSubtotalNum =
-        h.subtotal !== null && h.subtotal !== undefined ? n(h.subtotal, NaN) : NaN;
-
-      const headerSubtotalCents = Number.isFinite(headerSubtotalNum) ? toCents(headerSubtotalNum) : null;
-      const lineSubtotalCents = s.lineCount > 0 ? s.totalAmountCents : null;
-
-      const subtotalCents =
-        headerSubtotalCents !== null ? headerSubtotalCents : lineSubtotalCents !== null ? lineSubtotalCents : 0;
-
-      const computedSubtotal = fromCents(subtotalCents);
+      const lineSubtotalCents = s.lineCount > 0 ? s.totalAmountCents : 0;
+      const computedSubtotal = fromCents(lineSubtotalCents);
 
       let allocatedQty = 0;
       let shippedQty = 0;

@@ -1460,6 +1460,7 @@ export default function ProductRegisterPage() {
                           <SelectItem value="K">Keyring (JK)</SelectItem>
                           <SelectItem value="A">Anklet (JA)</SelectItem>
                           <SelectItem value="S">Set (JS)</SelectItem>
+                          <SelectItem value="P">Pin (JP)</SelectItem>
                           <SelectItem value="O">Other (JO)</SelectItem>
                         </SelectContent>
                       </Select>

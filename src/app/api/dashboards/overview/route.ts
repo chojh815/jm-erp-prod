@@ -277,8 +277,9 @@ export async function GET(req: Request) {
       const d = pickDate(row);
       return inRangeISO(d, start, end);
     };
+    const EXCLUDED_PO_HEADER_STATUSES = new Set(["DELETED", "CANCELLED", "CANCELED"]);
     const notDeleted = (row: any) =>
-      row?.is_deleted !== true && String(row?.status ?? "").toUpperCase() !== "DELETED";
+      row?.is_deleted !== true && !EXCLUDED_PO_HEADER_STATUSES.has(String(row?.status ?? "").toUpperCase());
 
     // ✅ Orders MUST be by order_date (draft/confirmed regardless). pickDate() already prioritizes order_date.
     const posF = pos.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
@@ -307,9 +308,7 @@ export async function GET(req: Request) {
     }
     const amountForPoHeader = (h: any) => {
       const hid = pickPoHeaderId(h);
-      const summed = hid ? (poLineSumByHeader.get(hid) || 0) : 0;
-      if (summed && summed > 0) return summed;
-      return pickAmountUSD(h);
+      return hid ? (poLineSumByHeader.get(hid) || 0) : 0;
     };
 
     // KPIs

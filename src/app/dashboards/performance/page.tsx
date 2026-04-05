@@ -89,6 +89,11 @@ function fmtPct(n: number | null) {
   return `${sign}${n.toFixed(2)}%`;
 }
 
+function pctFrom(curr: number, base: number) {
+  if (!Number.isFinite(base) || base === 0) return null;
+  return Math.round(((curr - base) / base) * 10000) / 100;
+}
+
 function PctBadge({ v }: { v: number | null }) {
   if (v === null || v === undefined) return <span className="text-muted-foreground">—</span>;
   const cls =
@@ -212,134 +217,86 @@ export default function PerformanceDashboardPage() {
     return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   }, [yearly, dimension]);
 
+
   const combinedMonthly = React.useMemo(() => {
-    const byMonth = new Map<string, { month_start: string; order_usd: number; ship_usd: number }>();
+    const m = new Map<string, {
+      month_start: string;
+      year: number;
+      month: number;
+      order_usd: number;
+      ship_usd: number;
+      order_yoy_pct: number | null;
+      order_mom_pct: number | null;
+      ship_yoy_pct: number | null;
+      ship_mom_pct: number | null;
+    }>();
 
     for (const r of monthly) {
-      const prev = byMonth.get(r.month_start) || {
+      const prev = m.get(r.month_start) || {
         month_start: r.month_start,
+        year: r.year,
+        month: r.month,
         order_usd: 0,
         ship_usd: 0,
+        order_yoy_pct: null,
+        order_mom_pct: null,
+        ship_yoy_pct: null,
+        ship_mom_pct: null,
       };
       prev.order_usd += Number(r.order_usd || 0);
       prev.ship_usd += Number(r.ship_usd || 0);
-      byMonth.set(r.month_start, prev);
+      m.set(r.month_start, prev);
     }
 
-    const arr = Array.from(byMonth.values()).sort((a, b) => a.month_start.localeCompare(b.month_start));
+    const arr = Array.from(m.values()).sort((a, b) => a.month_start.localeCompare(b.month_start));
+    const byMonth = new Map(arr.map((x) => [x.month_start, x] as const));
 
     return arr.map((row, idx) => {
       const prev = idx > 0 ? arr[idx - 1] : null;
-
-      const order_mom_pct =
-        !prev || prev.order_usd === 0
-          ? null
-          : Math.round((((row.order_usd - prev.order_usd) / prev.order_usd) * 100) * 100) / 100;
-
-      const ship_mom_pct =
-        !prev || prev.ship_usd === 0
-          ? null
-          : Math.round((((row.ship_usd - prev.ship_usd) / prev.ship_usd) * 100) * 100) / 100;
-
-      const { y, m } = parseYearMonth(row.month_start);
-      const prevYearMonth = `${String(y - 1).padStart(4, "0")}-${String(m).padStart(2, "0")}-01`;
-      const prevYear = byMonth.get(prevYearMonth);
-
-      const order_yoy_pct =
-        !prevYear || prevYear.order_usd === 0
-          ? null
-          : Math.round((((row.order_usd - prevYear.order_usd) / prevYear.order_usd) * 100) * 100) / 100;
-
-      const ship_yoy_pct =
-        !prevYear || prevYear.ship_usd === 0
-          ? null
-          : Math.round((((row.ship_usd - prevYear.ship_usd) / prevYear.ship_usd) * 100) * 100) / 100;
-
+      const prevYearKey = `${row.year - 1}-${String(row.month).padStart(2, "0")}-01`;
+      const prevYear = byMonth.get(prevYearKey);
       return {
-        month_start: row.month_start,
-        year: y,
-        month: m,
-        order_usd: row.order_usd,
-        ship_usd: row.ship_usd,
-        order_yoy_pct,
-        order_mom_pct,
-        ship_yoy_pct,
-        ship_mom_pct,
+        ...row,
+        order_mom_pct: prev ? pctFrom(row.order_usd, prev.order_usd) : null,
+        ship_mom_pct: prev ? pctFrom(row.ship_usd, prev.ship_usd) : null,
+        order_yoy_pct: prevYear ? pctFrom(row.order_usd, prevYear.order_usd) : null,
+        ship_yoy_pct: prevYear ? pctFrom(row.ship_usd, prevYear.ship_usd) : null,
       };
     });
   }, [monthly]);
 
   const combinedYearly = React.useMemo(() => {
-    const byYear = new Map<number, { year: number; order_usd: number; ship_usd: number }>();
+    const m = new Map<number, {
+      year: number;
+      order_usd: number;
+      ship_usd: number;
+      order_yoy_pct: number | null;
+      ship_yoy_pct: number | null;
+    }>();
 
     for (const r of yearly) {
-      const prev = byYear.get(r.year) || { year: r.year, order_usd: 0, ship_usd: 0 };
+      const prev = m.get(r.year) || {
+        year: r.year,
+        order_usd: 0,
+        ship_usd: 0,
+        order_yoy_pct: null,
+        ship_yoy_pct: null,
+      };
       prev.order_usd += Number(r.order_usd || 0);
       prev.ship_usd += Number(r.ship_usd || 0);
-      byYear.set(r.year, prev);
+      m.set(r.year, prev);
     }
 
-    const arr = Array.from(byYear.values()).sort((a, b) => a.year - b.year);
-
+    const arr = Array.from(m.values()).sort((a, b) => a.year - b.year);
     return arr.map((row, idx) => {
       const prev = idx > 0 ? arr[idx - 1] : null;
       return {
-        year: row.year,
-        order_usd: row.order_usd,
-        ship_usd: row.ship_usd,
-        order_yoy_pct:
-          !prev || prev.order_usd === 0
-            ? null
-            : Math.round((((row.order_usd - prev.order_usd) / prev.order_usd) * 100) * 100) / 100,
-        ship_yoy_pct:
-          !prev || prev.ship_usd === 0
-            ? null
-            : Math.round((((row.ship_usd - prev.ship_usd) / prev.ship_usd) * 100) * 100) / 100,
+        ...row,
+        order_yoy_pct: prev ? pctFrom(row.order_usd, prev.order_usd) : null,
+        ship_yoy_pct: prev ? pctFrom(row.ship_usd, prev.ship_usd) : null,
       };
     });
   }, [yearly]);
-
-  const combinedCompare = React.useMemo(() => {
-    if (compareMode !== "YTD") return null;
-    const { start: ytdStart, end: ytdEnd, prevStart, prevEnd, year } = ytdRange(end);
-
-    function inRange(ms: string, s: string, e: string) {
-      return ms >= s && ms <= e;
-    }
-
-    let orderCur = 0;
-    let orderPrev = 0;
-    let shipCur = 0;
-    let shipPrev = 0;
-
-    for (const r of (data?.monthly_raw || []) as any[]) {
-      const order = Number(r.order_usd || 0);
-      const ship = Number(r.ship_usd || 0);
-
-      if (inRange(r.month_start, ytdStart, ytdEnd)) {
-        orderCur += order;
-        shipCur += ship;
-      }
-      if (inRange(r.month_start, prevStart, prevEnd)) {
-        orderPrev += order;
-        shipPrev += ship;
-      }
-    }
-
-    return {
-      year,
-      ytdStart,
-      ytdEnd,
-      prevStart,
-      prevEnd,
-      order_cur: orderCur,
-      order_prev: orderPrev,
-      order_yoy: orderPrev === 0 ? null : Math.round((((orderCur - orderPrev) / orderPrev) * 100) * 100) / 100,
-      ship_cur: shipCur,
-      ship_prev: shipPrev,
-      ship_yoy: shipPrev === 0 ? null : Math.round((((shipCur - shipPrev) / shipPrev) * 100) * 100) / 100,
-    };
-  }, [compareMode, end, data]);
 
   // Compare: YTD vs Prior YTD (computed client-side for flexibility)
   const compare = React.useMemo(() => {
@@ -409,6 +366,74 @@ export default function PerformanceDashboardPage() {
     return { ytdStart, ytdEnd, prevStart, prevEnd, top, total: { ...total, total_order_yoy, total_ship_yoy } };
   }, [compareMode, end, dimension, data]);
 
+
+  const compareCombined = React.useMemo(() => {
+    if (compareMode !== "YTD") return null;
+    const { start: ytdStart, end: ytdEnd, prevStart, prevEnd, year } = ytdRange(end);
+
+    function inRange(ms: string, s: string, e: string) {
+      return ms >= s && ms <= e;
+    }
+
+    let orderCur = 0;
+    let orderPrev = 0;
+    let shipCur = 0;
+    let shipPrev = 0;
+
+    for (const r of (data?.monthly_raw || []) as any[]) {
+      if (inRange(r.month_start, ytdStart, ytdEnd)) {
+        orderCur += Number(r.order_usd || 0);
+        shipCur += Number(r.ship_usd || 0);
+      }
+      if (inRange(r.month_start, prevStart, prevEnd)) {
+        orderPrev += Number(r.order_usd || 0);
+        shipPrev += Number(r.ship_usd || 0);
+      }
+    }
+
+    return {
+      year,
+      ytdStart,
+      ytdEnd,
+      prevStart,
+      prevEnd,
+      order_cur: orderCur,
+      order_prev: orderPrev,
+      order_yoy: pctFrom(orderCur, orderPrev),
+      ship_cur: shipCur,
+      ship_prev: shipPrev,
+      ship_yoy: pctFrom(shipCur, shipPrev),
+    };
+  }, [compareMode, end, data]);
+
+  const kpis = React.useMemo(() => {
+    const latest = combinedMonthly.length ? combinedMonthly[combinedMonthly.length - 1] : null;
+    const orderTotal = combinedMonthly.reduce((s, r) => s + Number(r.order_usd || 0), 0);
+    const shipTotal = combinedMonthly.reduce((s, r) => s + Number(r.ship_usd || 0), 0);
+
+    if (compareMode === "YTD" && compareCombined) {
+      return {
+        orderTotal,
+        shipTotal,
+        orderTrendLabel: `Orders YTD YoY`,
+        orderTrendValue: compareCombined.order_yoy,
+        shipTrendLabel: `Shipping YTD YoY`,
+        shipTrendValue: compareCombined.ship_yoy,
+        latestLabel: `${compareCombined.ytdEnd.slice(0, 7)} YTD`,
+      };
+    }
+
+    return {
+      orderTotal,
+      shipTotal,
+      orderTrendLabel: latest ? `Orders YoY (${monthLabel(latest.month_start)})` : "Orders YoY",
+      orderTrendValue: latest?.order_yoy_pct ?? null,
+      shipTrendLabel: latest ? `Shipping YoY (${monthLabel(latest.month_start)})` : "Shipping YoY",
+      shipTrendValue: latest?.ship_yoy_pct ?? null,
+      latestLabel: latest ? monthLabel(latest.month_start) : "—",
+    };
+  }, [combinedMonthly, compareMode, compareCombined]);
+
   // Charts: trend total within current query range
   const trend = React.useMemo(() => {
     const m = new Map<string, { month: string; order_usd: number; ship_usd: number }>();
@@ -442,12 +467,13 @@ export default function PerformanceDashboardPage() {
   }, [monthly, dimension, topMetric]);
 
   function exportExcel() {
-    const sheetMonthly: any[] = [];
-    for (const [name, list] of monthlyGrouped) {
-      for (const r of list.slice().sort((a, b) => a.month_start.localeCompare(b.month_start))) {
-        sheetMonthly.push({
+    const isCombined = viewMode === "COMBINED";
+
+    const sheetMonthly: any[] = isCombined
+      ? combinedMonthly.map((r) => ({
+          ViewMode: viewMode,
           Dimension: dimension,
-          Name: name,
+          Name: "Combined Total",
           Month: monthLabel(r.month_start),
           Orders_USD: Number(r.order_usd || 0),
           Orders_YoY_Pct: r.order_yoy_pct ?? null,
@@ -455,99 +481,132 @@ export default function PerformanceDashboardPage() {
           Shipping_USD: Number(r.ship_usd || 0),
           Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
           Shipping_MoM_Pct: r.ship_mom_pct ?? null,
-        });
-      }
-    }
+        }))
+      : monthlyGrouped.flatMap(([name, list]) =>
+          list
+            .slice()
+            .sort((a, b) => a.month_start.localeCompare(b.month_start))
+            .map((r) => ({
+              ViewMode: viewMode,
+              Dimension: dimension,
+              Name: name,
+              Month: monthLabel(r.month_start),
+              Orders_USD: Number(r.order_usd || 0),
+              Orders_YoY_Pct: r.order_yoy_pct ?? null,
+              Orders_MoM_Pct: r.order_mom_pct ?? null,
+              Shipping_USD: Number(r.ship_usd || 0),
+              Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
+              Shipping_MoM_Pct: r.ship_mom_pct ?? null,
+            }))
+        );
 
-    const sheetYearly: any[] = [];
-    for (const [name, list] of yearlyGrouped as any) {
-      for (const r of (list as YearlyRow[]).slice().sort((a, b) => a.year - b.year)) {
-        sheetYearly.push({
+    const sheetYearly: any[] = isCombined
+      ? combinedYearly.map((r) => ({
+          ViewMode: viewMode,
           Dimension: dimension,
-          Name: name,
+          Name: "Combined Total",
           Year: r.year,
           Orders_USD: Number(r.order_usd || 0),
           Orders_YoY_Pct: r.order_yoy_pct ?? null,
           Shipping_USD: Number(r.ship_usd || 0),
           Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
+        }))
+      : yearlyGrouped.flatMap(([name, list]) =>
+          (list as YearlyRow[])
+            .slice()
+            .sort((a, b) => a.year - b.year)
+            .map((r) => ({
+              ViewMode: viewMode,
+              Dimension: dimension,
+              Name: name,
+              Year: r.year,
+              Orders_USD: Number(r.order_usd || 0),
+              Orders_YoY_Pct: r.order_yoy_pct ?? null,
+              Shipping_USD: Number(r.ship_usd || 0),
+              Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
+            }))
+        );
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYearly), "Yearly");
+
+    if (!isCombined) {
+      const sheetTop10 = top10.map((r, idx) => ({
+        Rank: idx + 1,
+        Dimension: dimension,
+        Name: r.name,
+        Metric: topMetric,
+        Orders_USD: Number(r.order_usd || 0),
+        Shipping_USD: Number(r.ship_usd || 0),
+        Combined_USD: Number((r.order_usd || 0) + (r.ship_usd || 0)),
+        Score: Number(r.score || 0),
+      }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetTop10), "Top10");
+    }
+
+    if (compareMode === "YTD") {
+      if (isCombined && compareCombined) {
+        const ytdSheet = [{
+          ViewMode: viewMode,
+          Dimension: dimension,
+          Name: "Combined Total",
+          YTD_Start: compareCombined.ytdStart,
+          YTD_End: compareCombined.ytdEnd,
+          Orders_Cur: compareCombined.order_cur,
+          Orders_Prev: compareCombined.order_prev,
+          Orders_YoY_Pct: compareCombined.order_yoy,
+          Shipping_Cur: compareCombined.ship_cur,
+          Shipping_Prev: compareCombined.ship_prev,
+          Shipping_YoY_Pct: compareCombined.ship_yoy,
+        }];
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ytdSheet), "YTD_vs_PriorYTD");
+      } else if (compare) {
+        const sheetYtd = compare.top.map((r) => ({
+          Dimension: dimension,
+          Name: r.name,
+          YTD_Start: compare.ytdStart,
+          YTD_End: compare.ytdEnd,
+          Orders_Cur: r.order_cur,
+          Orders_Prev: r.order_prev,
+          Orders_YoY_Pct: r.order_yoy,
+          Shipping_Cur: r.ship_cur,
+          Shipping_Prev: r.ship_prev,
+          Shipping_YoY_Pct: r.ship_yoy,
+        }));
+        sheetYtd.unshift({
+          Dimension: dimension,
+          Name: "TOTAL (TOP 12)",
+          YTD_Start: compare.ytdStart,
+          YTD_End: compare.ytdEnd,
+          Orders_Cur: compare.total.order_cur,
+          Orders_Prev: compare.total.order_prev,
+          Orders_YoY_Pct: compare.total.total_order_yoy,
+          Shipping_Cur: compare.total.ship_cur,
+          Shipping_Prev: compare.total.ship_prev,
+          Shipping_YoY_Pct: compare.total.total_ship_yoy,
         });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYtd), "YTD_vs_PriorYTD");
       }
     }
 
-    if (compareMode === "YTD" && compare) {
-      const sheetYtd = compare.top.map((r) => ({
-        Dimension: dimension,
-        Name: r.name,
-        YTD_Start: compare.ytdStart,
-        YTD_End: compare.ytdEnd,
-        Orders_Cur: r.order_cur,
-        Orders_Prev: r.order_prev,
-        Orders_YoY_Pct: r.order_yoy,
-        Shipping_Cur: r.ship_cur,
-        Shipping_Prev: r.ship_prev,
-        Shipping_YoY_Pct: r.ship_yoy,
-      }));
-      sheetYtd.unshift({
-        Dimension: dimension,
-        Name: "TOTAL (TOP 12)",
-        YTD_Start: compare.ytdStart,
-        YTD_End: compare.ytdEnd,
-        Orders_Cur: compare.total.order_cur,
-        Orders_Prev: compare.total.order_prev,
-        Orders_YoY_Pct: compare.total.total_order_yoy,
-        Shipping_Cur: compare.total.ship_cur,
-        Shipping_Prev: compare.total.ship_prev,
-        Shipping_YoY_Pct: compare.total.total_ship_yoy,
-      });
-
-      const wb = XLSX.utils.book_new();
-      
-      // Top10 summary (same metric/ordering as UI)
-      const sheetTop10 = top10.map((r, idx) => ({
-        Rank: idx + 1,
-        Dimension: dimension,
-        Name: r.name,
-        Metric: topMetric,
-        Orders_USD: Number(r.order_usd || 0),
-        Shipping_USD: Number(r.ship_usd || 0),
-        Combined_USD: Number((r.order_usd || 0) + (r.ship_usd || 0)),
-        Score: Number(r.score || 0),
-      }));
-XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYearly), "Yearly");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetTop10), "Top10");
-XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYtd), "YTD_vs_PriorYTD");
-      XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
-      return;
-    }
-
-    const wb = XLSX.utils.book_new();
-    
-      // Top10 summary (same metric/ordering as UI)
-      const sheetTop10 = top10.map((r, idx) => ({
-        Rank: idx + 1,
-        Dimension: dimension,
-        Name: r.name,
-        Metric: topMetric,
-        Orders_USD: Number(r.order_usd || 0),
-        Shipping_USD: Number(r.ship_usd || 0),
-        Combined_USD: Number((r.order_usd || 0) + (r.ship_usd || 0)),
-        Score: Number(r.score || 0),
-      }));
-XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYearly), "Yearly");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetTop10), "Top10");
-XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
+    XLSX.writeFile(wb, `performance_${dimension}_${viewMode.toLowerCase()}_${start}_to_${end}.xlsx`);
   }
 
   function exportPdf() {
     const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+    const isCombined = viewMode === "COMBINED";
+
     doc.setFontSize(14);
-    doc.text(`Performance (${dimension === "buyer" ? "Buyer" : "Brand"})`, 40, 40);
+    doc.text(
+      `Performance (${dimension === "buyer" ? "Buyer" : "Brand"})${isCombined ? " - Combined Total" : ""}`,
+      40,
+      40
+    );
 
     const scopeParts: string[] = [];
+    scopeParts.push(`View: ${isCombined ? "Combined Total" : "By Entity"}`);
     scopeParts.push(compareMode === "YTD" ? "Mode: YTD" : "Mode: Range");
-    scopeParts.push(`View: ${viewMode === "COMBINED" ? "Combined Total" : `By ${dimension === "buyer" ? "Buyer" : "Brand"}`}`);
     scopeParts.push(`Range: ${start.slice(0, 7)} ~ ${end.slice(0, 7)}`);
     if (!allBuyers && buyerIds.length) scopeParts.push(`Buyers: ${buyerIds.length}`);
     if (!allBrands && brandNames.length) scopeParts.push(`Brands: ${brandNames.length}`);
@@ -556,7 +615,45 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
 
     let y = 72;
 
-    if (viewMode === "COMBINED") {
+    if (isCombined) {
+      autoTable(doc, {
+        startY: y,
+        head: [["KPI", "Value", "Trend"]],
+        body: [
+          ["Orders Total", fmtUsd(kpis.orderTotal), `${kpis.orderTrendLabel}: ${fmtPct(kpis.orderTrendValue)}`],
+          ["Shipping Total", fmtUsd(kpis.shipTotal), `${kpis.shipTrendLabel}: ${fmtPct(kpis.shipTrendValue)}`],
+        ],
+        styles: { fontSize: 9, cellPadding: 4 },
+        headStyles: { fontStyle: "bold" },
+        margin: { left: 40, right: 40 },
+        theme: "grid",
+      });
+
+      // @ts-ignore
+      y = doc.lastAutoTable.finalY + 18;
+
+      if (compareMode === "YTD" && compareCombined) {
+        autoTable(doc, {
+          startY: y,
+          head: [["Section", "Orders (YTD)", "Orders (Prior)", "YoY", "Shipping (YTD)", "Shipping (Prior)", "YoY"]],
+          body: [[
+            "Combined Total",
+            fmtUsdPlain(compareCombined.order_cur),
+            fmtUsdPlain(compareCombined.order_prev),
+            fmtPct(compareCombined.order_yoy),
+            fmtUsdPlain(compareCombined.ship_cur),
+            fmtUsdPlain(compareCombined.ship_prev),
+            fmtPct(compareCombined.ship_yoy),
+          ]],
+          styles: { fontSize: 8, cellPadding: 3 },
+          headStyles: { fontStyle: "bold" },
+          margin: { left: 40, right: 40 },
+          theme: "grid",
+        });
+        // @ts-ignore
+        y = doc.lastAutoTable.finalY + 18;
+      }
+
       autoTable(doc, {
         startY: y,
         head: [["Month", "Orders", "YoY", "MoM", "Shipping", "YoY", "MoM"]],
@@ -574,35 +671,6 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
         margin: { left: 40, right: 40 },
         theme: "grid",
       });
-
-      if (compareMode === "YTD" && combinedCompare) {
-        // @ts-ignore
-        y = doc.lastAutoTable.finalY + 22;
-        if (y > 520) {
-          doc.addPage();
-          y = 40;
-        }
-        doc.setFontSize(11);
-        doc.text("YTD vs Prior YTD — Combined Total", 40, y);
-        y += 10;
-
-        autoTable(doc, {
-          startY: y,
-          head: [["Orders (YTD)", "Orders (Prior)", "YoY", "Shipping (YTD)", "Shipping (Prior)", "YoY"]],
-          body: [[
-            fmtUsdPlain(Number(combinedCompare.order_cur || 0)),
-            fmtUsdPlain(Number(combinedCompare.order_prev || 0)),
-            fmtPct(combinedCompare.order_yoy),
-            fmtUsdPlain(Number(combinedCompare.ship_cur || 0)),
-            fmtUsdPlain(Number(combinedCompare.ship_prev || 0)),
-            fmtPct(combinedCompare.ship_yoy),
-          ]],
-          styles: { fontSize: 8, cellPadding: 3 },
-          headStyles: { fontStyle: "bold" },
-          margin: { left: 40, right: 40 },
-          theme: "grid",
-        });
-      }
 
       doc.save(`performance_${dimension}_${viewMode.toLowerCase()}_${start}_to_${end}.pdf`);
       return;
@@ -691,7 +759,7 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
           </CardHeader>
           <CardContent>
             <div className="grid gap-4 md:grid-cols-12">
-              <div className="space-y-2 md:col-span-3">
+              <div className="space-y-2 md:col-span-2">
                 <Label>Dimension</Label>
                 <Select value={dimension} onValueChange={(v) => setDimension(v as Dimension)}>
                   <SelectTrigger>
@@ -700,6 +768,19 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
                   <SelectContent>
                     <SelectItem value="buyer">Buyer</SelectItem>
                     <SelectItem value="brand">Brand</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2 md:col-span-2">
+                <Label>View Mode</Label>
+                <Select value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="BY_ENTITY">By {dimension === "buyer" ? "Buyer" : "Brand"}</SelectItem>
+                    <SelectItem value="COMBINED">Combined Total</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -718,24 +799,11 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
               </div>
 
               <div className="space-y-2 md:col-span-2">
-                <Label>View Mode</Label>
-                <Select value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="BY_ENTITY">By {dimension === "buyer" ? "Buyer" : "Brand"}</SelectItem>
-                    <SelectItem value="COMBINED">Combined Total</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2 md:col-span-2">
                 <Label>Start (month)</Label>
                 <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
               </div>
 
-              <div className="space-y-2 md:col-span-2">
+              <div className="space-y-2 md:col-span-3">
                 <Label>End (month)</Label>
                 <Input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
               </div>
@@ -826,7 +894,7 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
                     Export Excel
                   </Button>
                   <Button variant="outline" onClick={exportPdf} disabled={isLoading}>
-                    Export PDF (Top 10)
+                    Export PDF
                   </Button>
 
                   {viewMode === "BY_ENTITY" ? (
@@ -850,47 +918,102 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
           </CardContent>
         </Card>
 
-        {compareMode === "YTD" && (viewMode === "COMBINED" ? combinedCompare : compare) ? (
+
+        <div className="grid gap-4 md:grid-cols-4">
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">
-                {viewMode === "COMBINED"
-                  ? `YTD vs Prior YTD — Combined Total (${combinedCompare?.ytdStart.slice(0, 4)} YTD through ${combinedCompare?.ytdEnd.slice(0, 7)})`
-                  : `YTD vs Prior YTD (Top 12) — ${compare?.ytdStart.slice(0, 4)} YTD (through ${compare?.ytdEnd.slice(0, 7)})`}
-              </CardTitle>
+              <CardTitle className="text-sm">Orders Total</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="mb-3 text-sm text-muted-foreground">
-                Current: {(viewMode === "COMBINED" ? combinedCompare?.ytdStart : compare?.ytdStart)?.slice(0, 7)} ~ {(viewMode === "COMBINED" ? combinedCompare?.ytdEnd : compare?.ytdEnd)?.slice(0, 7)} | Prior: {(viewMode === "COMBINED" ? combinedCompare?.prevStart : compare?.prevStart)?.slice(0, 7)} ~ {(viewMode === "COMBINED" ? combinedCompare?.prevEnd : compare?.prevEnd)?.slice(0, 7)}
-              </div>
+              <div className="text-2xl font-semibold tabular-nums">{fmtUsd(kpis.orderTotal)}</div>
+              <div className="mt-1 text-xs text-muted-foreground">{viewMode === "COMBINED" ? "Combined scope" : "Filtered scope"}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">Shipping Total</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-semibold tabular-nums">{fmtUsd(kpis.shipTotal)}</div>
+              <div className="mt-1 text-xs text-muted-foreground">{kpis.latestLabel}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">{kpis.orderTrendLabel}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-semibold"><PctBadge v={kpis.orderTrendValue} /></div>
+              <div className="mt-1 text-xs text-muted-foreground">Combined KPI card</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">{kpis.shipTrendLabel}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-semibold"><PctBadge v={kpis.shipTrendValue} /></div>
+              <div className="mt-1 text-xs text-muted-foreground">Combined KPI card</div>
+            </CardContent>
+          </Card>
+        </div>
 
-              <div className="overflow-auto">
-                {viewMode === "COMBINED" ? (
-                  <table className="min-w-[760px] w-full text-sm">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left py-2 pr-4">View</th>
-                        <th className="text-right py-2 px-2">Orders (YTD)</th>
-                        <th className="text-right py-2 px-2">Orders (Prior)</th>
-                        <th className="text-center py-2 px-2">YoY</th>
-                        <th className="text-right py-2 px-2">Shipping (YTD)</th>
-                        <th className="text-right py-2 px-2">Shipping (Prior)</th>
-                        <th className="text-center py-2 px-2">YoY</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr className="border-b last:border-b-0">
-                        <td className="py-2 pr-4">Combined Total</td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(combinedCompare?.order_cur || 0)}</td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(combinedCompare?.order_prev || 0)}</td>
-                        <td className="py-2 px-2 text-center"><PctBadge v={combinedCompare?.order_yoy ?? null} /></td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(combinedCompare?.ship_cur || 0)}</td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(combinedCompare?.ship_prev || 0)}</td>
-                        <td className="py-2 px-2 text-center"><PctBadge v={combinedCompare?.ship_yoy ?? null} /></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                ) : (
+        {compareMode === "YTD" ? (
+          viewMode === "COMBINED" ? (
+            compareCombined ? (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">
+                    YTD vs Prior YTD — Combined Total ({compareCombined.ytdStart.slice(0, 4)} through {compareCombined.ytdEnd.slice(0, 7)})
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="mb-3 text-sm text-muted-foreground">
+                    Current: {compareCombined.ytdStart.slice(0, 7)} ~ {compareCombined.ytdEnd.slice(0, 7)} | Prior: {compareCombined.prevStart.slice(0, 7)} ~ {compareCombined.prevEnd.slice(0, 7)}
+                  </div>
+
+                  <div className="overflow-auto">
+                    <table className="min-w-[980px] w-full text-sm">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left py-2 pr-4">Section</th>
+                          <th className="text-right py-2 px-2">Orders (YTD)</th>
+                          <th className="text-right py-2 px-2">Orders (Prior)</th>
+                          <th className="text-center py-2 px-2">YoY</th>
+                          <th className="text-right py-2 px-2">Shipping (YTD)</th>
+                          <th className="text-right py-2 px-2">Shipping (Prior)</th>
+                          <th className="text-center py-2 px-2">YoY</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr className="border-b bg-slate-50 font-medium">
+                          <td className="py-2 pr-4">Combined Total</td>
+                          <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compareCombined.order_cur)}</td>
+                          <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compareCombined.order_prev)}</td>
+                          <td className="py-2 px-2 text-center"><PctBadge v={compareCombined.order_yoy} /></td>
+                          <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compareCombined.ship_cur)}</td>
+                          <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compareCombined.ship_prev)}</td>
+                          <td className="py-2 px-2 text-center"><PctBadge v={compareCombined.ship_yoy} /></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null
+          ) : compare ? (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">
+                  YTD vs Prior YTD (Top 12) — {compare.ytdStart.slice(0, 4)} YTD (through {compare.ytdEnd.slice(0, 7)})
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="mb-3 text-sm text-muted-foreground">
+                  Current: {compare.ytdStart.slice(0, 7)} ~ {compare.ytdEnd.slice(0, 7)} | Prior: {compare.prevStart.slice(0, 7)} ~ {compare.prevEnd.slice(0, 7)}
+                </div>
+
+                <div className="overflow-auto">
                   <table className="min-w-[980px] w-full text-sm">
                     <thead>
                       <tr className="border-b">
@@ -906,14 +1029,14 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
                     <tbody>
                       <tr className="border-b bg-slate-50 font-medium">
                         <td className="py-2 pr-4">TOTAL (TOP 12)</td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare?.total.order_cur || 0)}</td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare?.total.order_prev || 0)}</td>
-                        <td className="py-2 px-2 text-center"><PctBadge v={compare?.total.total_order_yoy ?? null} /></td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare?.total.ship_cur || 0)}</td>
-                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare?.total.ship_prev || 0)}</td>
-                        <td className="py-2 px-2 text-center"><PctBadge v={compare?.total.total_ship_yoy ?? null} /></td>
+                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare.total.order_cur)}</td>
+                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare.total.order_prev)}</td>
+                        <td className="py-2 px-2 text-center"><PctBadge v={compare.total.total_order_yoy} /></td>
+                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare.total.ship_cur)}</td>
+                        <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(compare.total.ship_prev)}</td>
+                        <td className="py-2 px-2 text-center"><PctBadge v={compare.total.total_ship_yoy} /></td>
                       </tr>
-                      {compare?.top.map((r) => (
+                      {compare.top.map((r) => (
                         <tr key={r.name} className="border-b last:border-b-0">
                           <td className="py-2 pr-4">{r.name}</td>
                           <td className="py-2 px-2 text-right tabular-nums">{fmtUsd(r.order_cur)}</td>
@@ -926,10 +1049,10 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
                       ))}
                     </tbody>
                   </table>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null
         ) : null}
 
         <Tabs defaultValue="monthly">
@@ -1183,10 +1306,7 @@ XLSX.writeFile(wb, `performance_${dimension}_${start}_to_${end}.xlsx`);
               YTD vs Prior YTD is computed client-side using <code>monthly_raw</code> so it always matches selected end-month.
             </div>
             <div>
-              Combined Total mode aggregates all visible buyers or brands by month/year and recalculates YoY / MoM from the aggregated totals.
-            </div>
-            <div>
-              PDF export remains internal-minimal (no timestamps / no company name). In By Entity mode it exports Top 10 sections; in Combined mode it exports the combined table.
+              PDF/Excel export supports both By Entity and Combined Total modes.
             </div>
           </CardContent>
         </Card>

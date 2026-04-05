@@ -157,7 +157,9 @@ export async function GET(req: Request) {
       .from("po_headers")
       // ⚠️ 특정 컬럼(brand_name 등) select 금지. 환경별 컬럼 차이로 42703 터짐
       .select(`*, po_lines(*)`)
-      .not("order_date", "is", null);
+      .not("order_date", "is", null)
+      .eq("is_deleted", false)
+      .neq("status", "DELETED");
 
     if (start) pq = pq.gte("order_date", start);
     if (end) pq = pq.lte("order_date", end);
@@ -188,7 +190,8 @@ export async function GET(req: Request) {
       const od = h?.order_date;
       if (!od) continue;
 
-      if (String(h?.status || "").toUpperCase() === "CANCELLED") continue;
+      const poStatus = String(h?.status || "").toUpperCase();
+      if (poStatus === "CANCELLED" || poStatus === "CANCELED" || poStatus === "DELETED") continue;
 
       const ms = monthStartFromDate(od);
       const { year, month } = yearMonthFromMonthStart(ms);
@@ -218,7 +221,7 @@ export async function GET(req: Request) {
           ship_mom_pct: null,
         } as RawRow);
 
-      const lines = (h as any).po_lines || [];
+      const lines = ((h as any).po_lines || []).filter((line: any) => line?.is_deleted !== true);
       let sum = 0;
       for (const line of lines) sum += getPoLineUsdAmount(line);
 

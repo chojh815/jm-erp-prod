@@ -125,7 +125,8 @@ export async function GET(req: NextRequest) {
       .select("id, po_no, buyer_id, buyer_name, order_date, status, origin_id, origin_code, is_deleted")
       .gte("order_date", start)
       .lte("order_date", end)
-      .eq("is_deleted", false);
+      .eq("is_deleted", false)
+      .neq("status", "DELETED");
 
     if (buyerUuidList.length > 0) {
       headersQuery = headersQuery.in("buyer_id", buyerUuidList);
@@ -145,7 +146,10 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, message: he.message }, { status: 500 });
     }
 
-    const headerRows = headers ?? [];
+    const headerRows = (headers ?? []).filter((h: any) => {
+      const st = safeUpper(h?.status || "");
+      return st !== "DELETED" && st !== "CANCELLED" && st !== "CANCELED";
+    });
     const headerIds = headerRows.map((h: any) => h.id);
 
     // Buyer list for UI (기간+필터 기준 header에서 추출)
@@ -166,8 +170,9 @@ export async function GET(req: NextRequest) {
     if (headerIds.length > 0) {
       const { data: lines, error: le } = await supabase
         .from("po_lines")
-        .select("id, po_header_id, amount")
-        .in("po_header_id", headerIds);
+        .select("id, po_header_id, amount, is_deleted")
+        .in("po_header_id", headerIds)
+        .eq("is_deleted", false);
 
       if (le) {
         return NextResponse.json({ ok: false, message: le.message }, { status: 500 });
