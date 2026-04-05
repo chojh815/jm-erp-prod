@@ -89,8 +89,11 @@ export async function GET(_req: NextRequest) {
         const end = asDate(r.converted_date) || asDate(r.feedback_date) || asDate(r.sent_date);
         if (!start || !end) return null;
         return Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 86400000));
-      })
-      .filter((v: any) => typeof v === "number");
+      });
+
+    const safeLeadTimes = leadTimes.filter(
+      (v): v is number => typeof v === "number" && Number.isFinite(v)
+    );
 
     const kpis = {
       total_requests,
@@ -100,7 +103,9 @@ export async function GET(_req: NextRequest) {
       conversion_pct: total_requests ? Math.round((convertedRows.length / total_requests) * 10000) / 100 : 0,
       overdue: overdueRows.length,
       waiting_feedback: waitingRows.length,
-      avg_lead_time_days: leadTimes.length ? Math.round((leadTimes.reduce((a: number, b: number) => a + b, 0) / leadTimes.length) * 10) / 10 : 0,
+      avg_lead_time_days: safeLeadTimes.length
+        ? Math.round((safeLeadTimes.reduce((a, b) => a + b, 0) / safeLeadTimes.length) * 10) / 10
+        : 0,
     };
 
     const buyerMap = new Map<string, any>();
