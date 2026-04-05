@@ -1,73 +1,54 @@
-// /src/app/api/samples/route.ts
+// FIXED VERSION
+import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// 🔹 POST = 샘플 등록
-export async function POST(req: Request) {
-  try {
-    const data = await req.json();
-
-    const { po_no, type, planned_date, carrier, tracking_no } = data;
-
-    const { error } = await supabaseAdmin
-      .from("sample_milestones")
-      .insert([
-        {
-          po_no,
-          type,
-          planned_date,
-          carrier,
-          tracking_no,
-          status: "PLANNED",
-        },
-      ]);
-
-    if (error) throw error;
-
-    return Response.json({ success: true, message: "Sample saved successfully" });
-  } catch (error: any) {
-    return Response.json({ success: false, message: error.message }, { status: 400 });
-  }
-}
-
-// 🔹 GET = 특정 PO의 샘플 목록 조회
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const po_no = searchParams.get("po_no");
-
-  if (!po_no) {
-    return Response.json({ success: false, message: "Missing PO number" }, { status: 400 });
-  }
-
-  const { data, error } = await supabaseAdmin
-    .from("sample_milestones")
-    .select("*")
-    .eq("po_no", po_no)
-    .order("type");
+export async function GET() {
+  const { data: rows, error } = await supabaseAdmin
+    .from("sample_requests")
+    .select("*");
 
   if (error) {
-    return Response.json({ success: false, message: error.message }, { status: 400 });
+    return NextResponse.json({ ok: false, error: error.message });
   }
 
-  return Response.json({ success: true, data });
-}
+  const safeRows = rows || [];
 
-// 🔹 DELETE = 샘플 삭제
-export async function DELETE(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const id = searchParams.get("id");
+  const inProgressRows = safeRows.filter(r => r.progress_status !== "COMPLETED");
+  const completedRows = safeRows.filter(r => r.progress_status === "COMPLETED");
+  const convertedRows = safeRows.filter(r => r.result_status === "CONVERTED_TO_ORDER");
+  const overdueRows = safeRows.filter(r => r.alert_status === "OVERDUE");
+  const waitingRows = safeRows.filter(r =>
+    ["WAITING_FEEDBACK", "FOLLOW_UP_DUE"].includes(r.alert_status)
+  );
 
-  if (!id) {
-    return Response.json({ success: false, message: "Missing ID" }, { status: 400 });
-  }
+  const leadTimes = safeRows.map(r => {
+    if (!r.request_date || !r.feedback_date) return null;
+    const start = new Date(r.request_date).getTime();
+    const end = new Date(r.feedback_date).getTime();
+    if (!start || !end) return null;
+    return (end - start) / (1000 * 60 * 60 * 24);
+  });
 
-  const { error } = await supabaseAdmin
-    .from("sample_milestones")
-    .delete()
-    .eq("id", id);
+  const safeLeadTimes = (leadTimes ?? []).filter(
+    (v): v is number => typeof v === "number" && Number.isFinite(v)
+  );
 
-  if (error) {
-    return Response.json({ success: false, message: error.message }, { status: 400 });
-  }
+  const kpis = {
+    total_requests: safeRows.length,
+    in_progress: inProgressRows.length,
+    completed: completedRows.length,
+    converted_requests: convertedRows.length,
+    conversion_pct: safeRows.length
+      ? (convertedRows.length / safeRows.length) * 100
+      : 0,
+    overdue: overdueRows.length,
+    waiting_feedback: waitingRows.length,
+    avg_lead_time_days: safeLeadTimes.length
+      ? Math.round(
+          (safeLeadTimes.reduce((a, b) => a + b, 0) / safeLeadTimes.length) * 10
+        ) / 10
+      : 0,
+  };
 
-  return Response.json({ success: true, message: "Sample deleted" });
+  return NextResponse.json({ ok: true, kpis });
 }
