@@ -92,7 +92,6 @@ async function generateNo(field: "request_no" | "temp_style_no", buyerCodeRaw: a
   const { data, error } = await supabaseAdmin
     .from("sample_requests")
     .select(field)
-    .eq("is_deleted", false)
     .ilike(field, `${prefix}%`);
 
   if (error) throw error;
@@ -196,8 +195,6 @@ function buildPayload(body: any) {
 
   return {
     request_title: asText(body.request_title) || null,
-    request_no: asText(body.request_no) || undefined,
-    temp_style_no: asText(body.temp_style_no) || undefined,
     buyer_style_no: asText(body.buyer_style_no) || null,
     sample_type: asText(body.sample_type) || "New Sample",
     priority: asText(body.priority) || "Normal",
@@ -348,12 +345,16 @@ export async function POST(req: NextRequest) {
     let lastError: any = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const freshNos = await generateFreshNumbers(payload.buyer_code, payload.request_date);
-      const insertPayload = {
-        ...payload,
-        request_no: freshNos.request_no,
-        temp_style_no: freshNos.temp_style_no,
-      };
+      const insertPayload: any = { ...payload };
+
+      // Prefer the DB trigger (trg_sample_requests_fill_numbers) as the source of truth.
+      // If a duplicate still occurs, fall back to explicit app-side generation that looks at
+      // all historical rows, including soft-deleted ones, because request_no is globally unique.
+      if (attempt > 1) {
+        const freshNos = await generateFreshNumbers(payload.buyer_code, payload.request_date);
+        insertPayload.request_no = freshNos.request_no;
+        insertPayload.temp_style_no = freshNos.temp_style_no;
+      }
 
       const { data, error } = await supabaseAdmin
         .from("sample_requests")

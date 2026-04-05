@@ -53,8 +53,6 @@ function buildPayload(body: any) {
   if (status !== "COMPLETED" && (result_status === "CONVERTED_TO_ORDER" || result_status === "CLOSED_NO_ORDER")) result_status = "WAITING";
   return {
     request_title: asText(body.request_title) || null,
-    request_no: asText(body.request_no) || undefined,
-    temp_style_no: asText(body.temp_style_no) || undefined,
     buyer_style_no: asText(body.buyer_style_no) || null,
     buyer_id: asText(body.buyer_id) || null,
     buyer_code: normalizeBuyerCode(body.buyer_code || body.buyer_name),

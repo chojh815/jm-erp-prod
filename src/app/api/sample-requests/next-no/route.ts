@@ -14,7 +14,6 @@ async function generateNo(field: "request_no" | "temp_style_no", prefix: string)
   const { data, error } = await supabaseAdmin
     .from("sample_requests")
     .select(field)
-    .eq("is_deleted", false)
     .ilike(field, `${prefix}%`);
   if (error) throw error;
 
