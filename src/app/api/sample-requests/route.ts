@@ -110,10 +110,33 @@ async function generateFreshNumbers(buyerCodeRaw: any, requestDate?: string | nu
   return { request_no, temp_style_no };
 }
 
+function normalizeResultStatus(v: any) {
+  const s = asText(v).toUpperCase();
+  if (!s || s === "CONVERTED") return s === "CONVERTED" ? "CONVERTED_TO_ORDER" : "WAITING";
+  if (s === "CLOSED" || s === "NO_ORDER") return "CLOSED_NO_ORDER";
+  return s;
+}
+
+function normalizeProgressStatus(v: any, resultStatus?: any) {
+  const s = asText(v).toUpperCase();
+  const result = normalizeResultStatus(resultStatus);
+
+  if (s === "CONVERTED_TO_ORDER" || s === "CLOSED_NO_ORDER") return "COMPLETED";
+  if (result === "CONVERTED_TO_ORDER" || result === "CLOSED_NO_ORDER") return "COMPLETED";
+
+  if (["REQUESTED"].includes(s)) return "REQUESTED";
+  if (["DEVELOPING", "IN_PROGRESS", "READY_TO_SEND", "REVISE_REQUIRED", "APPROVED"].includes(s)) return "DEVELOPING";
+  if (["SENT"].includes(s)) return "SENT";
+  if (["FEEDBACK", "WAITING_FEEDBACK", "FEEDBACK_RECEIVED", "REJECTED"].includes(s)) return "FEEDBACK";
+  if (["COMPLETED"].includes(s)) return "COMPLETED";
+
+  return "REQUESTED";
+}
+
 function computeAlertStatus(row: any) {
   const today = new Date().toISOString().slice(0, 10);
-  const resultStatus = asText(row?.result_status).toUpperCase();
-  const status = asText(row?.status).toUpperCase();
+  const resultStatus = normalizeResultStatus(row?.result_status);
+  const status = normalizeProgressStatus(row?.status, resultStatus);
   const targetShipDate = asDate(row?.target_ship_date);
   const sentDate = asDate(row?.sent_date);
   const feedbackDate = asDate(row?.feedback_date);
@@ -121,9 +144,9 @@ function computeAlertStatus(row: any) {
   const converted = asBool(row?.is_converted_to_order, false);
 
   if (converted || resultStatus === "CONVERTED_TO_ORDER") return "DONE";
-  if (["REJECTED", "CLOSED_NO_ORDER", "CLOSED NO ORDER"].includes(resultStatus)) return "DONE";
+  if (resultStatus === "CLOSED_NO_ORDER") return "DONE";
 
-  if (!sentDate) {
+  if (status === "REQUESTED" || status === "DEVELOPING") {
     if (!targetShipDate) return "ON_TRACK";
     if (targetShipDate < today) return "OVERDUE";
     const soon = new Date(today);
@@ -131,27 +154,14 @@ function computeAlertStatus(row: any) {
     return targetShipDate <= soon.toISOString().slice(0, 10) ? "DUE_SOON" : "ON_TRACK";
   }
 
-  if (!feedbackDate) {
-    if (nextFollowUpDate && nextFollowUpDate < today) return "FOLLOW_UP_DUE";
-    return "WAITING_FEEDBACK";
+  if (status === "SENT" || status === "FEEDBACK") {
+    if (!feedbackDate) {
+      if (nextFollowUpDate && nextFollowUpDate < today) return "FOLLOW_UP_DUE";
+      return "WAITING_FEEDBACK";
+    }
   }
 
   return "ON_TRACK";
-}
-
-function normalizeProgressStatus(v: any, resultStatus?: any) {
-  const s = asText(v).toUpperCase();
-  const result = asText(resultStatus).toUpperCase();
-  if (s === "CONVERTED_TO_ORDER" || s === "CLOSED_NO_ORDER") return "COMPLETED";
-  if (result === "CONVERTED_TO_ORDER" || result === "CLOSED_NO_ORDER") return "COMPLETED";
-  return s || "REQUESTED";
-}
-
-function normalizeResultStatus(v: any) {
-  const s = asText(v).toUpperCase();
-  if (!s || s === "CONVERTED") return s === "CONVERTED" ? "CONVERTED_TO_ORDER" : "WAITING";
-  if (s === "CLOSED" || s === "NO_ORDER") return "CLOSED_NO_ORDER";
-  return s;
 }
 
 function normalizeRow(r: any) {
@@ -161,7 +171,7 @@ function normalizeRow(r: any) {
   const today = new Date().toISOString().slice(0, 10);
   const result_status = normalizeResultStatus(r.result_status);
   const progress_status = normalizeProgressStatus(r.status || r.progress_status, result_status);
-  const alertStatus = asText(r.alert_status) || computeAlertStatus({ ...r, result_status, status: progress_status });
+  const alert_status = asText(r.alert_status) || computeAlertStatus({ ...r, result_status, status: progress_status });
 
   return {
     ...r,
@@ -170,7 +180,7 @@ function normalizeRow(r: any) {
     our_owner_name: asText(r.owner_name) || asText(r.our_owner_name),
     our_owner_email: asText(r.owner_email) || asText(r.our_owner_email),
     requested_items_text: asText(r.progress_note) || asText(r.requested_items_text),
-    alert_status: alertStatus,
+    alert_status,
     days_open: requestDate ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(requestDate).getTime()) / 86400000)) : 0,
     days_after_sent: sentDate ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(sentDate).getTime()) / 86400000)) : null,
     days_waiting_feedback: sentDate && !feedbackDate ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(sentDate).getTime()) / 86400000)) : null,
@@ -187,11 +197,6 @@ function buildPayload(body: any) {
   if (result_status === "CONVERTED_TO_ORDER" || result_status === "CLOSED_NO_ORDER") {
     status = "COMPLETED";
   }
-  if (status !== "COMPLETED" && (result_status === "CONVERTED_TO_ORDER" || result_status === "CLOSED_NO_ORDER")) {
-    result_status = "WAITING";
-  }
-
-  const isConverted = asBool(body.is_converted_to_order, false) || result_status === "CONVERTED_TO_ORDER";
 
   return {
     request_title: asText(body.request_title) || null,
@@ -210,7 +215,7 @@ function buildPayload(body: any) {
     owner_name: asText(body.our_owner_name || body.owner_name) || null,
     owner_email: asText(body.our_owner_email || body.owner_email) || null,
     current_owner: asText(body.current_owner || body.our_owner_name || body.owner_name) || null,
-    current_step: asText(body.current_step) || "Requested",
+    current_step: asText(body.current_step) || status,
 
     request_date: asDate(body.request_date) || new Date().toISOString().slice(0, 10),
     due_date: asDate(body.due_date),
@@ -251,7 +256,7 @@ function buildPayload(body: any) {
     charged_amount: asNum(body.charged_amount, 0),
     charged_currency: asText(body.charged_currency) || "USD",
 
-    is_converted_to_order: isConverted,
+    is_converted_to_order: asBool(body.is_converted_to_order, false) || result_status === "CONVERTED_TO_ORDER",
     po_header_id: asText(body.po_header_id) || null,
     po_no: asText(body.po_no) || null,
     estimated_order_value: asNum(body.estimated_order_value, 0),
@@ -267,6 +272,13 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const q = asText(searchParams.get("q")).toLowerCase();
     const buyerId = asText(searchParams.get("buyer_id"));
+    const rawProgressFilter = asText(searchParams.get("progress_status"));
+    const progressFilter = rawProgressFilter ? normalizeProgressStatus(rawProgressFilter) : "";
+    const rawResultFilter = asText(searchParams.get("result_status"));
+    const resultFilter = rawResultFilter ? normalizeResultStatus(rawResultFilter) : "";
+    const alertFilter = asText(searchParams.get("alert_status")).toUpperCase();
+    const dateFrom = asDate(searchParams.get("date_from"));
+    const dateTo = asDate(searchParams.get("date_to"));
 
     let query = supabaseAdmin
       .from("sample_requests")
@@ -276,30 +288,48 @@ export async function GET(req: NextRequest) {
       .order("created_at", { ascending: false });
 
     if (buyerId) query = query.eq("buyer_id", buyerId);
+    if (dateFrom) query = query.gte("request_date", dateFrom);
+    if (dateTo) query = query.lte("request_date", dateTo);
 
     const { data, error, count } = await query.limit(500);
     if (error) return bad(error.message || "Failed to load sample requests", 500);
 
     let items = (data || []).map(normalizeRow);
+
     if (q) {
-      items = items.filter((r: any) => [
-        r.request_title,
-        r.request_no,
-        r.buyer_name,
-        r.progress_note,
-        r.buyer_additional_request,
-        r.buyer_feedback,
-      ].some((v: any) => asText(v).toLowerCase().includes(q)));
+      items = items.filter((r: any) =>
+        [
+          r.request_title,
+          r.request_no,
+          r.buyer_name,
+          r.progress_note,
+          r.buyer_additional_request,
+          r.buyer_feedback,
+          r.po_no,
+        ].some((v: any) => asText(v).toLowerCase().includes(q))
+      );
+    }
+
+    if (progressFilter) {
+      items = items.filter((r: any) => normalizeProgressStatus(r.progress_status, r.result_status) === progressFilter);
+    }
+
+    if (resultFilter) {
+      items = items.filter((r: any) => normalizeResultStatus(r.result_status) === resultFilter);
+    }
+
+    if (alertFilter) {
+      items = items.filter((r: any) => asText(r.alert_status).toUpperCase() === alertFilter);
     }
 
     const summary = {
       total_requests: items.length,
       in_progress: items.filter((r: any) => normalizeProgressStatus(r.progress_status, r.result_status) !== "COMPLETED").length,
       completed: items.filter((r: any) => normalizeProgressStatus(r.progress_status, r.result_status) === "COMPLETED").length,
-      converted_requests: items.filter((r: any) => asText(r.result_status).toUpperCase() === "CONVERTED_TO_ORDER").length,
+      converted_requests: items.filter((r: any) => normalizeResultStatus(r.result_status) === "CONVERTED_TO_ORDER").length,
       conversion_pct: 0,
       overdue: items.filter((r: any) => asText(r.alert_status).toUpperCase() === "OVERDUE").length,
-      waiting_feedback: items.filter((r: any) => asText(r.alert_status).toUpperCase() === "WAITING_FEEDBACK" || asText(r.result_status).toUpperCase() === "WAITING").length,
+      waiting_feedback: items.filter((r: any) => asText(r.alert_status).toUpperCase() === "WAITING_FEEDBACK").length,
     };
     summary.conversion_pct = summary.total_requests > 0 ? Math.round((summary.converted_requests / summary.total_requests) * 10000) / 100 : 0;
 
@@ -314,16 +344,33 @@ export async function GET(req: NextRequest) {
         waiting: 0,
       };
       cur.requests += 1;
-      if (asText(r.result_status).toUpperCase() === "CONVERTED_TO_ORDER") cur.converted += 1;
+      if (normalizeResultStatus(r.result_status) === "CONVERTED_TO_ORDER") cur.converted += 1;
       if (asText(r.alert_status).toUpperCase() === "OVERDUE") cur.overdue += 1;
-      if (asText(r.alert_status).toUpperCase() === "WAITING_FEEDBACK" || asText(r.result_status).toUpperCase() === "WAITING") cur.waiting += 1;
+      if (asText(r.alert_status).toUpperCase() === "WAITING_FEEDBACK") cur.waiting += 1;
       buyerMap.set(key, cur);
     }
+
     const buyer_kpis = Array.from(buyerMap.values())
-      .map((r: any) => ({ ...r, conversion_pct: r.requests > 0 ? Math.round((r.converted / r.requests) * 10000) / 100 : 0 }))
+      .map((r: any) => ({
+        ...r,
+        conversion_pct: r.requests > 0 ? Math.round((r.converted / r.requests) * 10000) / 100 : 0,
+      }))
       .sort((a, b) => a.buyer_name.localeCompare(b.buyer_name));
 
-    return ok({ items, total: count ?? items.length, summary, buyer_kpis });
+    return ok({
+      items,
+      total: count ?? items.length,
+      summary,
+      buyer_kpis,
+      filters: {
+        buyer_id: buyerId || null,
+        progress_status: progressFilter || null,
+        result_status: resultFilter || null,
+        date_from: dateFrom,
+        date_to: dateTo,
+        q: q || "",
+      },
+    });
   } catch (e: any) {
     return bad(e?.message || "Unknown error", 500);
   }
@@ -347,9 +394,6 @@ export async function POST(req: NextRequest) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const insertPayload: any = { ...payload };
 
-      // Prefer the DB trigger (trg_sample_requests_fill_numbers) as the source of truth.
-      // If a duplicate still occurs, fall back to explicit app-side generation that looks at
-      // all historical rows, including soft-deleted ones, because request_no is globally unique.
       if (attempt > 1) {
         const freshNos = await generateFreshNumbers(payload.buyer_code, payload.request_date);
         insertPayload.request_no = freshNos.request_no;
@@ -374,11 +418,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return bad(
-      "Failed to generate a unique Request No. Please save again.",
-      409,
-      { detail: lastError, reason: "request_no_conflict" }
-    );
+    return bad("Failed to generate a unique Request No. Please save again.", 409, {
+      detail: lastError,
+      reason: "request_no_conflict",
+    });
   } catch (e: any) {
     return bad(e?.message || "Unknown error", 500);
   }

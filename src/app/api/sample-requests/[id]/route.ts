@@ -28,8 +28,25 @@ function isDuplicateKeyError(error: any, keyName?: string) {
   if (keyName) return text.includes("duplicate key") && text.includes(keyName.toLowerCase());
   return text.includes("duplicate key") || text.includes("23505");
 }
-function normalizeResultStatus(v: any) { const s = asText(v).toUpperCase(); if (!s) return "WAITING"; if (s === "CONVERTED") return "CONVERTED_TO_ORDER"; if (s === "CLOSED" || s === "NO_ORDER") return "CLOSED_NO_ORDER"; return s; }
-function normalizeProgressStatus(v: any, resultStatus?: any) { const s = asText(v).toUpperCase(); const result = normalizeResultStatus(resultStatus); if (s === "CONVERTED_TO_ORDER" || s === "CLOSED_NO_ORDER") return "COMPLETED"; if (result === "CONVERTED_TO_ORDER" || result === "CLOSED_NO_ORDER") return "COMPLETED"; return s || "REQUESTED"; }
+function normalizeResultStatus(v: any) {
+  const s = asText(v).toUpperCase();
+  if (!s) return "WAITING";
+  if (s === "CONVERTED") return "CONVERTED_TO_ORDER";
+  if (s === "CLOSED" || s === "NO_ORDER") return "CLOSED_NO_ORDER";
+  return s;
+}
+function normalizeProgressStatus(v: any, resultStatus?: any) {
+  const s = asText(v).toUpperCase();
+  const result = normalizeResultStatus(resultStatus);
+  if (s === "CONVERTED_TO_ORDER" || s === "CLOSED_NO_ORDER") return "COMPLETED";
+  if (result === "CONVERTED_TO_ORDER" || result === "CLOSED_NO_ORDER") return "COMPLETED";
+  if (["REQUESTED"].includes(s)) return "REQUESTED";
+  if (["DEVELOPING", "IN_PROGRESS", "READY_TO_SEND", "REVISE_REQUIRED", "APPROVED"].includes(s)) return "DEVELOPING";
+  if (["SENT"].includes(s)) return "SENT";
+  if (["FEEDBACK", "WAITING_FEEDBACK", "FEEDBACK_RECEIVED", "REJECTED"].includes(s)) return "FEEDBACK";
+  if (["COMPLETED"].includes(s)) return "COMPLETED";
+  return "REQUESTED";
+}
 
 function normalizeRow(r: any) {
   const result_status = normalizeResultStatus(r.result_status);
@@ -50,7 +67,6 @@ function buildPayload(body: any) {
   let result_status = normalizeResultStatus(body.result_status);
   let status = normalizeProgressStatus(body.progress_status || body.status, result_status);
   if (result_status === "CONVERTED_TO_ORDER" || result_status === "CLOSED_NO_ORDER") status = "COMPLETED";
-  if (status !== "COMPLETED" && (result_status === "CONVERTED_TO_ORDER" || result_status === "CLOSED_NO_ORDER")) result_status = "WAITING";
   return {
     request_title: asText(body.request_title) || null,
     buyer_style_no: asText(body.buyer_style_no) || null,
@@ -63,7 +79,7 @@ function buildPayload(body: any) {
     owner_name: asText(body.our_owner_name || body.owner_name) || null,
     owner_email: asText(body.our_owner_email || body.owner_email) || null,
     current_owner: asText(body.current_owner || body.our_owner_name || body.owner_name) || null,
-    current_step: asText(body.current_step) || "Requested",
+    current_step: asText(body.current_step) || status,
     request_date: asDate(body.request_date),
     due_date: asDate(body.due_date),
     target_ship_date: asDate(body.target_ship_date),
@@ -96,9 +112,9 @@ function buildPayload(body: any) {
     po_header_id: asText(body.po_header_id) || null,
     po_no: asText(body.po_no) || null,
     estimated_order_value: asNum(body.estimated_order_value, 0),
-    attachments: asJsonArray(body.attachments),
-    reference_images: asJsonArray(body.reference_images),
-    shipment_proof_files: asJsonArray(body.shipment_proof_files),
+    attachments: asJsonArray(body.attachments ?? []),
+    reference_images: asJsonArray(body.reference_images ?? []),
+    shipment_proof_files: asJsonArray(body.shipment_proof_files ?? []),
   };
 }
 
@@ -119,7 +135,13 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const { id } = await ctx.params;
     const body = await req.json();
     const payload = buildPayload(body);
-    const { data, error } = await supabaseAdmin.from("sample_requests").update(payload).eq("id", id).eq("is_deleted", false).select("*").maybeSingle();
+    const { data, error } = await supabaseAdmin
+      .from("sample_requests")
+      .update(payload)
+      .eq("id", id)
+      .eq("is_deleted", false)
+      .select("*")
+      .maybeSingle();
     if (error) {
       if (isDuplicateKeyError(error, "sample_requests_request_no_key") || isDuplicateKeyError(error, "request_no")) {
         return bad("Request No already exists.", 409, { reason: "request_no_conflict", detail: error });

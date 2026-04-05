@@ -18,7 +18,7 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 
-type DatePreset = "MTD" | "LAST_30" | "YTD" | "CUSTOM";
+type DatePreset = "MTD" | "LAST_30" | "LAST_90" | "LAST_12_MONTHS" | "YTD" | "CUSTOM";
 
 type BuyerOption = { id: string; code: string; name: string };
 type SiteOption = { id: string; code: string; name: string };
@@ -32,7 +32,10 @@ type Kpi = {
     | "invoiced"
     | "collected"
     | "ar"
-    | "at_risk";
+    | "at_risk"
+    | "sample_requests"
+    | "sample_waiting_feedback"
+    | "sample_overdue";
   label: string;
   value_usd: number;
   delta_pct: number | null; // vs previous period
@@ -81,6 +84,19 @@ type CashWatchRow = {
   balance_usd: number | null;
 };
 
+type SampleListRow = {
+  id?: string | null;
+  request_no: string | null;
+  request_title: string | null;
+  buyer_name: string | null;
+  request_date: string | null;
+  target_ship_date: string | null;
+  alert_status: string | null;
+  progress_status: string | null;
+  result_status: string | null;
+  days_open?: number | null;
+};
+
 type OverviewResponse = {
   filters_echo: {
     preset: DatePreset;
@@ -98,6 +114,8 @@ type OverviewResponse = {
     at_risk: AtRiskRow[];
     next_ship: NextShipRow[];
     cash_watch: CashWatchRow[];
+    sample_overdue?: SampleListRow[];
+    sample_waiting_feedback?: SampleListRow[];
   };
 };
 
@@ -113,6 +131,10 @@ function fmtPct(n: number | null | undefined) {
   if (n === null || n === undefined) return "—";
   const sign = n > 0 ? "+" : "";
   return `${sign}${n.toFixed(1)}%`;
+}
+function fmtCount(n: number | null | undefined) {
+  const v = typeof n === "number" ? n : 0;
+  return Math.round(v).toLocaleString();
 }
 function isoToday() {
   const d = new Date();
@@ -310,7 +332,13 @@ export default function OverviewDashboardPage() {
   const status_dist =
     raw?.status_dist ?? raw?.status_distribution ?? raw?.statusDist ?? [];
 
-  const lists = raw?.lists ?? { at_risk: [], next_ship: [], cash_watch: [] };
+  const lists = {
+    at_risk: raw?.lists?.at_risk ?? [],
+    next_ship: raw?.lists?.next_ship ?? [],
+    cash_watch: raw?.lists?.cash_watch ?? [],
+    sample_overdue: (raw as any)?.lists?.sample_overdue ?? [],
+    sample_waiting_feedback: (raw as any)?.lists?.sample_waiting_feedback ?? [],
+  };
 
   setData({ ...raw, trend, status_dist, lists });
 })
@@ -358,6 +386,24 @@ export default function OverviewDashboardPage() {
   // Drilldown navigation
   function go(path: string) {
     router.push(path);
+  }
+
+  function goSample(filters: Record<string, string | null | undefined>) {
+    const sp = new URLSearchParams();
+    Object.entries(filters).forEach(([k, v]) => {
+      if (v && String(v).trim()) sp.set(k, String(v));
+    });
+    const q = sp.toString();
+    router.push(`/sample-requests${q ? `?${q}` : ""}`);
+  }
+
+  function firstRowDrilldown(filters: Record<string, string | null | undefined>, rows: SampleListRow[] | undefined) {
+    const first = (rows || []).find((r) => r?.id || r?.request_no);
+    goSample({
+      ...filters,
+      selected_id: first?.id || undefined,
+      request_no: first?.request_no || undefined,
+    });
   }
 
   const headerRight = (
@@ -421,8 +467,7 @@ export default function OverviewDashboardPage() {
                     <SelectItem value="LAST_30">Last 30 Days</SelectItem>
                   <SelectItem value="LAST_90">Last 90 Days</SelectItem>
                   <SelectItem value="LAST_12_MONTHS">Last 12 Months</SelectItem>
-                  <SelectItem value="YTD">Year to Date</SelectItem>
-                    <SelectItem value="YTD">Year to Date (YTD)</SelectItem>
+                  <SelectItem value="YTD">Year to Date (YTD)</SelectItem>
                     <SelectItem value="CUSTOM">Custom</SelectItem>
                   </SelectContent>
                 </Select>
@@ -623,6 +668,24 @@ export default function OverviewDashboardPage() {
         {/* KPI Grid */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <KpiCard
+            title="Sample Requests"
+            kpi={kpiMap.get("sample_requests")}
+            onClick={() => firstRowDrilldown({}, [
+              ...((data?.lists.sample_overdue || []) as SampleListRow[]),
+              ...((data?.lists.sample_waiting_feedback || []) as SampleListRow[]),
+            ])}
+          />
+          <KpiCard
+            title="Sample Waiting Feedback"
+            kpi={kpiMap.get("sample_waiting_feedback")}
+            onClick={() => firstRowDrilldown({ alert_status: "WAITING_FEEDBACK" }, (data?.lists.sample_waiting_feedback || []) as SampleListRow[])}
+          />
+          <KpiCard
+            title="Sample Overdue"
+            kpi={kpiMap.get("sample_overdue")}
+            onClick={() => firstRowDrilldown({ alert_status: "OVERDUE" }, (data?.lists.sample_overdue || []) as SampleListRow[])}
+          />
+          <KpiCard
             title="Orders (MTD)"
             kpi={kpiMap.get("orders")}
             onClick={() => go("/po/list")}
@@ -708,6 +771,8 @@ export default function OverviewDashboardPage() {
                 <TabsTrigger value="at_risk">At Risk</TabsTrigger>
                 <TabsTrigger value="next_ship">Next 7 Days Ship Plan</TabsTrigger>
                 <TabsTrigger value="cash_watch">Cash Watch (AR Top)</TabsTrigger>
+                <TabsTrigger value="sample_overdue">Sample Overdue</TabsTrigger>
+                <TabsTrigger value="sample_waiting_feedback">Sample Waiting Feedback</TabsTrigger>
               </TabsList>
 
               <TabsContent value="at_risk" className="mt-3">
@@ -719,11 +784,79 @@ export default function OverviewDashboardPage() {
               <TabsContent value="cash_watch" className="mt-3">
                 <CashWatchTable rows={data?.lists.cash_watch || []} />
               </TabsContent>
+              <TabsContent value="sample_overdue" className="mt-3">
+                <SampleListTable
+                  rows={(data?.lists.sample_overdue || []) as SampleListRow[]}
+                  onOpenAll={() => goSample({ alert_status: "OVERDUE" })}
+                  onOpenRow={(row) => goSample({ alert_status: "OVERDUE", selected_id: row.id || undefined, request_no: row.request_no || undefined })}
+                />
+              </TabsContent>
+              <TabsContent value="sample_waiting_feedback" className="mt-3">
+                <SampleListTable
+                  rows={(data?.lists.sample_waiting_feedback || []) as SampleListRow[]}
+                  onOpenAll={() => goSample({ alert_status: "WAITING_FEEDBACK" })}
+                  onOpenRow={(row) => goSample({ alert_status: "WAITING_FEEDBACK", selected_id: row.id || undefined, request_no: row.request_no || undefined })}
+                />
+              </TabsContent>
             </Tabs>
           </CardContent>
         </Card>
       </div>
     </AppShell>
+  );
+}
+
+function SampleListTable({
+  rows,
+  onOpenAll,
+  onOpenRow,
+}: {
+  rows: SampleListRow[];
+  onOpenAll: () => void;
+  onOpenRow?: (row: SampleListRow) => void;
+}) {
+  if (!rows?.length) {
+    return <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">No sample requests found.</div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-end">
+        <Button variant="outline" size="sm" onClick={onOpenAll}>Open filtered Sample Requests</Button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b">
+              <th className="p-2 text-left">Request No</th>
+              <th className="p-2 text-left">Title</th>
+              <th className="p-2 text-left">Buyer</th>
+              <th className="p-2 text-left">Request Date</th>
+              <th className="p-2 text-left">Target Ship</th>
+              <th className="p-2 text-left">Alert</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, idx) => (
+              <tr
+                key={`${r.id || r.request_no || idx}`}
+                className={`border-b last:border-0 ${onOpenRow ? "cursor-pointer hover:bg-muted/40" : ""}`}
+                onClick={() => onOpenRow?.(r)}
+              >
+                <td className="p-2">{r.request_no || "—"}</td>
+                <td className="p-2">{r.request_title || "—"}</td>
+                <td className="p-2">{r.buyer_name || "—"}</td>
+                <td className="p-2">{r.request_date || "—"}</td>
+                <td className="p-2">{r.target_ship_date || "—"}</td>
+                <td className="p-2">
+                  <Badge variant="secondary" className="rounded-full">{r.alert_status || "—"}</Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -736,6 +869,8 @@ function KpiCard({
   kpi?: Kpi;
   onClick: () => void;
 }) {
+  const isSampleCount = !!kpi?.key && String(kpi.key).startsWith("sample_");
+
   return (
     <Card className="rounded-2xl hover:shadow-sm transition cursor-pointer" onClick={onClick}>
       <CardHeader className="pb-2">
@@ -743,7 +878,7 @@ function KpiCard({
       </CardHeader>
       <CardContent className="space-y-1">
         <div className="text-2xl font-semibold">
-          {fmtMoneyUSD(kpi?.value_usd ?? 0)}
+          {isSampleCount ? fmtCount(kpi?.value_usd ?? 0) : fmtMoneyUSD(kpi?.value_usd ?? 0)}
         </div>
         <div className="flex items-center justify-between text-sm">
           <Badge variant="secondary" className="rounded-full">
