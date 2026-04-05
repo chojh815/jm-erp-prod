@@ -218,6 +218,19 @@ export default function PerformanceDashboardPage() {
   }, [yearly, dimension]);
 
 
+  const entitySummary = React.useMemo(() => {
+    const m = new Map<string, { orderTotal: number; shipTotal: number }>();
+    for (const r of monthly) {
+      const key = dimension === "buyer" ? (r.buyer_name || "—") : (r.brand_name || "—");
+      const prev = m.get(key) || { orderTotal: 0, shipTotal: 0 };
+      prev.orderTotal += Number(r.order_usd || 0);
+      prev.shipTotal += Number(r.ship_usd || 0);
+      m.set(key, prev);
+    }
+    return m;
+  }, [monthly, dimension]);
+
+
   const combinedMonthly = React.useMemo(() => {
     const m = new Map<string, {
       month_start: string;
@@ -1107,8 +1120,18 @@ export default function PerformanceDashboardPage() {
             ) : (
               monthlyGrouped.map(([name, list]) => (
                 <Card key={name}>
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 space-y-3">
                     <CardTitle className="text-base">{name}</CardTitle>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border bg-muted/20 px-4 py-3">
+                        <div className="text-xs text-muted-foreground">Orders</div>
+                        <div className="mt-1 text-2xl font-semibold tabular-nums">{fmtUsd(entitySummary.get(name)?.orderTotal || 0)}</div>
+                      </div>
+                      <div className="rounded-xl border bg-muted/20 px-4 py-3">
+                        <div className="text-xs text-muted-foreground">Shipping</div>
+                        <div className="mt-1 text-2xl font-semibold tabular-nums">{fmtUsd(entitySummary.get(name)?.shipTotal || 0)}</div>
+                      </div>
+                    </div>
                   </CardHeader>
                   <CardContent>
                     <div className="overflow-auto">
@@ -1188,8 +1211,18 @@ export default function PerformanceDashboardPage() {
             ) : (
               yearlyGrouped.map(([name, list]) => (
                 <Card key={name}>
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 space-y-3">
                     <CardTitle className="text-base">{name}</CardTitle>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border bg-muted/20 px-4 py-3">
+                        <div className="text-xs text-muted-foreground">Orders</div>
+                        <div className="mt-1 text-2xl font-semibold tabular-nums">{fmtUsd(entitySummary.get(name)?.orderTotal || 0)}</div>
+                      </div>
+                      <div className="rounded-xl border bg-muted/20 px-4 py-3">
+                        <div className="text-xs text-muted-foreground">Shipping</div>
+                        <div className="mt-1 text-2xl font-semibold tabular-nums">{fmtUsd(entitySummary.get(name)?.shipTotal || 0)}</div>
+                      </div>
+                    </div>
                   </CardHeader>
                   <CardContent>
                     <div className="overflow-auto">
