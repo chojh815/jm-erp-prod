@@ -1,22 +1,9 @@
 /**
  * src/app/api/work-sheets/list/route.ts
  *
- * Goals:
- * 1) Never reference optional/missing columns directly (ex: ws_no) -> avoid 500
- * 2) buyer_name / buyer_code backfill using buyer_id -> companies (and optionally patch DB)
- * 3) Avoid showing duplicate PO rows in list (default: keep latest row per po_no)
- * 4) IMPORTANT: Hide work sheets whose PO has been soft-deleted (po_headers.is_deleted=true)
- *    or status=DELETED (if you use status as a delete marker too).
- * 5) IMPORTANT: Hide "broken" rows (missing po_no / buyer_id) so UI won't show '-' rows.
- *
- * Query params:
- * - q: search by po_no / buyer_name / buyer_code / work_sheet_no (ws_no)
- *      + buyer_style_no (header) + buyer_style (line)
- *      + jm_style_no (line)
- * - status: ALL | DRAFT | ... (case-insensitive)
- * - all=1 : return all rows (no dedupe)
- * - include_empty=1 : include rows with missing po_no/buyer_id (default: hidden)
- * - debug=1 : include debug flags to compare local/prod env
+ * Fixes:
+ * 1) Qty fallback: prefer aggregated work_sheet_lines.qty, but if 0/null use po_lines qty
+ * 2) Better de-dupe: prefer rows with ws_no and qty > 0 before falling back to newest created_at
  */
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -29,11 +16,9 @@ function ok(data: any = {}) {
 function bad(message: string, status = 400) {
   return NextResponse.json({ success: false, error: message }, { status });
 }
-
 function safeTrim(v: any) {
   return (v ?? "").toString().trim();
 }
-
 function hasServiceRoleEnv() {
   const v = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
   return !!v && safeTrim(v).length >= 30;
@@ -57,18 +42,14 @@ export async function GET(req: Request) {
       query = query.eq("status", status);
     }
 
-    // --- If q includes style keywords, we also search lines (buyer_style / jm_style_no) ---
     let styleMatchWsIds: string[] = [];
     if (qRaw) {
       const q = qRaw.replace(/,/g, " ").trim();
 
-      // 1) Header-side search (PO / Buyer / Code / WS No / Buyer Style No)
       query = query.or(
         `po_no.ilike.%${q}%,buyer_name.ilike.%${q}%,buyer_code.ilike.%${q}%,work_sheet_no.ilike.%${q}%,ws_no.ilike.%${q}%,buyer_style_no.ilike.%${q}%`
       );
 
-      // 2) Line-side search (Buyer Style / JM Style)
-      // NOTE: We do this in a separate query and merge in-memory for simplicity & safety.
       const { data: lineHits, error: lineHitErr } = await supabaseAdmin
         .from("work_sheet_lines")
         .select("work_sheet_id")
@@ -95,7 +76,6 @@ export async function GET(req: Request) {
 
     let rows: any[] = Array.isArray(data) ? data : [];
 
-    // Merge-in rows that matched only on line-side style search.
     if (qRaw && styleMatchWsIds.length > 0) {
       const existing = new Set(rows.map((r: any) => safeTrim(r?.id)).filter(Boolean));
       const missingIds = styleMatchWsIds.filter((id) => !existing.has(id));
@@ -109,7 +89,6 @@ export async function GET(req: Request) {
           .limit(500);
         if (!moreErr && Array.isArray(more) && more.length > 0) {
           rows = [...rows, ...more];
-          // keep newest first
           rows.sort((a: any, b: any) => {
             const ta = new Date(a?.created_at ?? 0).getTime();
             const tb = new Date(b?.created_at ?? 0).getTime();
@@ -119,7 +98,6 @@ export async function GET(req: Request) {
       }
     }
 
-    // --- NEW: Filter out rows whose PO is deleted ---
     try {
       const poNos = Array.from(
         new Set(
@@ -149,16 +127,13 @@ export async function GET(req: Request) {
 
           rows = rows.filter((r: any) => {
             const key = safeTrim(r?.po_no);
-            if (!key) return true; // handled later by includeEmpty flag
+            if (!key) return true;
             return alive.has(key);
           });
         }
       }
-    } catch {
-      // do not break
-    }
+    } catch {}
 
-    // --- buyer_name / buyer_code backfill (response + optional DB patch) ---
     const need = rows.filter((r: any) => {
       const hasBuyerId = !!r?.buyer_id;
       const missName = !safeTrim(r?.buyer_name);
@@ -167,10 +142,7 @@ export async function GET(req: Request) {
     });
 
     if (need.length > 0) {
-      const buyerIds = Array.from(
-        new Set(need.map((r: any) => r.buyer_id).filter(Boolean))
-      );
-
+      const buyerIds = Array.from(new Set(need.map((r: any) => r.buyer_id).filter(Boolean)));
       const { data: comps, error: cErr } = await supabaseAdmin
         .from("companies")
         .select("id, company_name, code")
@@ -180,65 +152,28 @@ export async function GET(req: Request) {
         const map = new Map<string, any>();
         for (const c of comps) map.set((c as any).id, c);
 
-        // patch in-memory
         for (const r of rows) {
           const c = r?.buyer_id ? map.get(r.buyer_id) : null;
           if (!c) continue;
           if (!safeTrim(r.buyer_name)) r.buyer_name = (c as any).company_name ?? r.buyer_name;
           if (!safeTrim(r.buyer_code)) r.buyer_code = (c as any).code ?? r.buyer_code;
         }
-
-        // Optional DB backfill (small batch) — updates only rows that were missing.
-        const toUpdate = rows
-          .filter((r: any) => r?.id && need.some((n: any) => n.id === r.id))
-          .slice(0, 50);
-
-        for (const r of toUpdate) {
-          await supabaseAdmin
-            .from("work_sheet_headers")
-            .update({
-              buyer_name: safeTrim(r.buyer_name) ? r.buyer_name : null,
-              buyer_code: safeTrim(r.buyer_code) ? r.buyer_code : null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", r.id);
-        }
       }
     }
 
-    // --- Hide broken rows (missing po_no / buyer_id) unless include_empty=1 ---
     if (!includeEmpty) {
       rows = rows.filter((r: any) => {
         const poNo = safeTrim(r?.po_no);
         const buyerId = safeTrim(r?.buyer_id);
-        // poNo + buyerId are minimum requirements to render a meaningful list row
         if (!poNo) return false;
         if (!buyerId) return false;
         return true;
       });
     }
 
-    // --- De-dupe by po_no (default: keep latest row per po_no) ---
-    let out = rows;
-    if (!all) {
-      const seen = new Set<string>();
-      const deduped: any[] = [];
-      for (const r of rows) {
-        const key = safeTrim(r?.po_no);
-        if (!key) continue; // if includeEmpty=1, still don't dedupe on empty keys
-        if (seen.has(key)) continue;
-        seen.add(key);
-        deduped.push(r);
-      }
-      out = deduped;
-    }
+    // Aggregate line-derived fields
+    const wsIds = Array.from(new Set(rows.map((r: any) => safeTrim(r?.id)).filter((x: string) => x)));
 
-    // --- Attach line-derived fields for list display (style/qty/lp/mode) ---
-    const wsIds = Array.from(
-      new Set(out.map((r: any) => safeTrim(r?.id)).filter((x: string) => x))
-    );
-
-    // Aggregate per WS because one PO can have multiple lines/styles
     let aggMap = new Map<
       string,
       {
@@ -251,23 +186,20 @@ export async function GET(req: Request) {
         vendor_id: string | null;
       }
     >();
+
     if (wsIds.length > 0) {
       const { data: lines, error: lErr } = await supabaseAdmin
         .from("work_sheet_lines")
-        .select(
-          "work_sheet_id, jm_style_no, buyer_style, qty, vendor_id, vendor_currency, vendor_unit_cost_local, production_mode, created_at, is_deleted"
-        )
-        // older rows can have is_deleted NULL -> treat as not deleted
+        .select("work_sheet_id, po_line_id, jm_style_no, buyer_style, qty, vendor_id, vendor_currency, vendor_unit_cost_local, production_mode, created_at, is_deleted")
         .or("is_deleted.is.null,is_deleted.eq.false")
         .in("work_sheet_id", wsIds)
         .order("created_at", { ascending: true })
-        .limit(2000);
+        .limit(4000);
 
       if (!lErr && Array.isArray(lines)) {
         for (const ln of lines) {
           const wid = safeTrim((ln as any)?.work_sheet_id);
           if (!wid) continue;
-
           const cur =
             aggMap.get(wid) ??
             {
@@ -280,10 +212,7 @@ export async function GET(req: Request) {
               vendor_id: null,
             };
 
-          const qn =
-            typeof (ln as any)?.qty === "number"
-              ? (ln as any).qty
-              : Number((ln as any)?.qty);
+          const qn = typeof (ln as any)?.qty === "number" ? (ln as any).qty : Number((ln as any)?.qty);
           if (Number.isFinite(qn)) cur.qty += qn;
 
           const bs = safeTrim((ln as any)?.buyer_style);
@@ -295,14 +224,12 @@ export async function GET(req: Request) {
           const vid = safeTrim((ln as any)?.vendor_id);
           if (!cur.vendor_id && vid) cur.vendor_id = vid;
 
-          const lp =
-            typeof (ln as any)?.vendor_unit_cost_local === "number"
-              ? (ln as any).vendor_unit_cost_local
-              : Number((ln as any)?.vendor_unit_cost_local);
+          const lp = typeof (ln as any)?.vendor_unit_cost_local === "number"
+            ? (ln as any).vendor_unit_cost_local
+            : Number((ln as any)?.vendor_unit_cost_local);
           if (cur.lp_unit == null && Number.isFinite(lp)) {
             cur.lp_unit = lp;
             const c = safeTrim((ln as any)?.vendor_currency);
-            // If currency missing but LP exists, default to CNY (your vendor majority)
             cur.lp_currency = c || "CNY";
           }
 
@@ -314,15 +241,55 @@ export async function GET(req: Request) {
       }
     }
 
-    // Provide camelCase aliases + derived list fields
-    const normalized = out.map((r: any) => {
-      const a = aggMap.get(safeTrim(r?.id)) || null;
+    // PO qty fallback by header.po_line_id / header.po_header_id
+    const poLineIds = Array.from(new Set(rows.map((r: any) => safeTrim(r?.po_line_id)).filter(Boolean)));
+    const poHeaderIds = Array.from(new Set(rows.map((r: any) => safeTrim(r?.po_header_id)).filter(Boolean)));
 
+    const poLineQtyMap = new Map<string, number>();
+    if (poLineIds.length > 0) {
+      const { data: poLines } = await supabaseAdmin
+        .from("po_lines")
+        .select("id, qty")
+        .in("id", poLineIds);
+      for (const pl of poLines ?? []) {
+        const id = safeTrim((pl as any)?.id);
+        const q = Number((pl as any)?.qty);
+        if (id && Number.isFinite(q)) poLineQtyMap.set(id, q);
+      }
+    }
+
+    const poHeaderQtyMap = new Map<string, number>();
+    if (poHeaderIds.length > 0) {
+      const { data: poLinesByHeader } = await supabaseAdmin
+        .from("po_lines")
+        .select("po_header_id, qty, is_deleted")
+        .in("po_header_id", poHeaderIds);
+      for (const pl of poLinesByHeader ?? []) {
+        if ((pl as any)?.is_deleted === true) continue;
+        const hid = safeTrim((pl as any)?.po_header_id);
+        const q = Number((pl as any)?.qty);
+        if (!hid || !Number.isFinite(q)) continue;
+        poHeaderQtyMap.set(hid, (poHeaderQtyMap.get(hid) ?? 0) + q);
+      }
+    }
+
+    const normalizedAll = rows.map((r: any) => {
+      const a = aggMap.get(safeTrim(r?.id)) || null;
       const wsNo = safeTrim(r?.work_sheet_no) || safeTrim(r?.ws_no) || null;
-      const buyerStyle =
-        safeTrim(r?.buyer_style_no) || safeTrim(a?.buyer_style) || null;
+      const buyerStyle = safeTrim(r?.buyer_style_no) || safeTrim(a?.buyer_style) || null;
       const jmStyle = safeTrim(a?.jm_style) || null;
-      const qty = a ? a.qty : null;
+
+      const aggQty = a ? a.qty : null;
+      const poLineQty = poLineQtyMap.get(safeTrim(r?.po_line_id)) ?? null;
+      const poHeaderQty = poHeaderQtyMap.get(safeTrim(r?.po_header_id)) ?? null;
+      const qty =
+        typeof aggQty === "number" && aggQty > 0
+          ? aggQty
+          : typeof poLineQty === "number" && poLineQty > 0
+          ? poLineQty
+          : typeof poHeaderQty === "number" && poHeaderQty > 0
+          ? poHeaderQty
+          : 0;
 
       const modeRaw = safeTrim(a?.production_mode) || safeTrim(r?.production_mode) || "";
       const mode = modeRaw || (a?.vendor_id ? "OUTSOURCED" : "IN_HOUSE");
@@ -331,26 +298,21 @@ export async function GET(req: Request) {
         typeof (a as any)?.lp_unit === "number"
           ? (a as any).lp_unit
           : typeof r?.vendor_unit_cost_local === "number"
-            ? r.vendor_unit_cost_local
-            : null;
+          ? r.vendor_unit_cost_local
+          : null;
 
-      const lpCurRaw =
-        safeTrim((a as any)?.lp_currency) || safeTrim(r?.vendor_currency) || "";
-      // If currency missing but LP exists, default to CNY (avoid silently forcing USD)
+      const lpCurRaw = safeTrim((a as any)?.lp_currency) || safeTrim(r?.vendor_currency) || "";
       const lpCur = lpCurRaw || (lpUnit != null ? "CNY" : "");
-
       const delivery = safeTrim(r?.requested_ship_date) || null;
+
+      const completenessScore =
+        (wsNo ? 100 : 0) +
+        (qty > 0 ? 50 : 0) +
+        (safeTrim(jmStyle) ? 10 : 0) +
+        (safeTrim(buyerStyle) ? 5 : 0);
 
       return {
         ...r,
-        // camel
-        poNo: r.po_no,
-        buyerName: r.buyer_name,
-        buyerCode: r.buyer_code,
-        createdAt: r.created_at,
-        updatedAt: r.updated_at,
-
-        // list-friendly derived fields
         ws_no: wsNo,
         buyer_style: buyerStyle,
         jm_style: jmStyle,
@@ -359,8 +321,41 @@ export async function GET(req: Request) {
         lp_unit: lpUnit,
         production_mode: mode,
         delivery_date: delivery,
+        _score: completenessScore,
       };
     });
+
+    let out = normalizedAll;
+    if (!all) {
+      const grouped = new Map<string, any[]>();
+      for (const r of normalizedAll) {
+        const key = safeTrim(r?.po_no);
+        if (!key) continue;
+        const arr = grouped.get(key) ?? [];
+        arr.push(r);
+        grouped.set(key, arr);
+      }
+      const deduped: any[] = [];
+      for (const [, arr] of grouped) {
+        arr.sort((a: any, b: any) => {
+          const sa = Number(a?._score ?? 0);
+          const sb = Number(b?._score ?? 0);
+          if (sb !== sa) return sb - sa;
+          const ta = new Date(a?.updated_at ?? a?.created_at ?? 0).getTime();
+          const tb = new Date(b?.updated_at ?? b?.created_at ?? 0).getTime();
+          return tb - ta;
+        });
+        deduped.push(arr[0]);
+      }
+      deduped.sort((a: any, b: any) => {
+        const ta = new Date(a?.updated_at ?? a?.created_at ?? 0).getTime();
+        const tb = new Date(b?.updated_at ?? b?.created_at ?? 0).getTime();
+        return tb - ta;
+      });
+      out = deduped;
+    }
+
+    const finalRows = out.map(({ _score, ...r }: any) => r);
 
     const debug = debugOn
       ? {
@@ -372,7 +367,7 @@ export async function GET(req: Request) {
         }
       : undefined;
 
-    return ok({ rows: normalized, total: normalized.length, ...(debugOn ? { debug } : {}) });
+    return ok({ rows: finalRows, total: finalRows.length, ...(debugOn ? { debug } : {}) });
   } catch (e: any) {
     console.error(e);
     return bad(e?.message ?? "Server error", 500);

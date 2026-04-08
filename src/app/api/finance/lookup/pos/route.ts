@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
     const q = qRaw;
     const limit = Math.min(Math.max(parseInt(searchParams.get("limit") || "20", 10) || 20, 1), 50);
 
-    // Pre-resolve buyer_ids by searching companies (name/code) so user can type "RED"
+    // Pre-resolve buyer_ids by searching companies (name/code)
     let buyerIds: string[] = [];
     if (q) {
       const { data: buyers, error: buyerErr } = await supabaseAdmin
@@ -24,7 +24,6 @@ export async function GET(req: NextRequest) {
       if (!buyerErr && buyers?.length) buyerIds = buyers.map((b: any) => b.id).filter(Boolean);
     }
 
-    // Build OR filters progressively; remove ones that may reference missing columns.
     const orCandidates = [
       `po_no.ilike.%${q}%`,
       `buyer_brand_name.ilike.%${q}%`,
@@ -54,18 +53,15 @@ export async function GET(req: NextRequest) {
       if (r.error) throw r.error;
       data = r.data || [];
     } else {
-      // Try 1: full OR (po_no + brand + buyer_name + buyer_ids)
       let r = await runWithOr(orCandidates.join(","));
       if (r.error) {
         const msg = (r.error as any)?.message || "";
-        // Common schema: po_headers may NOT have buyer_name; drop it and retry
         if (msg.includes("buyer_name")) {
           const or2 = orCandidates.filter((x) => !x.startsWith("buyer_name.")).join(",");
           r = await runWithOr(or2);
         }
       }
       if (r.error) {
-        // Last fallback: search only by po_no + buyer_ids (most stable)
         const or3 = [
           `po_no.ilike.%${q}%`,
           ...(buyerIds.length ? [`buyer_id.in.(${buyerIds.join(",")})`] : []),
@@ -76,8 +72,9 @@ export async function GET(req: NextRequest) {
       data = r.data || [];
     }
 
-    // Hydrate buyer_name / buyer_code from companies for display
     const rows = data || [];
+
+    // hydrate buyer display
     const uniqBuyerIds = Array.from(new Set(rows.map((r: any) => r.buyer_id).filter(Boolean)));
     const buyerMap = new Map<string, { name: string | null; code: string | null }>();
     if (uniqBuyerIds.length) {
@@ -90,16 +87,91 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    // IMPORTANT:
+    // company_sites in this DB does NOT have "code" column.
+    // Match PO shipping/origin code against company_sites.loading_port_code / origin_code / site_name / name.
+    const rawSiteKeys = Array.from(
+      new Set(
+        rows
+          .map((r: any) =>
+            String(
+              r.shipping_origin_code ??
+              r.site_code ??
+              r.loading_port_code ??
+              r.shipping_origin_site_code ??
+              r.origin_code ??
+              ""
+            ).trim()
+          )
+          .filter(Boolean)
+      )
+    );
+
+    const siteMap = new Map<string, { id: string | null; site_name: string | null; loading_port_code: string | null; origin_code: string | null }>();
+
+    if (rawSiteKeys.length) {
+      const siteOr = rawSiteKeys
+        .flatMap((k) => [
+          `loading_port_code.eq.${k}`,
+          `origin_code.eq.${k}`,
+          `site_name.eq.${k}`,
+          `name.eq.${k}`,
+        ])
+        .join(",");
+
+      const { data: siteRows, error: siteErr } = await supabaseAdmin
+        .from("company_sites")
+        .select("id,site_name,name,loading_port_code,origin_code,is_deleted")
+        .eq("is_deleted", false)
+        .or(siteOr)
+        .limit(200);
+
+      if (siteErr) throw siteErr;
+
+      for (const s of siteRows || []) {
+        const keys = [
+          s.loading_port_code,
+          s.origin_code,
+          s.site_name,
+          s.name,
+        ]
+          .map((x: any) => String(x || "").trim())
+          .filter(Boolean);
+
+        for (const k of keys) {
+          if (!siteMap.has(k)) {
+            siteMap.set(k, {
+              id: s.id ?? null,
+              site_name: (s.site_name ?? s.name ?? null),
+              loading_port_code: s.loading_port_code ?? null,
+              origin_code: s.origin_code ?? null,
+            });
+          }
+        }
+      }
+    }
+
     const items = rows.map((r: any) => {
       const b = r.buyer_id ? buyerMap.get(r.buyer_id) : undefined;
 
-      // site id is not stable across earlier schema versions
-      const siteId =
+      const visibleSiteCode =
+        (r.shipping_origin_code ??
+          r.site_code ??
+          r.loading_port_code ??
+          r.shipping_origin_site_code ??
+          r.origin_code ??
+          null) as string | null;
+
+      const hydratedSite = visibleSiteCode ? siteMap.get(String(visibleSiteCode).trim()) : undefined;
+
+      const directSiteId =
         r.site_id ??
         r.shipping_origin_site_id ??
         r.shipping_origin_site ??
         r.origin_site_id ??
         null;
+
+      const finalSiteId = directSiteId || hydratedSite?.id || null;
 
       return {
         id: r.id,
@@ -107,8 +179,9 @@ export async function GET(req: NextRequest) {
         buyer_name: (r.buyer_name ?? b?.name ?? null) as string | null,
         buyer_code: (b?.code ?? null) as string | null,
         buyer_brand_name: r.buyer_brand_name ?? null,
-        site_id: siteId,
-        site_code: (r.shipping_origin_code ?? r.site_code ?? null) as string | null,
+        site_id: finalSiteId,
+        site_code: visibleSiteCode ?? hydratedSite?.loading_port_code ?? hydratedSite?.origin_code ?? null,
+        site_name: hydratedSite?.site_name ?? null,
         order_date: r.order_date ?? null,
       };
     });

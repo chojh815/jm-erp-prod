@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-function toNumber(v: any) {
+export const dynamic = "force-dynamic";
+
+function num(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
@@ -10,87 +12,25 @@ function monthRange(postingMonthISO: string) {
   const d = new Date(postingMonthISO + "T00:00:00Z");
   const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
   const end = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1));
-  const s = start.toISOString().slice(0, 10);
-  const e = new Date(end.getTime() - 86400000).toISOString().slice(0, 10);
-  return { start: s, end: e };
-}
-
-async function getRevenueByPoLineId(monthStartISO: string) {
-  const { start, end } = monthRange(monthStartISO);
-
-  // invoice_lines schema in your DB: invoice_header_id, po_line_id, amount
-  const { data, error } = await supabaseAdmin
-    .from("invoice_lines")
-    .select("po_line_id, amount, invoice_headers!inner(invoice_date)")
-    .eq("is_deleted", false)
-    .gte("invoice_headers.invoice_date", start)
-    .lte("invoice_headers.invoice_date", end);
-
-  if (error) throw error;
-
-  const map = new Map<string, number>();
-  for (const r of data || []) {
-    const id = r.po_line_id as string | null;
-    if (!id) continue;
-    const amt = toNumber((r as any).amount);
-    map.set(id, (map.get(id) || 0) + amt);
-  }
-  return map;
-}
-
-async function getPoHeader(po_header_id: string) {
-  const { data, error } = await supabaseAdmin.from("po_headers").select("*").eq("id", po_header_id).single();
-  if (error) throw error;
-  return data as any;
-}
-
-async function getPoLinesByHeader(po_header_id: string) {
-  const { data, error } = await supabaseAdmin
-    .from("po_lines")
-    .select("*")
-    .eq("po_header_id", po_header_id)
-    .eq("is_deleted", false);
-
-  if (error) throw error;
-  return (data || []) as any[];
-}
-
-async function getShipmentLines(shipment_id: string) {
-  const { data, error } = await supabaseAdmin
-    .from("shipment_lines")
-    .select("*")
-    .eq("shipment_id", shipment_id)
-    .eq("is_deleted", false);
-
-  if (error) throw error;
-  return (data || []) as any[];
+  return {
+    start: start.toISOString().slice(0, 10),
+    end: new Date(end.getTime() - 86400000).toISOString().slice(0, 10),
+  };
 }
 
 function calcTotalUsd(currency: string, amountOriginal: number, fx: number) {
   if (!currency || currency.toUpperCase() === "USD") return amountOriginal;
-  // fx_rate_to_usd = (original currency per 1 USD) => USD = original / fx
   return fx > 0 ? amountOriginal / fx : 0;
 }
 
-type ResultRow = {
-  expense_id: string;
-  posting_month: string;
-  po_header_id: string | null;
-  po_line_id: string | null;
-  shipment_id: string | null;
-  buyer_id: string | null;
-  brand_name: string | null;
-  vendor_id: string | null;
-  site_id: string | null;
-  allocated_usd: number;
-  allocated_basis: string;
-  basis_value: number | null;
-};
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
+}
 
-function buildRow(base: Partial<ResultRow>): ResultRow {
+function buildRow(base: any) {
   return {
-    expense_id: base.expense_id!,
-    posting_month: base.posting_month!,
+    expense_id: base.expense_id,
+    posting_month: base.posting_month,
     po_header_id: base.po_header_id ?? null,
     po_line_id: base.po_line_id ?? null,
     shipment_id: base.shipment_id ?? null,
@@ -98,18 +38,189 @@ function buildRow(base: Partial<ResultRow>): ResultRow {
     brand_name: base.brand_name ?? null,
     vendor_id: base.vendor_id ?? null,
     site_id: base.site_id ?? null,
-    allocated_usd: Math.round(toNumber(base.allocated_usd) * 100) / 100,
+    allocated_usd: round2(num(base.allocated_usd)),
     allocated_basis: base.allocated_basis || "MANUAL",
     basis_value: base.basis_value ?? null,
   };
 }
 
-async function softDeleteResults(expense_id: string) {
-  await supabaseAdmin.from("expense_allocation_results").update({ is_deleted: true }).eq("expense_id", expense_id);
+async function softDeleteResults(expenseId: string) {
+  const { error } = await supabaseAdmin
+    .from("expense_allocation_results")
+    .update({ is_deleted: true })
+    .eq("expense_id", expenseId)
+    .eq("is_deleted", false);
+  if (error) throw error;
+}
+
+/**
+ * IMPORTANT:
+ * Some DBs have multiple relationships between invoice_lines and invoice_headers.
+ * So do NOT use PostgREST embedded join like:
+ *   invoice_headers!inner(invoice_date)
+ * because it can throw:
+ *   "Could not embed because more than one relationship was found ..."
+ *
+ * Instead:
+ * 1) load invoice_lines only
+ * 2) collect invoice_header_id values
+ * 3) query invoice_headers separately
+ * 4) filter by invoice_date in code
+ */
+async function getRevenueByPoLineId(postingMonthISO: string) {
+  const { start, end } = monthRange(postingMonthISO);
+
+  const { data: lines, error: lineErr } = await supabaseAdmin
+    .from("invoice_lines")
+    .select("po_line_id, amount, invoice_header_id")
+    .eq("is_deleted", false);
+
+  if (lineErr) throw lineErr;
+
+  const headerIds = Array.from(
+    new Set((lines || []).map((r: any) => r.invoice_header_id).filter(Boolean))
+  );
+
+  const headerDateMap = new Map<string, string>();
+  if (headerIds.length) {
+    const { data: headers, error: headerErr } = await supabaseAdmin
+      .from("invoice_headers")
+      .select("id, invoice_date")
+      .in("id", headerIds)
+      .gte("invoice_date", start)
+      .lte("invoice_date", end);
+
+    if (headerErr) throw headerErr;
+
+    for (const h of headers || []) {
+      if (h?.id && h?.invoice_date) {
+        headerDateMap.set(String(h.id), String(h.invoice_date));
+      }
+    }
+  }
+
+  const map = new Map<string, number>();
+  for (const r of lines || []) {
+    const lineId = (r as any).po_line_id as string | null;
+    const headerId = (r as any).invoice_header_id as string | null;
+    if (!lineId || !headerId) continue;
+    if (!headerDateMap.has(String(headerId))) continue;
+
+    map.set(lineId, (map.get(lineId) || 0) + num((r as any).amount));
+  }
+
+  return map;
+}
+
+async function getPoHeader(poHeaderId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("po_headers")
+    .select("*")
+    .eq("id", poHeaderId)
+    .single();
+  if (error) throw error;
+  return data as any;
+}
+
+async function getPoLinesByHeader(poHeaderId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("po_lines")
+    .select("*")
+    .eq("po_header_id", poHeaderId)
+    .eq("is_deleted", false);
+  if (error) throw error;
+  return (data || []) as any[];
+}
+
+async function getShipmentLines(shipmentId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("shipment_lines")
+    .select("*")
+    .eq("shipment_id", shipmentId)
+    .eq("is_deleted", false);
+  if (error) throw error;
+  return (data || []) as any[];
+}
+
+function lineWeightsByRule(
+  lines: any[],
+  revenueMap: Map<string, number>,
+  rule: "REVENUE" | "QTY" | "EQUAL"
+) {
+  if (rule === "REVENUE") {
+    const arr = lines.map((l: any) => ({ id: l.id, w: revenueMap.get(l.id) || 0, line: l }));
+    const sum = arr.reduce((s, x) => s + x.w, 0);
+    if (sum > 0) return arr;
+  }
+
+  if (rule === "QTY") {
+    const arr = lines.map((l: any) => ({ id: l.id, w: num(l.qty), line: l }));
+    const sum = arr.reduce((s, x) => s + x.w, 0);
+    if (sum > 0) return arr;
+  }
+
+  return lines.map((l: any) => ({ id: l.id, w: 1, line: l }));
+}
+
+async function addRowsForPo(args: {
+  expenseId: string;
+  postingMonth: string;
+  poHeaderId: string;
+  usdAmount: number;
+  shipmentId: string | null;
+  vendorId: string | null;
+  revenueMap: Map<string, number>;
+  outRows: any[];
+}) {
+  const ph = await getPoHeader(args.poHeaderId);
+  const poLines = await getPoLinesByHeader(args.poHeaderId);
+
+  if (!poLines.length) {
+    args.outRows.push(
+      buildRow({
+        expense_id: args.expenseId,
+        posting_month: args.postingMonth,
+        po_header_id: args.poHeaderId,
+        po_line_id: null,
+        shipment_id: args.shipmentId,
+        buyer_id: ph.buyer_id ?? null,
+        brand_name: ph.buyer_brand_name ?? null,
+        vendor_id: args.vendorId,
+        site_id: ph.site_id ?? ph.company_site_id ?? ph.shipping_origin_site_id ?? ph.shipping_site_id ?? null,
+        allocated_usd: args.usdAmount,
+        allocated_basis: "MANUAL",
+        basis_value: null,
+      })
+    );
+    return;
+  }
+
+  const weights = lineWeightsByRule(poLines, args.revenueMap, "REVENUE");
+  const totalW = weights.reduce((s, x) => s + num(x.w), 0) || 1;
+
+  for (const item of weights) {
+    args.outRows.push(
+      buildRow({
+        expense_id: args.expenseId,
+        posting_month: args.postingMonth,
+        po_header_id: args.poHeaderId,
+        po_line_id: item.id,
+        shipment_id: args.shipmentId,
+        buyer_id: ph.buyer_id ?? null,
+        brand_name: ph.buyer_brand_name ?? null,
+        vendor_id: args.vendorId,
+        site_id: ph.site_id ?? ph.company_site_id ?? ph.shipping_origin_site_id ?? ph.shipping_site_id ?? null,
+        allocated_usd: args.usdAmount * (num(item.w) / totalW),
+        allocated_basis: weights.every((w) => w.w === 1) ? "EQUAL" : "REVENUE",
+        basis_value: item.w,
+      })
+    );
+  }
 }
 
 export async function POST(_req: NextRequest, { params }: any) {
-  const id = params.id as string;
+  const id = String(params.id || "").trim();
+  if (!id) return NextResponse.json({ ok: false, error: "Missing id" }, { status: 400 });
 
   try {
     const { data: header, error: hErr } = await supabaseAdmin
@@ -120,7 +231,6 @@ export async function POST(_req: NextRequest, { params }: any) {
       .single();
 
     if (hErr) return NextResponse.json({ ok: false, error: hErr.message }, { status: 500 });
-
     if (header.status === "CONFIRMED") {
       return NextResponse.json({ ok: false, error: "Already CONFIRMED" }, { status: 409 });
     }
@@ -133,127 +243,31 @@ export async function POST(_req: NextRequest, { params }: any) {
 
     if (aErr) return NextResponse.json({ ok: false, error: aErr.message }, { status: 500 });
 
-    const amountOriginal = toNumber(header.total_amount_original);
-    const fx = toNumber(header.fx_rate_to_usd || 1);
-    const totalUsd = calcTotalUsd(header.currency, amountOriginal, fx);
+    const totalUsd = calcTotalUsd(
+      String(header.currency || "USD"),
+      num(header.total_amount_original),
+      num(header.fx_rate_to_usd || 1)
+    );
 
-    // update header totals + status
-    const { error: uErr } = await supabaseAdmin
+    const postingMonth = String(header.posting_month || header.expense_date || "").slice(0, 7) + "-01";
+    const revenueMap = await getRevenueByPoLineId(postingMonth);
+    const rows: any[] = [];
+    const vendorId = header.vendor_id ?? null;
+    const scope = String(header.scope_type || "PO").toUpperCase();
+
+    const { error: updErr } = await supabaseAdmin
       .from("expense_headers")
-      .update({ total_amount_usd: totalUsd, status: "CONFIRMED" })
+      .update({
+        total_amount_usd: totalUsd,
+        status: "CONFIRMED",
+        allocation_method: header.allocation_method || "BY_REVENUE",
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", id);
-    if (uErr) return NextResponse.json({ ok: false, error: uErr.message }, { status: 500 });
+
+    if (updErr) return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
 
     await softDeleteResults(id);
-
-    const postingMonth = (header.posting_month as string) || (header.expense_date as string);
-    const revMap = await getRevenueByPoLineId(postingMonth);
-
-    const scope = (header.scope_type || "PO") as string;
-    const method = (header.allocation_method || "BY_REVENUE") as string;
-
-    const rows: ResultRow[] = [];
-
-    const headerVendor = header.vendor_id ?? null;
-
-    const addRowsForPo = async (po_header_id: string | null, usdAmount: number, shipment_id: string | null, basisOverride?: string) => {
-      if (!po_header_id) return;
-      const ph = await getPoHeader(po_header_id);
-      const buyer_id = ph.buyer_id ?? null;
-      const brand_name = ph.buyer_brand_name ?? null;
-      const site_id =
-        ph.site_id ??
-        ph.company_site_id ??
-        ph.shipping_origin_site_id ??
-        ph.shipping_site_id ??
-        null;
-
-      const poLines = await getPoLinesByHeader(po_header_id);
-      const lineIds = poLines.map((l) => l.id).filter(Boolean);
-
-      const weights: { id: string; w: number }[] = [];
-      let totalW = 0;
-
-      for (const lid of lineIds) {
-        let w = 0;
-        if ((basisOverride || method) === "BY_REVENUE") {
-          w = revMap.get(lid) || 0;
-        } else if ((basisOverride || method) === "BY_QTY") {
-          const line = poLines.find((x) => x.id === lid);
-          w = toNumber(line?.qty);
-        } else {
-          // fallback to revenue
-          w = revMap.get(lid) || 0;
-        }
-        weights.push({ id: lid, w });
-        totalW += w;
-      }
-
-      if (totalW <= 0) {
-        // fallback equal
-        const n = Math.max(lineIds.length, 1);
-        for (const lid of lineIds.length ? lineIds : [null]) {
-          const alloc = usdAmount / n;
-          if (!lid) {
-            rows.push(
-              buildRow({
-                expense_id: id,
-                posting_month: postingMonth,
-                po_header_id,
-                po_line_id: null,
-                shipment_id,
-                buyer_id,
-                brand_name,
-                vendor_id: headerVendor,
-                site_id,
-                allocated_usd: alloc,
-                allocated_basis: "MANUAL",
-                basis_value: null,
-              })
-            );
-          } else {
-            rows.push(
-              buildRow({
-                expense_id: id,
-                posting_month: postingMonth,
-                po_header_id,
-                po_line_id: lid,
-                shipment_id,
-                buyer_id,
-                brand_name,
-                vendor_id: headerVendor,
-                site_id,
-                allocated_usd: alloc,
-                allocated_basis: "MANUAL",
-                basis_value: null,
-              })
-            );
-          }
-        }
-        return;
-      }
-
-      const basis = basisOverride || method;
-      for (const { id: lid, w } of weights) {
-        const alloc = usdAmount * (w / totalW);
-        rows.push(
-          buildRow({
-            expense_id: id,
-            posting_month: postingMonth,
-            po_header_id,
-            po_line_id: lid,
-            shipment_id,
-            buyer_id,
-            brand_name,
-            vendor_id: headerVendor,
-            site_id,
-            allocated_usd: alloc,
-            allocated_basis: basis === "BY_REVENUE" ? "REVENUE" : basis === "BY_QTY" ? "QTY" : "REVENUE",
-            basis_value: w,
-          })
-        );
-      }
-    };
 
     if (scope === "GENERAL") {
       rows.push(
@@ -265,7 +279,7 @@ export async function POST(_req: NextRequest, { params }: any) {
           shipment_id: null,
           buyer_id: null,
           brand_name: null,
-          vendor_id: headerVendor,
+          vendor_id: vendorId,
           site_id: null,
           allocated_usd: totalUsd,
           allocated_basis: "MANUAL",
@@ -273,189 +287,242 @@ export async function POST(_req: NextRequest, { params }: any) {
         })
       );
     } else if (scope === "LINE") {
-      // direct to po_line_id(s)
       const targets = allocations || [];
       if (!targets.length) {
         return NextResponse.json({ ok: false, error: "LINE scope requires allocations with po_line_id" }, { status: 400 });
       }
-      const sumManual = targets.reduce((s: number, a: any) => s + toNumber(a.amount_usd || 0), 0);
+
+      const sumManual = targets.reduce((s: number, a: any) => s + num(a.amount_usd || 0), 0);
+
       for (const a of targets) {
-        const po_line_id = a.po_line_id as string | null;
-        const po_header_id = a.po_header_id as string | null;
-        const usd = toNumber(a.amount_usd) > 0 ? toNumber(a.amount_usd) : sumManual > 0 ? 0 : totalUsd / targets.length;
-        // best-effort dimension enrichment
-        let buyer_id: string | null = null;
-        let brand_name: string | null = null;
-        let site_id: string | null = null;
-        if (po_header_id) {
-          const ph = await getPoHeader(po_header_id);
-          buyer_id = ph.buyer_id ?? null;
-          brand_name = ph.buyer_brand_name ?? null;
-          site_id = ph.site_id ?? ph.company_site_id ?? ph.shipping_origin_site_id ?? null;
+        let buyerId: string | null = null;
+        let brandName: string | null = null;
+        let siteId: string | null = a.site_id ?? null;
+
+        if (a.po_header_id) {
+          const ph = await getPoHeader(a.po_header_id);
+          buyerId = ph.buyer_id ?? null;
+          brandName = ph.buyer_brand_name ?? null;
+          siteId = siteId || ph.site_id || ph.company_site_id || ph.shipping_origin_site_id || null;
         }
+
         rows.push(
           buildRow({
             expense_id: id,
             posting_month: postingMonth,
-            po_header_id,
-            po_line_id,
+            po_header_id: a.po_header_id ?? null,
+            po_line_id: a.po_line_id ?? null,
             shipment_id: null,
-            buyer_id,
-            brand_name,
-            vendor_id: headerVendor,
-            site_id,
-            allocated_usd: usd,
+            buyer_id: buyerId,
+            brand_name: brandName,
+            vendor_id: vendorId,
+            site_id: siteId,
+            allocated_usd:
+              num(a.amount_usd) > 0
+                ? num(a.amount_usd)
+                : sumManual > 0
+                ? 0
+                : totalUsd / Math.max(targets.length, 1),
             allocated_basis: "MANUAL",
             basis_value: null,
           })
         );
+      }
+    } else if (scope === "PO") {
+      const poId = allocations?.[0]?.po_header_id as string | undefined;
+      if (!poId) {
+        return NextResponse.json({ ok: false, error: "PO scope requires allocation with po_header_id" }, { status: 400 });
+      }
+
+      await addRowsForPo({
+        expenseId: id,
+        postingMonth,
+        poHeaderId: poId,
+        usdAmount: totalUsd,
+        shipmentId: null,
+        vendorId,
+        revenueMap,
+        outRows: rows,
+      });
+    } else if (scope === "MULTI") {
+      const targets = (allocations || []).filter((a: any) => !!a.po_header_id);
+      if (!targets.length) {
+        return NextResponse.json({ ok: false, error: "MULTI scope requires allocations with po_header_id" }, { status: 400 });
+      }
+
+      const sumShare = targets.reduce((s: number, a: any) => s + num(a.share_pct), 0);
+      for (const a of targets) {
+        const share = sumShare > 0 ? num(a.share_pct) / sumShare : 1 / targets.length;
+        await addRowsForPo({
+          expenseId: id,
+          postingMonth,
+          poHeaderId: String(a.po_header_id),
+          usdAmount: totalUsd * share,
+          shipmentId: null,
+          vendorId,
+          revenueMap,
+          outRows: rows,
+        });
       }
     } else if (scope === "SHIPMENT") {
       const shipId = allocations?.[0]?.shipment_id as string | undefined;
       if (!shipId) {
         return NextResponse.json({ ok: false, error: "SHIPMENT scope requires allocation with shipment_id" }, { status: 400 });
       }
-      const lines = await getShipmentLines(shipId);
-      const items = lines
-        .map((l) => ({
-          po_line_id: l.po_line_id as string | null,
-          po_header_id: l.po_header_id as string | null,
-          cbm: toNumber(l.cbm),
-          gw: toNumber(l.gw),
-        }))
-        .filter((x) => !!x.po_line_id);
 
-      const totalCbm = items.reduce((s, x) => s + x.cbm, 0);
-      const totalGw = items.reduce((s, x) => s + x.gw, 0);
-
-      let basis = method;
-      if (basis === "BY_CBM" && totalCbm <= 0) basis = totalGw > 0 ? "BY_GW" : "BY_REVENUE";
-      if (basis === "BY_GW" && totalGw <= 0) basis = "BY_REVENUE";
-
-      // group by po_header_id to allocate within each PO by line-level basis (cbm/gw) then by PO-level sums
-      const byPo: Record<string, any[]> = {};
-      for (const it of items) {
-        const key = it.po_header_id || "UNKNOWN";
-        byPo[key] = byPo[key] || [];
-        byPo[key].push(it);
+      const shipmentLines = await getShipmentLines(shipId);
+      if (!shipmentLines.length) {
+        return NextResponse.json({ ok: false, error: "No shipment lines found for shipment." }, { status: 400 });
       }
 
-      const allLineBasis = (it: any) => {
-        if (basis === "BY_CBM") return it.cbm;
-        if (basis === "BY_GW") return it.gw;
-        return revMap.get(it.po_line_id) || 0;
-      };
-      const totalBasis = items.reduce((s, it) => s + allLineBasis(it), 0);
+      const poGroups = new Map<string, { po_header_id: string; cbm: number; gw: number; revenue: number }>();
 
-      if (totalBasis <= 0) {
-        // equal split across lines
-        const n = Math.max(items.length, 1);
-        for (const it of items) {
-          await addRowsForPo(it.po_header_id ?? null, totalUsd / n, shipId, "BY_REVENUE"); // within PO
+      for (const line of shipmentLines) {
+        const poHeaderId = line.po_header_id ?? null;
+        const poLineId = line.po_line_id ?? null;
+        if (!poHeaderId) continue;
+
+        const cur = poGroups.get(poHeaderId) || {
+          po_header_id: poHeaderId,
+          cbm: 0,
+          gw: 0,
+          revenue: 0,
+        };
+
+        cur.cbm += num(line.total_cbm || line.cbm || line.cbm_per_ctn);
+        cur.gw += num(line.total_gw || line.gw || line.gw_per_ctn);
+        cur.revenue += poLineId ? num(revenueMap.get(poLineId) || 0) : 0;
+
+        poGroups.set(poHeaderId, cur);
+      }
+
+      const poItems = Array.from(poGroups.values());
+      const totalCbm = poItems.reduce((s, x) => s + x.cbm, 0);
+      const totalGw = poItems.reduce((s, x) => s + x.gw, 0);
+      const totalRevenue = poItems.reduce((s, x) => s + x.revenue, 0);
+
+      for (const po of poItems) {
+        let ratio = 0;
+        let basis = "EQUAL";
+        let basisValue: number | null = null;
+
+        if (totalCbm > 0) {
+          ratio = po.cbm / totalCbm;
+          basis = "CBM";
+          basisValue = po.cbm;
+        } else if (totalGw > 0) {
+          ratio = po.gw / totalGw;
+          basis = "GW";
+          basisValue = po.gw;
+        } else if (totalRevenue > 0) {
+          ratio = po.revenue / totalRevenue;
+          basis = "REVENUE";
+          basisValue = po.revenue;
+        } else {
+          ratio = 1 / Math.max(poItems.length, 1);
+          basis = "EQUAL";
+          basisValue = 1;
         }
-      } else {
-        for (const it of items) {
-          const share = allLineBasis(it) / totalBasis;
-          const usd = totalUsd * share;
-          // allocate to this po_line directly (shipment line already line-level)
-          const po_header_id = it.po_header_id;
-          if (po_header_id) {
-            const ph = await getPoHeader(po_header_id);
-            rows.push(
-              buildRow({
-                expense_id: id,
-                posting_month: postingMonth,
-                po_header_id,
-                po_line_id: it.po_line_id,
-                shipment_id: shipId,
-                buyer_id: ph.buyer_id ?? null,
-                brand_name: ph.buyer_brand_name ?? null,
-                vendor_id: headerVendor,
-                site_id: ph.site_id ?? ph.company_site_id ?? ph.shipping_origin_site_id ?? null,
-                allocated_usd: usd,
-                allocated_basis: basis === "BY_CBM" ? "CBM" : basis === "BY_GW" ? "GW" : "REVENUE",
-                basis_value: allLineBasis(it),
-              })
-            );
+
+        await addRowsForPo({
+          expenseId: id,
+          postingMonth,
+          poHeaderId: po.po_header_id,
+          usdAmount: totalUsd * ratio,
+          shipmentId: shipId,
+          vendorId,
+          revenueMap,
+          outRows: rows,
+        });
+
+        for (const row of rows) {
+          if (row.po_header_id === po.po_header_id && row.shipment_id === shipId) {
+            row.allocated_basis = basis;
+            row.basis_value = basisValue;
           }
         }
       }
     } else if (scope === "FACTORY") {
-      // allocate across all po_lines that have revenue in that month
-      const entries = Array.from(revMap.entries()).filter(([, v]) => v > 0);
+      const entries = Array.from(revenueMap.entries()).filter(([, v]) => v > 0);
       const totalRev = entries.reduce((s, [, v]) => s + v, 0);
 
       if (totalRev <= 0) {
-        return NextResponse.json({ ok: false, error: "FACTORY allocation requires some revenue in posting_month (invoice data is 0)." }, { status: 400 });
+        return NextResponse.json(
+          { ok: false, error: "FACTORY allocation requires invoice revenue in posting_month." },
+          { status: 400 }
+        );
       }
 
-      // Need po_header_id/buyer for each line: fetch po_lines by ids in batches
-      const lineIds = entries.map(([id]) => id);
-      const chunk = (arr: string[], size: number) => Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, i * size + size));
-      const poLineMap = new Map<string, any>();
-      for (const part of chunk(lineIds, 200)) {
-        const { data: pls, error } = await supabaseAdmin.from("po_lines").select("*").in("id", part);
-        if (error) throw error;
-        for (const l of pls || []) poLineMap.set(l.id, l);
-      }
+      const lineIds = entries.map(([lid]) => lid);
+      const { data: poLines, error: plErr } = await supabaseAdmin
+        .from("po_lines")
+        .select("id, po_header_id")
+        .in("id", lineIds);
 
-      // also need po_headers for dimensions
-      const poHeaderIds = Array.from(new Set(Array.from(poLineMap.values()).map((l) => l.po_header_id).filter(Boolean)));
-      const poHeaderMap = new Map<string, any>();
-      for (const part of chunk(poHeaderIds, 200)) {
-        const { data: phs, error } = await supabaseAdmin.from("po_headers").select("*").in("id", part);
-        if (error) throw error;
-        for (const h of phs || []) poHeaderMap.set(h.id, h);
-      }
+      if (plErr) throw plErr;
 
-      for (const [lid, rev] of entries) {
-        const share = rev / totalRev;
-        const usd = totalUsd * share;
-        const pl = poLineMap.get(lid);
-        const ph = pl ? poHeaderMap.get(pl.po_header_id) : null;
+      const poHeaderIds = [...new Set((poLines || []).map((x: any) => x.po_header_id).filter(Boolean))];
+      const { data: poHeaders, error: phErr } = await supabaseAdmin
+        .from("po_headers")
+        .select("*")
+        .in("id", poHeaderIds);
+
+      if (phErr) throw phErr;
+
+      const plMap = new Map((poLines || []).map((x: any) => [x.id, x]));
+      const phMap = new Map((poHeaders || []).map((x: any) => [x.id, x]));
+
+      for (const [lineId, rev] of entries) {
+        const pl: any = plMap.get(lineId);
+        const ph: any = pl ? phMap.get(pl.po_header_id) : null;
+
         rows.push(
           buildRow({
             expense_id: id,
             posting_month: postingMonth,
             po_header_id: pl?.po_header_id ?? null,
-            po_line_id: lid,
+            po_line_id: lineId,
             shipment_id: null,
             buyer_id: ph?.buyer_id ?? null,
             brand_name: ph?.buyer_brand_name ?? null,
-            vendor_id: headerVendor,
+            vendor_id: vendorId,
             site_id: ph?.site_id ?? ph?.company_site_id ?? ph?.shipping_origin_site_id ?? null,
-            allocated_usd: usd,
+            allocated_usd: totalUsd * (rev / totalRev),
             allocated_basis: "REVENUE",
             basis_value: rev,
           })
         );
       }
-    } else if (scope === "MULTI") {
-      const targets = (allocations || []).filter((a: any) => !!a.po_header_id);
-      if (!targets.length) {
-        return NextResponse.json({ ok: false, error: "MULTI scope requires allocations with po_header_id and share_pct" }, { status: 400 });
-      }
-      for (const a of targets) {
-        const po_header_id = a.po_header_id as string;
-        const pct = toNumber(a.share_pct);
-        const usd = totalUsd * (pct > 0 ? pct : 0);
-        await addRowsForPo(po_header_id, usd, null, method);
-      }
     } else {
-      // PO (default)
-      const poId = allocations?.[0]?.po_header_id as string | undefined;
-      if (!poId) {
-        return NextResponse.json({ ok: false, error: "PO scope requires allocation with po_header_id" }, { status: 400 });
-      }
-      await addRowsForPo(poId, totalUsd, null, method);
+      return NextResponse.json({ ok: false, error: `Unsupported scope: ${scope}` }, { status: 400 });
     }
 
     if (rows.length) {
-      const { error: insErr } = await supabaseAdmin.from("expense_allocation_results").insert(rows);
-      if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
+      const now = new Date().toISOString();
+      const insertRows = rows.map((r: any) => ({
+        ...r,
+        is_deleted: false,
+        created_at: now,
+      }));
+
+      const { error: insErr } = await supabaseAdmin
+        .from("expense_allocation_results")
+        .insert(insertRows);
+
+      if (insErr) {
+        return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
+      }
     }
 
-    return NextResponse.json({ ok: true, data: { total_usd: totalUsd, results_count: rows.length } });
+    return NextResponse.json({
+      ok: true,
+      data: {
+        total_usd: totalUsd,
+        results_count: rows.length,
+        allocation_method: header.allocation_method || "BY_REVENUE",
+        posting_month: postingMonth,
+      },
+    });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }

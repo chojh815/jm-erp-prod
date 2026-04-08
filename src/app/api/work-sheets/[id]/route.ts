@@ -511,6 +511,10 @@ async function loadAll(workSheetId: string) {
     // so we mirror them onto header for convenience.
     const vc = pickFirst(line0, ["vendor_currency"]);
     const vu = pickFirst(line0, ["vendor_unit_cost_local"]);
+    const vUsd = pickFirst(line0, ["vendor_unit_cost_usd"]);
+    const fxr = pickFirst(line0, ["fx_rate"]);
+    const fxa = pickFirst(line0, ["fx_as_of"]);
+    const fxm = pickFirst(line0, ["fx_mode"]);
 
     (header as any).work_notes = w ?? "";
     (header as any).work_note = w ?? "";
@@ -522,6 +526,11 @@ async function loadAll(workSheetId: string) {
     (header as any).vendor_currency = vc ?? (header as any).vendor_currency ?? "";
     (header as any).vendor_unit_cost_local =
       vu ?? (header as any).vendor_unit_cost_local ?? null;
+    (header as any).vendor_unit_cost_usd =
+      vUsd ?? (header as any).vendor_unit_cost_usd ?? null;
+    (header as any).fx_rate = fxr ?? (header as any).fx_rate ?? null;
+    (header as any).fx_as_of = fxa ?? (header as any).fx_as_of ?? null;
+    (header as any).fx_mode = fxm ?? (header as any).fx_mode ?? null;
   } else {
     (header as any).work_notes = (header as any).work_notes ?? (header as any).work_note ?? "";
     (header as any).work_note = (header as any).work_note ?? (header as any).work_notes ?? "";
@@ -532,6 +541,10 @@ async function loadAll(workSheetId: string) {
 
     (header as any).vendor_currency = (header as any).vendor_currency ?? "";
     (header as any).vendor_unit_cost_local = (header as any).vendor_unit_cost_local ?? null;
+    (header as any).vendor_unit_cost_usd = (header as any).vendor_unit_cost_usd ?? null;
+    (header as any).fx_rate = (header as any).fx_rate ?? null;
+    (header as any).fx_as_of = (header as any).fx_as_of ?? null;
+    (header as any).fx_mode = (header as any).fx_mode ?? null;
   }
 
   // 2) materials snapshot
@@ -854,6 +867,26 @@ if (!("vendor_currency" in incoming)) {
   if (c !== null && c !== undefined && c !== "") (incoming as any).vendor_currency = c;
 }
 
+if (!("vendor_unit_cost_usd" in incoming)) {
+  const vUsd = pickFirst(incoming, [
+    "vendor_unit_cost_usd",
+    "vendorUnitCostUsd",
+    "planned_unit_cost_usd",
+    "plannedUnitCostUsd",
+  ]);
+  if (vUsd !== null && vUsd !== undefined && vUsd !== "") {
+    (incoming as any).vendor_unit_cost_usd = vUsd;
+  }
+}
+if (!("fx_rate" in incoming)) {
+  const fxr = pickFirst(incoming, ["fx_rate", "fxRate", "planned_fx_rate", "plannedFxRate"]);
+  if (fxr !== null && fxr !== undefined && fxr !== "") (incoming as any).fx_rate = fxr;
+}
+if (!("fx_as_of" in incoming)) {
+  const fxa = pickFirst(incoming, ["fx_as_of", "fxAsOf", "planned_fx_as_of", "plannedFxAsOf"]);
+  if (fxa !== null && fxa !== undefined && fxa !== "") (incoming as any).fx_as_of = fxa;
+}
+
 const allowed = [
           "work_notes",
           "qc_points",
@@ -864,10 +897,13 @@ const allowed = [
           // ✅ production mode
           "production_mode",
 
-          // ✅ planned vendor fields (work_sheet_lines)
+          // ✅ planned vendor / manual FX fields (work_sheet_lines)
           "vendor_id",
           "vendor_currency",
           "vendor_unit_cost_local",
+          "vendor_unit_cost_usd",
+          "fx_rate",
+          "fx_as_of",
 
           // ✅ actual (post) vendor cost fields
           "actual_vendor_unit_cost_local",
@@ -879,19 +915,143 @@ const allowed = [
           "actual_cost_confirmed_at",
           "actual_cost_confirmed_by",
           "actual_cost_notes",
+          "actual_unit",
+          "actual_amt",
         ];
 
         const patch: any = {};
         for (const k of allowed) {
-          if (k in lp) patch[k] = (lp as any)[k];
+          if (k in incoming) patch[k] = (incoming as any)[k];
         }
         patch.updated_at = new Date().toISOString();
+        if ((patch as any).vendor_currency === "USD") {
+          if ((patch as any).fx_rate == null || (patch as any).fx_rate === "") {
+            (patch as any).fx_rate = 1;
+          }
+          if ((patch as any).vendor_unit_cost_usd == null && (patch as any).vendor_unit_cost_local != null) {
+            (patch as any).vendor_unit_cost_usd = (patch as any).vendor_unit_cost_local;
+          }
+        }
+
+        if (
+          (patch as any).vendor_unit_cost_usd == null &&
+          (patch as any).vendor_unit_cost_local != null &&
+          (patch as any).fx_rate != null &&
+          Number((patch as any).fx_rate) > 0
+        ) {
+          const cur = String((patch as any).vendor_currency ?? "USD").toUpperCase();
+          const local = Number((patch as any).vendor_unit_cost_local ?? 0);
+          const fx = Number((patch as any).fx_rate ?? 0);
+          (patch as any).vendor_unit_cost_usd =
+            cur === "USD" ? local : Math.round((local / fx) * 1000000) / 1000000;
+        }
+
+        // Planned vendor cost uses the same FX definition: local currency per 1 USD.
+        // So USD = local / fx_rate and local = USD * fx_rate.
+        if ((patch as any).vendor_currency === "USD") {
+          if ((patch as any).fx_rate == null || (patch as any).fx_rate === "") {
+            (patch as any).fx_rate = 1;
+          }
+          if ((patch as any).vendor_unit_cost_usd == null && (patch as any).vendor_unit_cost_local != null) {
+            (patch as any).vendor_unit_cost_usd = (patch as any).vendor_unit_cost_local;
+          }
+          if ((patch as any).vendor_unit_cost_local == null && (patch as any).vendor_unit_cost_usd != null) {
+            (patch as any).vendor_unit_cost_local = (patch as any).vendor_unit_cost_usd;
+          }
+        }
+
+        if (
+          (patch as any).vendor_unit_cost_usd == null &&
+          (patch as any).vendor_unit_cost_local != null &&
+          (patch as any).fx_rate != null &&
+          Number((patch as any).fx_rate) > 0
+        ) {
+          const cur = String((patch as any).vendor_currency ?? "USD").toUpperCase();
+          const local = Number((patch as any).vendor_unit_cost_local ?? 0);
+          const fx = Number((patch as any).fx_rate ?? 0);
+          (patch as any).vendor_unit_cost_usd =
+            cur === "USD" ? local : Math.round((local / fx) * 1000000) / 1000000;
+        }
+
+        if (
+          ((patch as any).vendor_unit_cost_local == null || (patch as any).vendor_unit_cost_local === "") &&
+          (patch as any).vendor_unit_cost_usd != null &&
+          (patch as any).fx_rate != null &&
+          Number((patch as any).fx_rate) > 0
+        ) {
+          const cur = String((patch as any).vendor_currency ?? "USD").toUpperCase();
+          const usd = Number((patch as any).vendor_unit_cost_usd ?? 0);
+          const fx = Number((patch as any).fx_rate ?? 0);
+          (patch as any).vendor_unit_cost_local =
+            cur === "USD" ? usd : Math.round((usd * fx) * 1000000) / 1000000;
+        }
+
+        if (((patch as any).fx_rate == null || (patch as any).fx_rate === "") && (patch as any).vendor_currency === "USD") {
+          (patch as any).fx_rate = 1;
+        }
+        if (((patch as any).fx_rate != null && (patch as any).fx_rate !== "") && ((patch as any).fx_as_of == null || (patch as any).fx_as_of === "")) {
+          (patch as any).fx_as_of = new Date().toISOString();
+        }
+
+        // Actual vendor cost uses the same FX definition: local currency per 1 USD.
+        // So USD = local / fx_rate. If actual_fx_rate is not sent, fall back to planned fx_rate.
+        if ((patch as any).actual_fx_rate == null || (patch as any).actual_fx_rate === "") {
+          if ((patch as any).vendor_currency === "USD") {
+            (patch as any).actual_fx_rate = 1;
+          } else if ((patch as any).fx_rate != null && (patch as any).fx_rate !== "") {
+            (patch as any).actual_fx_rate = (patch as any).fx_rate;
+          }
+        }
+
+        if (
+          (patch as any).actual_vendor_unit_cost_usd == null &&
+          (patch as any).actual_vendor_unit_cost_local != null &&
+          (patch as any).actual_fx_rate != null &&
+          Number((patch as any).actual_fx_rate) > 0
+        ) {
+          const cur = String((patch as any).vendor_currency ?? "USD").toUpperCase();
+          const local = Number((patch as any).actual_vendor_unit_cost_local ?? 0);
+          const fx = Number((patch as any).actual_fx_rate ?? 0);
+          (patch as any).actual_vendor_unit_cost_usd =
+            cur === "USD" ? local : Math.round((local / fx) * 1000000) / 1000000;
+        }
+
+        if (
+          ((patch as any).actual_vendor_unit_cost_local == null || (patch as any).actual_vendor_unit_cost_local === "") &&
+          (patch as any).actual_vendor_unit_cost_usd != null &&
+          (patch as any).actual_fx_rate != null &&
+          Number((patch as any).actual_fx_rate) > 0
+        ) {
+          const cur = String((patch as any).vendor_currency ?? "USD").toUpperCase();
+          const usd = Number((patch as any).actual_vendor_unit_cost_usd ?? 0);
+          const fx = Number((patch as any).actual_fx_rate ?? 0);
+          (patch as any).actual_vendor_unit_cost_local =
+            cur === "USD" ? usd : Math.round((usd * fx) * 1000000) / 1000000;
+        }
+
+        if (
+          ((patch as any).actual_amt == null || (patch as any).actual_amt === "") &&
+          (patch as any).actual_unit != null &&
+          (incoming as any).qty != null
+        ) {
+          const u = Number((patch as any).actual_unit ?? 0);
+          const q = Number((incoming as any).qty ?? 0);
+          (patch as any).actual_amt = Math.round((u * q) * 10000) / 10000;
+        }
+
+        if (((patch as any).actual_vendor_unit_cost_local != null || (patch as any).actual_vendor_unit_cost_usd != null) && ((patch as any).actual_fx_mode == null || (patch as any).actual_fx_mode === "")) {
+          (patch as any).actual_fx_mode = "MANUAL";
+        }
+        if (((patch as any).actual_fx_rate != null && (patch as any).actual_fx_rate !== "") && ((patch as any).actual_fx_as_of == null || (patch as any).actual_fx_as_of === "")) {
+          (patch as any).actual_fx_as_of = new Date().toISOString();
+        }
+
         // ✅ Safety: if production_mode is OUTSOURCED, vendor_id must exist (DB constraint may not exist yet)
         // Also: if actual cost is CONFIRMED, lock actual fields (and prevent unconfirm).
         const { data: existingLine, error: exErr } = await supabaseAdmin
           .from("work_sheet_lines")
           .select(
-            "id, production_mode, vendor_id, actual_cost_confirmed, actual_vendor_unit_cost_local, actual_vendor_unit_cost_usd, actual_fx_rate, actual_fx_as_of, actual_fx_mode, actual_cost_notes"
+            "id, production_mode, vendor_id, vendor_currency, vendor_unit_cost_local, vendor_unit_cost_usd, fx_rate, fx_as_of, fx_mode, actual_cost_confirmed, actual_vendor_unit_cost_local, actual_vendor_unit_cost_usd, actual_fx_rate, actual_fx_as_of, actual_fx_mode, actual_cost_notes"
           )
           .eq("id", lineId)
           .eq("work_sheet_id", id)

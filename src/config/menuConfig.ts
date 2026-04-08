@@ -183,6 +183,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         href: "/dashboards/profitability",
         perm: ["dashboard.profitability", "dashboard.finance"],
       },
+      {
+        label: "Expected Margin",
+        href: "/dashboards/expected-profitability",
+        perm: ["dashboard.profitability", "dashboard.finance"],
+      },
     ],
   },
 

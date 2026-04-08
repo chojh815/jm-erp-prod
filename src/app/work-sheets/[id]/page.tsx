@@ -76,6 +76,10 @@ type WorkSheetLine = {
   vendor_id?: string | null;
   vendor_currency?: string | null;
   vendor_unit_cost_local?: number | null;
+  fx_rate?: number | null;
+  fx_as_of?: string | null;
+  fx_mode?: string | null;
+  vendor_unit_cost_usd?: number | null;
 
   // ✅ Production cost mode & actual (post) cost
   production_mode?: "IN_HOUSE" | "OUTSOURCED" | null;
@@ -90,6 +94,11 @@ type WorkSheetLine = {
   actual_cost_confirmed_at?: string | null;
   actual_cost_confirmed_by?: string | null;
   actual_cost_notes?: string | null;
+
+  // synced actual summary fields used by profitability / downstream saves
+  actual_unit?: number | null;
+  actual_qty?: number | null;
+  actual_amt?: number | null;
 
   is_deleted?: boolean;
 };
@@ -308,6 +317,122 @@ function fmtWsRemarks(
   return parts.join(" / ");
 }
 
+function calcMaterialsPlannedAmt(specs: WorkSheetMaterialSpec[] = []): number {
+  return (specs ?? [])
+    .filter((s) => !s?.is_deleted)
+    .reduce((acc, s) => {
+      const q = extractQtyFromNote(s?.note) ?? 0;
+      const u = extractUnitCostFromNote(s?.note) ?? 0;
+      return acc + Number(q) * Number(u);
+    }, 0);
+}
+
+function calcPlannedUnitUsd(localUnit: any, currency?: string | null, fxRate?: any): number | null {
+  const local = Number(localUnit ?? 0);
+  if (!Number.isFinite(local) || local <= 0) return null;
+  const cur = String(currency ?? "USD").trim().toUpperCase();
+  if (!cur || cur === "USD") return Math.round(local * 1000000) / 1000000;
+  const fx = Number(fxRate ?? 0);
+  if (!Number.isFinite(fx) || fx <= 0) return null;
+  return Math.round((local / fx) * 1000000) / 1000000;
+}
+
+function calcActualVendorUnitUsd(localUnit: any, currency?: string | null, fxRate?: any): number | null {
+  return calcPlannedUnitUsd(localUnit, currency, fxRate);
+}
+
+function fmtFxMeta(currency?: string | null, localUnit?: any, fxRate?: any): string {
+  const cur = String(currency ?? "USD").trim().toUpperCase() || "USD";
+  const local = Number(localUnit ?? 0);
+  if (cur === "USD") return `Local ${fmtMoney(local)} USD`;
+  const fx = Number(fxRate ?? 0);
+  if (!Number.isFinite(fx) || fx <= 0) return `Local ${fmtMoney(local)} ${cur} / FX not set`;
+  return `Local ${fmtMoney(local)} ${cur} / FX ${fmtMoney(fx)} ${cur} per 1 USD`;
+}
+
+function calcMaterialsActualAmt(specs: WorkSheetMaterialSpec[] = []): number {
+  return (specs ?? [])
+    .filter((s) => !s?.is_deleted)
+    .reduce((acc, s) => {
+      const plannedQty = extractQtyFromNote(s?.note);
+      const actualQty = (s as any)?.actual_qty ?? null;
+      const qtyForActual = actualQty ?? plannedQty ?? 1;
+      const actualUnit = (s as any)?.actual_unit_cost ?? null;
+      if (actualUnit === null || actualUnit === undefined) return acc;
+      return acc + Number(qtyForActual) * Number(actualUnit);
+    }, 0);
+}
+
+function calcOutsourcedActualAmt(
+  qty: any,
+  actualVendorUnitCostLocal: any
+): number {
+  const q = Number(qty ?? 0);
+  const u = Number(actualVendorUnitCostLocal ?? 0);
+  if (!Number.isFinite(q) || !Number.isFinite(u)) return 0;
+  return q * u;
+}
+
+function calcLineActualSync(
+  line: WorkSheetLine,
+  specs: WorkSheetMaterialSpec[] = [],
+  vendorActualRaw?: string
+) {
+  const mode =
+    (line as any)?.production_mode ?? (line?.vendor_id ? "OUTSOURCED" : "IN_HOUSE");
+
+  const plannedLocalUnit = calcMaterialsPlannedAmt(specs);
+  const plannedUnitUsd = calcPlannedUnitUsd(
+    plannedLocalUnit,
+    (line as any)?.vendor_currency ?? "USD",
+    (line as any)?.fx_rate ?? null
+  );
+  const actualQty = nnumNullable((line as any)?.qty) ?? 0;
+
+  if (mode === "OUTSOURCED") {
+    const parsedVendorActual = parseDec2ToNumber(vendorActualRaw ?? "");
+    const actualLocalUnit =
+      parsedVendorActual ?? ((line as any)?.actual_vendor_unit_cost_local ?? null);
+    const actualFxRate =
+      nnumNullable((line as any)?.actual_fx_rate) ??
+      nnumNullable((line as any)?.fx_rate) ??
+      null;
+    const actualCurrency = (line as any)?.vendor_currency ?? "USD";
+    const actualUnitUsd = calcActualVendorUnitUsd(actualLocalUnit, actualCurrency, actualFxRate);
+    const actualAmt =
+      actualUnitUsd === null || actualUnitUsd === undefined
+        ? 0
+        : Math.round(Number(actualUnitUsd) * Number(actualQty) * 10000) / 10000;
+    return {
+      plannedUnit: plannedUnitUsd,
+      plannedUnitLocal: plannedLocalUnit,
+      plannedAmt: plannedUnitUsd,
+      actualUnit: actualUnitUsd,
+      actualUnitLocal: actualLocalUnit,
+      actualFxRate,
+      actualQty,
+      actualAmt,
+      mode,
+    };
+  }
+
+  const actualUnit = calcMaterialsActualAmt(specs);
+  const actualAmt =
+    actualUnit === null || actualUnit === undefined
+      ? 0
+      : Math.round(Number(actualUnit) * Number(actualQty) * 10000) / 10000;
+
+  return {
+    plannedUnit: plannedUnitUsd,
+    plannedUnitLocal: plannedLocalUnit,
+    plannedAmt: plannedUnitUsd,
+    actualUnit,
+    actualQty,
+    actualAmt,
+    mode,
+  };
+}
+
 export default function WorkSheetDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -355,6 +480,10 @@ export default function WorkSheetDetailPage() {
 
   // Vendor Actual Unit Cost input (keep raw string while typing)
   const [vendorActualUnitInputByLineId, setVendorActualUnitInputByLineId] = React.useState<
+    Record<string, string>
+  >({});
+
+  const [vendorFxInputByLineId, setVendorFxInputByLineId] = React.useState<
     Record<string, string>
   >({});
 
@@ -464,6 +593,32 @@ export default function WorkSheetDetailPage() {
     const id = activeLine.id;
     const n = (activeLine as any).vendor_unit_cost_local as number | null | undefined;
     setVendorUnitInputByLineId((prev) => {
+      if (prev[id] !== undefined) return prev;
+      return {
+        ...prev,
+        [id]: n === null || n === undefined ? "" : String(n),
+      };
+    });
+  }, [activeLine?.id]);
+
+  React.useEffect(() => {
+    if (!activeLine?.id) return;
+    const id = activeLine.id;
+    const n = (activeLine as any).fx_rate as number | null | undefined;
+    setVendorFxInputByLineId((prev) => {
+      if (prev[id] !== undefined) return prev;
+      return {
+        ...prev,
+        [id]: n === null || n === undefined ? "" : String(n),
+      };
+    });
+  }, [activeLine?.id]);
+
+  React.useEffect(() => {
+    if (!activeLine?.id) return;
+    const id = activeLine.id;
+    const n = (activeLine as any).actual_vendor_unit_cost_local as number | null | undefined;
+    setVendorActualUnitInputByLineId((prev) => {
       if (prev[id] !== undefined) return prev;
       return {
         ...prev,
@@ -648,14 +803,14 @@ export default function WorkSheetDetailPage() {
     );
   }
 
-  async function onSave() {
-    if (!header) return;
+  async function onSave(showSuccessToast: boolean = true): Promise<boolean> {
+    if (!header) return false;
 
     for (const l of lines) {
       const v = (l?.jm_style_no ?? "").trim();
       if (!v) {
         alert("JM Style No 는 필수입니다.");
-        return;
+        return false;
       }
 
       const mode = (l as any)?.production_mode ?? "OUTSOURCED";
@@ -663,7 +818,7 @@ export default function WorkSheetDetailPage() {
         alert(
           `OUTSOURCED 라인은 Vendor/Subcontractor가 필수입니다.\n(Style: ${(l as any)?.jm_style_no ?? "-"})`
         );
-        return;
+        return false;
       }
     }
 
@@ -671,6 +826,53 @@ export default function WorkSheetDetailPage() {
     setError(null);
 
     try {
+      const syncedLines = lines.map((l) => {
+        const specs = materialsByLineId[l.id] ?? [];
+        const plannedLocalUnit = calcMaterialsPlannedAmt(specs);
+        const fxRate = nnumNullable((l as any)?.fx_rate);
+        const plannedUnitUsd = calcPlannedUnitUsd(
+          plannedLocalUnit,
+          (l as any)?.vendor_currency ?? "USD",
+          fxRate
+        );
+        const sync = calcLineActualSync(
+          l,
+          specs,
+          vendorActualUnitInputByLineId[l.id]
+        );
+
+        return {
+          ...l,
+          vendor_unit_cost_local: plannedLocalUnit,
+          vendor_unit_cost_usd: plannedUnitUsd,
+          fx_rate: fxRate,
+          fx_as_of: fxRate ? new Date().toISOString().slice(0, 10) : (l as any).fx_as_of ?? null,
+          actual_unit: sync.actualUnit,
+          actual_qty: sync.actualQty,
+          actual_amt: sync.actualAmt,
+          actual_vendor_unit_cost_local:
+            sync.mode === "OUTSOURCED"
+              ? (sync as any).actualUnitLocal ?? (l as any).actual_vendor_unit_cost_local ?? null
+              : (l as any).actual_vendor_unit_cost_local ?? null,
+          actual_vendor_unit_cost_usd:
+            sync.mode === "OUTSOURCED"
+              ? sync.actualUnit ?? null
+              : (l as any).actual_vendor_unit_cost_usd ?? null,
+          actual_fx_rate:
+            sync.mode === "OUTSOURCED"
+              ? ((sync as any).actualFxRate ?? fxRate ?? null)
+              : (l as any).actual_fx_rate ?? null,
+          actual_fx_as_of:
+            sync.mode === "OUTSOURCED"
+              ? (((sync as any).actualFxRate ?? fxRate) ? new Date().toISOString().slice(0, 10) : (l as any).actual_fx_as_of ?? null)
+              : (l as any).actual_fx_as_of ?? null,
+          actual_fx_mode:
+            sync.mode === "OUTSOURCED"
+              ? (((sync as any).actualFxRate ?? fxRate) ? "MANUAL" : (l as any).actual_fx_mode ?? null)
+              : (l as any).actual_fx_mode ?? null,
+        } as WorkSheetLine;
+      });
+
       const payload = {
         header: {
           id: header.id,
@@ -684,7 +886,7 @@ export default function WorkSheetDetailPage() {
           notes: internalNotes || null,
         },
 
-        lines: lines.map((l) => ({
+        lines: syncedLines.map((l) => ({
           id: l.id,
           work_sheet_id: l.work_sheet_id,
           po_line_id: l.po_line_id ?? null,
@@ -710,6 +912,9 @@ export default function WorkSheetDetailPage() {
           vendor_id: l.vendor_id ?? null,
           vendor_currency: l.vendor_currency ?? null,
           vendor_unit_cost_local: l.vendor_unit_cost_local ?? null,
+          vendor_unit_cost_usd: (l as any).vendor_unit_cost_usd ?? null,
+          fx_rate: (l as any).fx_rate ?? null,
+          fx_as_of: (l as any).fx_as_of ?? null,
 
           production_mode: (l as any).production_mode ?? null,
 
@@ -720,6 +925,10 @@ export default function WorkSheetDetailPage() {
           actual_fx_rate: (l as any).actual_fx_rate ?? null,
           actual_fx_as_of: (l as any).actual_fx_as_of ?? null,
           actual_fx_mode: (l as any).actual_fx_mode ?? null,
+
+          actual_unit: (l as any).actual_unit ?? null,
+          actual_qty: (l as any).actual_qty ?? null,
+          actual_amt: (l as any).actual_amt ?? null,
         })),
 
         materialsByLineId: Object.fromEntries(
@@ -805,7 +1014,7 @@ export default function WorkSheetDetailPage() {
       const incomingMap = new Map(incomingLines.map((x) => [x.id, x]));
       const nextLines =
         incomingLines.length > 0
-          ? lines.map((l) => {
+          ? syncedLines.map((l) => {
               const saved = incomingMap.get(l.id);
               return saved ? ({ ...l, ...saved } as any) : l;
             })
@@ -847,8 +1056,18 @@ export default function WorkSheetDetailPage() {
         masterLineId: nextMaster,
       });
       didInitRef.current = true;
+
+      if (showSuccessToast) {
+        toast.success("Saved successfully", {
+          description: "Actual values were synchronized.",
+        });
+      }
+      return true;
     } catch (e: any) {
-      setError(e?.message ?? "Save error");
+      const msg = e?.message ?? "Save error";
+      setError(msg);
+      toast.error("Save failed", { description: msg });
+      return false;
     } finally {
       setSaving(false);
     }
@@ -908,6 +1127,9 @@ export default function WorkSheetDetailPage() {
 
       setConfirmingActual(true);
 
+      const saved = await onSave(false);
+      if (!saved) return;
+
       const res = await fetch(`/api/work-sheets/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -917,6 +1139,7 @@ export default function WorkSheetDetailPage() {
       const j = await res.json().catch(() => null);
       if (!res.ok) throw new Error(j?.error || "Failed to confirm actual cost");
 
+      await load();
       toast.success("Actual confirmed", { description: "Actual cost is now locked." });
     } catch (e: any) {
       toast.error("Confirm failed", {
@@ -1009,8 +1232,8 @@ export default function WorkSheetDetailPage() {
                 </Select>
               </div>
 
-              <Button onClick={onSave} disabled={saving || loading || !header}>
-                {saving ? "Saving..." : "Save"}
+              <Button onClick={() => void onSave()} disabled={saving || loading || !header}>
+              {saving ? "Saving..." : "Save"}
               </Button>
 
               <div className="flex items-center gap-2">
@@ -1251,30 +1474,59 @@ export default function WorkSheetDetailPage() {
               const _lineId = (activeLineId ?? (activeLine as any)?.id ?? "") as string;
               const specs = _lineId ? (materialsByLineId?.[_lineId] || []) : [];
               const plannedUnitCost = specs.reduce((s: number, sp: any) => {
-  const q = extractQtyFromNote(sp?.note) ?? 0;
-  const u = extractUnitCostFromNote(sp?.note) ?? 0;
-  return s + q * u;
-}, 0);
+                const q = extractQtyFromNote(sp?.note) ?? 0;
+                const u = extractUnitCostFromNote(sp?.note) ?? 0;
+                return s + q * u;
+              }, 0);
 
-              const actualUnitCost = specs.reduce((s: number, sp: any) => {
-        const q = extractQtyFromNote(sp?.note) ?? 0;
-        const plannedU = extractUnitCostFromNote(sp?.note) ?? 0;
+              const isOutsourced = (resolvedProductionMode ?? "IN_HOUSE") === "OUTSOURCED";
 
-        // avoid using null/undefined as an index type
-        const specId = String(sp?.id ?? "");
-        const raw = specId ? actualUnitInputBySpecId?.[specId] : undefined;
+              const inhouseActualRows = specs.reduce(
+                (acc: { hasActual: boolean; sum: number }, sp: any) => {
+                  const specId = String(sp?.id ?? "");
+                  const raw = specId ? actualUnitInputBySpecId?.[specId] : undefined;
+                  const saved = (sp as any)?.actual_unit_cost;
+                  const actualUnit =
+                    raw != null && String(raw).trim() !== ""
+                      ? parseDec4ToNumber(String(raw))
+                      : saved ?? null;
 
-        const au =
-          raw != null && String(raw).trim() !== ""
-            ? (parseDec4ToNumber(String(raw)) ?? plannedU)
-            : plannedU;
+                  if (actualUnit === null || actualUnit === undefined) return acc;
 
-        return s + q * au;
-      }, 0);
+                  const q = extractQtyFromNote(sp?.note) ?? 0;
+                  return {
+                    hasActual: true,
+                    sum: acc.sum + Number(q) * Number(actualUnit),
+                  };
+                },
+                { hasActual: false, sum: 0 }
+              );
 
-              const marginUnit = unitPrice - actualUnitCost;
-              const marginPct = unitPrice ? (marginUnit / unitPrice) * 100 : 0;
-              const variance = actualUnitCost - plannedUnitCost;
+              const vendorActualRaw = activeLine?.id
+                ? vendorActualUnitInputByLineId?.[activeLine.id]
+                : undefined;
+              const vendorActualSaved = (activeLine as any)?.actual_vendor_unit_cost_local ?? null;
+              const vendorActualUnit =
+                vendorActualRaw != null && String(vendorActualRaw).trim() !== ""
+                  ? parseDec2ToNumber(String(vendorActualRaw))
+                  : vendorActualSaved;
+
+              const hasActual = isOutsourced
+                ? vendorActualUnit !== null && vendorActualUnit !== undefined
+                : inhouseActualRows.hasActual;
+
+              const actualUnitCost: number | null = isOutsourced
+                ? (vendorActualUnit ?? null)
+                : (inhouseActualRows.hasActual ? inhouseActualRows.sum : null);
+
+              const marginUnit: number | null =
+                hasActual && actualUnitCost !== null ? unitPrice - actualUnitCost : null;
+              const marginPct: number | null =
+                hasActual && actualUnitCost !== null && unitPrice
+                  ? (marginUnit! / unitPrice) * 100
+                  : null;
+              const variance: number | null =
+                hasActual && actualUnitCost !== null ? actualUnitCost - plannedUnitCost : null;
 
               return (
                 <div className="grid gap-3 md:grid-cols-5">
@@ -1288,21 +1540,21 @@ export default function WorkSheetDetailPage() {
                   <Card>
                     <CardContent className="p-4">
                       <div className="text-xs text-muted-foreground">Actual Unit Cost (Cost Sum)</div>
-                      <div className="mt-1 text-2xl font-semibold tabular-nums">{actualUnitCost.toFixed(2)}</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{actualUnitCost === null ? "-" : actualUnitCost.toFixed(2)}</div>
                       <div className="mt-1 text-xs text-muted-foreground">Planned: {plannedUnitCost.toFixed(2)}</div>
                     </CardContent>
                   </Card>
                   <Card>
                     <CardContent className="p-4">
                       <div className="text-xs text-muted-foreground">Margin / Unit ({poCurrency})</div>
-                      <div className="mt-1 text-2xl font-semibold tabular-nums">{marginUnit.toFixed(4)}</div>
-                      <div className="mt-1 text-xs text-muted-foreground">Variance: {variance >= 0 ? "+" : ""}{variance.toFixed(2)}</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{marginUnit === null ? "-" : marginUnit.toFixed(4)}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Variance: {variance === null ? "-" : `${variance >= 0 ? "+" : ""}${variance.toFixed(2)}`}</div>
                     </CardContent>
                   </Card>
                   <Card>
                     <CardContent className="p-4">
                       <div className="text-xs text-muted-foreground">Margin %</div>
-                      <div className="mt-1 text-2xl font-semibold tabular-nums">{marginPct.toFixed(2)}%</div>
+                      <div className="mt-1 text-2xl font-semibold tabular-nums">{marginPct === null ? "-" : `${marginPct.toFixed(2)}%`}</div>
                       <div className="mt-1 text-xs text-muted-foreground">Line Qty: {(lines || []).find((ln: any) => ln?.id === activeLineId)?.qty?.toLocaleString?.() ?? ""}</div>
                     </CardContent>
                   </Card>
@@ -1807,6 +2059,38 @@ export default function WorkSheetDetailPage() {
               </CardHeader>
               <CardContent className="space-y-3">
                 <div className="grid gap-3 md:grid-cols-4">
+                  {(() => {
+                    const specs = materialsByLineId[activeLine.id] ?? [];
+                    const sync = calcLineActualSync(
+                      activeLine,
+                      specs,
+                      vendorActualUnitInputByLineId[activeLine.id]
+                    );
+                    const plannedUnit = sync.plannedUnit ?? sync.plannedAmt ?? 0;
+                    const actualUnit = sync.actualUnit ?? 0;
+                    const plannedLocal = (sync as any).plannedUnitLocal ?? calcMaterialsPlannedAmt(specs);
+                    const actualLocal =
+                      resolvedProductionMode === "OUTSOURCED"
+                        ? (parseDec2ToNumber(vendorActualUnitInputByLineId[activeLine.id] ?? "") ?? (activeLine as any)?.actual_vendor_unit_cost_local ?? null)
+                        : null;
+                    const actualFx =
+                      (resolvedProductionMode === "OUTSOURCED"
+                        ? ((activeLine as any)?.actual_fx_rate ?? (activeLine as any)?.fx_rate ?? null)
+                        : null);
+                    const deltaUnit = actualUnit - plannedUnit;
+                    const deltaPct = plannedUnit ? (deltaUnit / plannedUnit) * 100 : 0;
+
+                    return (
+                      <>
+                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Planned Unit Cost (USD)</div><div className="mt-1 text-2xl font-semibold tabular-nums">{fmtMoney(plannedUnit)}</div><div className="mt-1 text-xs text-muted-foreground">{fmtFxMeta((activeLine as any)?.vendor_currency ?? "USD", plannedLocal, (activeLine as any)?.fx_rate ?? null)}</div></CardContent></Card>
+                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Actual Unit Cost (USD)</div><div className="mt-1 text-2xl font-semibold tabular-nums">{actualUnit ? fmtMoney(actualUnit) : "-"}</div><div className="mt-1 text-xs text-muted-foreground">{resolvedProductionMode === "OUTSOURCED" ? fmtFxMeta((activeLine as any)?.vendor_currency ?? "USD", actualLocal, actualFx) : "IN_HOUSE actual sum"}</div></CardContent></Card>
+                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Δ Unit Cost (USD)</div><div className="mt-1 text-2xl font-semibold tabular-nums">{plannedUnit && actualUnit ? `${deltaUnit >= 0 ? "+" : ""}${fmtMoney(deltaUnit)}` : "-"}</div></CardContent></Card>
+                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Δ %</div><div className="mt-1 text-2xl font-semibold tabular-nums">{plannedUnit && actualUnit ? `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(2)}%` : "-"}</div></CardContent></Card>
+                      </>
+                    );
+                  })()}
+                </div>
+                <div className="grid gap-3 md:grid-cols-4">
                   <div className="space-y-1">
                     <Label>Production Mode</Label>
                     <Select
@@ -1893,14 +2177,19 @@ export default function WorkSheetDetailPage() {
                         if (!activeLine) return;
                         const next = v as string;
                         setLines((prev) =>
-                          (prev || []).map((ln) =>
-                            ln.id === activeLine.id
-                              ? ({
-                                  ...ln,
-                                  vendor_currency: next,
-                                } as any)
-                              : ln
-                          )
+                          (prev || []).map((ln) => {
+                            if (ln.id !== activeLine.id) return ln;
+                            const localUnit = calcMaterialsPlannedAmt(materialsByLineId[activeLine.id] ?? []);
+                            const fx = (ln as any)?.fx_rate ?? null;
+                            const actualLocal = (ln as any)?.actual_vendor_unit_cost_local ?? null;
+                            return ({
+                              ...ln,
+                              vendor_currency: next,
+                              vendor_unit_cost_local: localUnit,
+                              vendor_unit_cost_usd: calcPlannedUnitUsd(localUnit, next, fx),
+                              actual_vendor_unit_cost_usd: calcActualVendorUnitUsd(actualLocal, next, (ln as any)?.actual_fx_rate ?? fx),
+                            } as any);
+                          })
                         );
                       }}
                     >
@@ -1912,6 +2201,54 @@ export default function WorkSheetDetailPage() {
                         <SelectItem value="CNY">CNY</SelectItem>
                       </SelectContent>
                     </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label>FX Rate ({(activeLine?.vendor_currency ?? "CNY")} per 1 USD)</Label>
+                    <Input
+                      inputMode="decimal"
+                      placeholder={(activeLine?.vendor_currency ?? "CNY") === "USD" ? "1" : "7.20"}
+                      value={
+                        activeLine?.id
+                          ? vendorFxInputByLineId[activeLine.id] ?? ""
+                          : ""
+                      }
+                      onChange={(e) => {
+                        if (!activeLine?.id) return;
+                        const raw0 = e.target.value;
+                        const raw = normalizeDec2Input(raw0);
+                        if (raw !== "" && !DEC2_RE.test(raw)) return;
+
+                        const lineId = activeLine.id;
+                        setVendorFxInputByLineId((prev) => ({
+                          ...prev,
+                          [lineId]: raw,
+                        }));
+
+                        const n = parseDec2ToNumber(raw);
+                        setLines((prev) =>
+                          (prev || []).map((ln) => {
+                            if (ln.id !== lineId) return ln;
+                            const localUnit = calcMaterialsPlannedAmt(materialsByLineId[lineId] ?? []);
+                            const nextCurrency = (ln as any)?.vendor_currency ?? "CNY";
+                            const actualLocal = (ln as any)?.actual_vendor_unit_cost_local ?? null;
+                            return {
+                              ...(ln as any),
+                              fx_rate: n,
+                              fx_mode: "MANUAL",
+                              fx_as_of: new Date().toISOString().slice(0, 10),
+                              vendor_unit_cost_local: localUnit,
+                              vendor_unit_cost_usd: calcPlannedUnitUsd(localUnit, nextCurrency, n),
+                              actual_fx_rate: n,
+                              actual_fx_mode: "MANUAL",
+                              actual_fx_as_of: new Date().toISOString().slice(0, 10),
+                              actual_vendor_unit_cost_usd: calcActualVendorUnitUsd(actualLocal, nextCurrency, n),
+                            } as any;
+                          })
+                        );
+                      }}
+                    />
+                    <div className="text-[11px] text-muted-foreground">기준: 1 USD = FX Rate local currency. 예: 1 USD = 7.20 CNY 이면 1.26 CNY ÷ 7.20 = 0.1750 USD</div>
                   </div>
 
                   <div className="space-y-1">
@@ -1939,26 +2276,31 @@ export default function WorkSheetDetailPage() {
 
                         const n = parseDec2ToNumber(raw);
                         setLines((prev) =>
-                          (prev || []).map((ln) =>
-                            ln.id === lineId
-                              ? ({
-                                  ...ln,
-                                  vendor_unit_cost_local: n,
-                                } as any)
-                              : ln
-                          )
+                          (prev || []).map((ln) => {
+                            if (ln.id !== lineId) return ln;
+                            const fx = (ln as any)?.fx_rate ?? null;
+                            const cur = (ln as any)?.vendor_currency ?? "CNY";
+                            return ({
+                              ...ln,
+                              vendor_unit_cost_local: n,
+                              vendor_unit_cost_usd: calcPlannedUnitUsd(n, cur, fx),
+                            } as any);
+                          })
                         );
                       }}
                       disabled={(resolvedProductionMode ?? "IN_HOUSE") !== "OUTSOURCED"}
                     />
                     <div className="text-[11px] text-muted-foreground">
-                      하청 단가(벤더 지급 단가)입니다. 소수점 2자리까지 입력.
+                      하청 단가(로컬통화)입니다. 소수점 2자리까지 입력.
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      USD Preview: {fmtMoney(calcPlannedUnitUsd(activeLine?.vendor_unit_cost_local ?? null, activeLine?.vendor_currency ?? "CNY", (activeLine as any)?.fx_rate ?? null) ?? 0)}
                     </div>
                   </div>
 
 
                   <div className="space-y-1">
-                    <Label>Vendor Actual Unit Cost</Label>
+                    <Label>Vendor Actual Unit Cost (Local Currency)</Label>
                     <Input
                       inputMode="decimal"
                       placeholder="0.00"
@@ -1981,20 +2323,28 @@ export default function WorkSheetDetailPage() {
 
                         const n = parseDec2ToNumber(raw);
                         setLines((prev) =>
-                          (prev || []).map((ln) =>
-                            ln.id === lineId
-                              ? ({
-                                  ...ln,
-                                  actual_vendor_unit_cost_local: n,
-                                } as any)
-                              : ln
-                          )
+                          (prev || []).map((ln) => {
+                            if (ln.id !== lineId) return ln;
+                            const cur = (ln as any)?.vendor_currency ?? "CNY";
+                            const fx = nnumNullable((ln as any)?.fx_rate) ?? null;
+                            return ({
+                              ...ln,
+                              actual_vendor_unit_cost_local: n,
+                              actual_vendor_unit_cost_usd: calcActualVendorUnitUsd(n, cur, fx),
+                              actual_fx_rate: fx,
+                              actual_fx_as_of: fx ? new Date().toISOString().slice(0, 10) : (ln as any)?.actual_fx_as_of ?? null,
+                              actual_fx_mode: fx ? "MANUAL" : (ln as any)?.actual_fx_mode ?? null,
+                            } as any);
+                          })
                         );
                       }}
                       disabled={(resolvedProductionMode ?? "IN_HOUSE") !== "OUTSOURCED"}
                     />
                     <div className="text-[11px] text-muted-foreground">
-                      실제 지급/정산된 하청 단가(USD/CNY). 소수점 2자리까지 입력.
+                      실제 지급/정산된 하청 단가(로컬통화)입니다. 현재 통화: {(activeLine?.vendor_currency ?? "USD").toUpperCase()}.
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      USD Preview: {fmtMoney(calcActualVendorUnitUsd(parseDec2ToNumber(activeLine?.id ? vendorActualUnitInputByLineId[activeLine.id] ?? "" : "") ?? (activeLine as any)?.actual_vendor_unit_cost_local ?? null, activeLine?.vendor_currency ?? "CNY", (activeLine as any)?.actual_fx_rate ?? (activeLine as any)?.fx_rate ?? null) ?? 0)}
                     </div>
                   </div>
 
@@ -2006,12 +2356,12 @@ export default function WorkSheetDetailPage() {
 
                 <div className="text-sm text-muted-foreground">
                   이 탭은 <span className="font-medium text-foreground">마진 관리용</span>
-                  입니다. Unit Price는 PO Subtotal/Qty로 계산하고, Actual Unit Cost는
-                  Materials 탭의 Actual Unit 입력값 합계입니다.
+                  입니다. 여기서는 1pc 기준 Unit Cost를 비교합니다. Planned Unit Cost는 자재/임가공의 1pc 로컬통화 합계를 수동 FX로 USD 환산한 값이고,
+                  Actual Unit Cost는 IN_HOUSE면 Materials 탭 Actual Unit 합계, OUTSOURCED면 Vendor Actual Unit Cost(로컬통화 입력 후 FX 환산 USD)입니다.
                   <br />
                   <span className="font-medium text-foreground">Vendor Unit Price</span> 는
                   벤더에게 지급하는 <span className="font-medium text-foreground">하청 단가</span>
-                  (USD/CNY)를 입력합니다.
+                  (로컬통화)를 입력합니다.
                   <br />
                   <span className="font-medium text-foreground">연동 규칙:</span>{" "}
                   Vendor 선택 → 자동 OUTSOURCED, Mode를 IN_HOUSE로 변경 → Vendor 자동

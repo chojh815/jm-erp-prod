@@ -1,227 +1,195 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-function isoDateOnly(d: Date) {
-  return d.toISOString().slice(0, 10);
-}
+export const dynamic = "force-dynamic";
 
-function firstDayOfMonth(dateStr: string) {
-  // expects YYYY-MM-DD
-  const d = new Date(dateStr + "T00:00:00Z");
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}-01`;
-}
-
-function toNumber(v: any): number | null {
+function num(v: any): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+function bad(error: string, status = 400, extra?: any) {
+  return NextResponse.json({ ok: false, error, ...(extra || {}) }, { status });
 }
 
 async function resolveExpenseTypeCode(raw: any): Promise<string | null> {
   const input = String(raw ?? "").trim();
   if (!input) return null;
 
-  // 1) exact code match (case-insensitive)
-  {
-    const { data, error } = await supabaseAdmin
-      .from("expense_types")
-      .select("code")
-      .ilike("code", input)
-      .limit(1);
-    if (!error && data && data[0]?.code) return data[0].code;
-  }
+  const exactCode = await supabaseAdmin.from("expense_types").select("code").ilike("code", input).limit(1);
+  if (!exactCode.error && exactCode.data?.[0]?.code) return exactCode.data[0].code;
 
-  // 2) exact name match (case-insensitive)
-  {
-    const { data, error } = await supabaseAdmin
-      .from("expense_types")
-      .select("code")
-      .ilike("name", input)
-      .limit(1);
-    if (!error && data && data[0]?.code) return data[0].code;
-  }
+  const exactName = await supabaseAdmin.from("expense_types").select("code").ilike("name", input).limit(1);
+  if (!exactName.error && exactName.data?.[0]?.code) return exactName.data[0].code;
 
-  // 3) loose match (contains)
   const safe = input.replace(/%/g, "");
-  {
-    const { data, error } = await supabaseAdmin
-      .from("expense_types")
-      .select("code")
-      .or(`code.ilike.%${safe}%,name.ilike.%${safe}%`)
-      .limit(1);
-    if (!error && data && data[0]?.code) return data[0].code;
-  }
+  const loose = await supabaseAdmin
+    .from("expense_types")
+    .select("code")
+    .or(`code.ilike.%${safe}%,name.ilike.%${safe}%`)
+    .limit(1);
+  if (!loose.error && loose.data?.[0]?.code) return loose.data[0].code;
 
   return null;
+}
+
+async function generateExpenseNo(expenseDate?: string | null) {
+  const dt = expenseDate ? new Date(`${expenseDate}T00:00:00`) : new Date();
+  const yy = String(dt.getFullYear()).slice(-2);
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const prefix = `EXP-${yy}${mm}-`;
+
+  const { data, error } = await supabaseAdmin
+    .from("expense_headers")
+    .select("expense_no")
+    .ilike("expense_no", `${prefix}%`)
+    .order("expense_no", { ascending: false })
+    .limit(1);
+
+  if (error) throw new Error(error.message);
+
+  const last = data?.[0]?.expense_no ? String(data[0].expense_no) : "";
+  const m = last.match(/(\d{4})$/);
+  const seq = m ? Number(m[1]) + 1 : 1;
+
+  return `${prefix}${String(seq).padStart(4, "0")}`;
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const q = (searchParams.get("q") || "").trim();
+    const status = (searchParams.get("status") || "ALL").trim().toUpperCase();
+    const scope = (searchParams.get("scope") || "ALL").trim().toUpperCase();
+    const page = Math.max(Number(searchParams.get("page") || "1"), 1);
+    const pageSize = Math.min(Math.max(Number(searchParams.get("page_size") || "20"), 1), 100);
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    let query = supabaseAdmin
+      .from("expense_headers")
+      .select("*", { count: "exact" })
+      .eq("is_deleted", false)
+      .order("updated_at", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(from, to);
+
+    if (q) {
+      query = query.or(
+        `expense_no.ilike.%${q}%,expense_type_code.ilike.%${q}%,currency.ilike.%${q}%,note.ilike.%${q}%,scope_type.ilike.%${q}%,status.ilike.%${q}%`
+      );
+    }
+    if (status !== "ALL") query = query.eq("status", status);
+    if (scope !== "ALL") query = query.eq("scope_type", scope);
+
+    const { data, error, count } = await query;
+    if (error) return bad(error.message, 500);
+
+    const headers = data || [];
+    const ids = headers.map((x: any) => x.id).filter(Boolean);
+
+    let allocationCounts = new Map<string, number>();
+    if (ids.length) {
+      const { data: allocRows, error: allocErr } = await supabaseAdmin
+        .from("expense_allocations")
+        .select("expense_id")
+        .in("expense_id", ids)
+        .eq("is_deleted", false);
+
+      if (allocErr) return bad(allocErr.message, 500);
+
+      for (const r of allocRows || []) {
+        const k = String(r.expense_id);
+        allocationCounts.set(k, (allocationCounts.get(k) || 0) + 1);
+      }
+    }
+
+    const items = headers.map((row: any) => ({
+      ...row,
+      allocation_count: allocationCounts.get(String(row.id)) || 0,
+    }));
+
+    return NextResponse.json({
+      ok: true,
+      items,
+      total: Number(count || 0),
+      total_pages: Math.max(1, Math.ceil(Number(count || 0) / pageSize)),
+      page,
+      page_size: pageSize,
+    });
+  } catch (e: any) {
+    return bad(e?.message || String(e), 500);
+  }
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const header = body?.header && typeof body.header === "object" ? body.header : body;
+    const allocations = Array.isArray(body?.allocations) ? body.allocations : [];
 
-    const header = body?.header || {};
-    const allocationsInput = Array.isArray(body?.allocations) ? body.allocations : [];
+    const expenseTypeCode = await resolveExpenseTypeCode(
+      header.expense_type_code ?? header.category ?? header.type ?? ""
+    );
+    if (!expenseTypeCode) return bad("Invalid expense type", 400);
 
-    const now = new Date();
-    const expenseDate = String(header.expense_date || header.date || isoDateOnly(now));
-    const postingMonth = String(header.posting_month || firstDayOfMonth(expenseDate));
+    const expenseDate = String(header.expense_date || header.date || new Date().toISOString().slice(0, 10));
+    const postingMonth = String(header.posting_month || expenseDate.slice(0, 7) + "-01");
+    const currency = String(header.currency || "USD").toUpperCase();
+    const fxRate = num(header.fx_rate_to_usd ?? 1) ?? 1;
+    const totalOriginal = num(header.total_amount_original ?? header.amount_original ?? header.amount_local) ?? 0;
+    const totalUsd =
+      num(header.total_amount_usd ?? header.amount_usd) ??
+      (currency === "USD" ? totalOriginal : fxRate > 0 ? totalOriginal / fxRate : 0);
 
-    // DB uses expense_headers + expense_allocations (NOT finance_expenses)
-    const scopeType = String(header.scope_type || header.scopeType || "PO");
+    const expenseNo = String(header.expense_no || "").trim() || (await generateExpenseNo(expenseDate));
 
-    const currency = String(header.currency || "USD");
-    const fxToUsd = toNumber(header.fx_rate_to_usd ?? header.fxToUsd ?? header.fx_to_usd) ?? 1;
-
-    // totals: prefer explicit header totals, else compute
-    let totalOriginal =
-      toNumber(header.total_amount_original ?? header.amount_original ?? header.amount_local) ?? null;
-    let totalUsd = toNumber(header.total_amount_usd ?? header.amount_usd) ?? null;
-
-    // If allocations carry amounts, use them
-    const allocSumOriginal = allocationsInput
-      .map((a: any) => toNumber(a.amount_original ?? a.amount_local))
-      .filter((n: any) => typeof n === "number")
-      .reduce((s: number, n: number) => s + n, 0);
-
-    const allocSumUsd = allocationsInput
-      .map((a: any) => toNumber(a.amount_usd))
-      .filter((n: any) => typeof n === "number")
-      .reduce((s: number, n: number) => s + n, 0);
-
-    if ((totalOriginal === null || totalOriginal === 0) && allocSumOriginal > 0)
-      totalOriginal = allocSumOriginal;
-    if ((totalUsd === null || totalUsd === 0) && allocSumUsd > 0) totalUsd = allocSumUsd;
-
-    if (totalUsd === null) {
-      const base = totalOriginal ?? 0;
-      totalUsd = Number((base * fxToUsd).toFixed(2));
-    }
-
-    // expense_type_code must exist in expense_types (FK)
-    const rawType =
-      header.expense_type_code ??
-      header.expenseTypeCode ??
-      header.category ??
-      header.expense_type ??
-      header.type ??
-      "";
-
-    let expenseTypeCode = await resolveExpenseTypeCode(rawType);
-
-    // common UI labels fallback
-    if (!expenseTypeCode && typeof rawType === "string") {
-      const up = rawType.trim().toUpperCase();
-      if (up === "FORWARDER") expenseTypeCode = await resolveExpenseTypeCode("FORWARDER");
-      if (up === "TRANSPORT") expenseTypeCode = await resolveExpenseTypeCode("TRANSPORT");
-      if (up === "OVERTIME") expenseTypeCode = await resolveExpenseTypeCode("OVERTIME");
-      if (up === "MATERIALS" || up === "MATERIAL")
-        expenseTypeCode = await resolveExpenseTypeCode("MATERIALS");
-      if (up === "LOGISTICS") expenseTypeCode = await resolveExpenseTypeCode("LOGISTICS");
-    }
-
-    if (!expenseTypeCode) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "Invalid expense type. Check expense_types table (code/name) and ensure UI sends a valid expense_type_code.",
-          debug: { rawType },
-        },
-        { status: 400 }
-      );
-    }
-
-    // IMPORTANT: your expense_headers schema uses total_* columns (per your screenshot)
-    const insertHeader: any = {
-      expense_date: expenseDate,
-      posting_month: postingMonth,
-      expense_type_code: expenseTypeCode,
-
-      description: header.description || null,
-      currency,
-      fx_rate_to_usd: fxToUsd,
-      total_amount_original: totalOriginal ?? 0,
-      total_amount_usd: totalUsd ?? 0,
-
-      scope_type: scopeType,
-      vendor_id: header.vendor_id || null,
-      site_id: header.site_id || null,
-      note: header.note || null,
-      is_deleted: false,
-      created_at: now.toISOString(),
-      updated_at: now.toISOString(),
-    };
-
-    const { data: inserted, error: e1 } = await supabaseAdmin
+    const { data: inserted, error: hErr } = await supabaseAdmin
       .from("expense_headers")
-      .insert(insertHeader)
+      .insert({
+        expense_no: expenseNo,
+        expense_type_code: expenseTypeCode,
+        vendor_id: header.vendor_id || null,
+        expense_date: expenseDate,
+        posting_month: postingMonth,
+        currency,
+        fx_rate_to_usd: fxRate,
+        fx_as_of: header.fx_as_of || expenseDate,
+        fx_source: header.fx_source || (currency === "USD" ? "fixed_usd" : "manual"),
+        total_amount_original: totalOriginal,
+        total_amount_usd: totalUsd,
+        scope_type: header.scope_type || "PO",
+        allocation_method: header.allocation_method || "BY_REVENUE",
+        note: header.note || null,
+        status: "DRAFT",
+        is_deleted: false,
+      })
       .select("*")
       .single();
 
-    if (e1) throw e1;
+    if (hErr) return bad(hErr.message, 500);
 
-    const expenseId = inserted.id;
-
-    // Fill allocations.site_id from selected PO if missing (A1: po_headers.site_id exists)
-    let allocations = allocationsInput;
-    const needSiteFromPo = allocations
-      .filter((a: any) => a?.target_type === "PO" && a?.po_header_id && !a?.site_id)
-      .map((a: any) => a.po_header_id);
-
-    if (needSiteFromPo.length) {
-      const uniqPoIds = Array.from(new Set(needSiteFromPo));
-      const { data: poRows, error: poErr } = await supabaseAdmin
-        .from("po_headers")
-        .select("id, site_id")
-        .in("id", uniqPoIds);
-
-      if (poErr) throw poErr;
-
-      const poSiteMap = new Map<string, string | null>(
-        (poRows || []).map((r: any) => [r.id, r.site_id ?? null])
-      );
-
-      allocations = allocations.map((a: any) => {
-        if (a?.target_type === "PO" && a?.po_header_id && !a?.site_id) {
-          return { ...a, site_id: poSiteMap.get(a.po_header_id) ?? null };
-        }
-        return a;
-      });
-    }
-
-    const insertAllocations = allocations.map((a: any) => {
-      const sharePct = toNumber(a.share_pct ?? a.sharePct) ?? null;
-      const amtOrig = toNumber(a.amount_original ?? a.amount_local ?? a.amountOriginal) ?? null;
-      const amtUsd = toNumber(a.amount_usd ?? a.amountUsd) ?? null;
-
-      return {
-        expense_id: expenseId,
-        target_type: String(a.target_type || a.targetType || "PO"),
+    if (allocations.length) {
+      const rows = allocations.map((a: any) => ({
+        expense_id: inserted.id,
+        target_type: a.target_type || "PO",
         po_header_id: a.po_header_id || null,
         shipment_id: a.shipment_id || null,
         po_line_id: a.po_line_id || null,
         site_id: a.site_id || null,
-        share_pct: sharePct,
-        amount_original: amtOrig,
-        amount_usd: amtUsd,
+        share_pct: num(a.share_pct),
+        amount_usd: num(a.amount_usd ?? a.manual_usd),
         note: a.note || null,
-        created_at: now.toISOString(),
         is_deleted: false,
-      };
-    });
+      }));
 
-    if (insertAllocations.length) {
-      const { error: e2 } = await supabaseAdmin
-        .from("expense_allocations")
-        .insert(insertAllocations);
-      if (e2) throw e2;
+      const { error: aErr } = await supabaseAdmin.from("expense_allocations").insert(rows);
+      if (aErr) return bad(aErr.message, 500);
     }
 
-    return NextResponse.json({ ok: true, id: expenseId });
-  } catch (err: any) {
-    const msg = err?.message || String(err);
-    return NextResponse.json({ ok: false, error: msg, detail: err }, { status: 500 });
+    return NextResponse.json({ ok: true, id: inserted.id, data: { id: inserted.id, header: inserted } });
+  } catch (e: any) {
+    return bad(e?.message || String(e), 500);
   }
 }

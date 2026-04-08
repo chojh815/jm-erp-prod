@@ -12,7 +12,39 @@ import { Separator } from "@/components/ui/separator";
 import ExpenseForm, { AllocationRow, ExpenseHeaderDraft } from "../_components/ExpenseForm";
 
 function fmtMoney(n: number) {
-  return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(n || 0);
+}
+
+function fmtDate(v: string | null | undefined) {
+  return v ? String(v).slice(0, 10) : "-";
+}
+
+function formatBasisLabel(basis: string | null | undefined, basisValue: number | null | undefined) {
+  const key = String(basis || "").toUpperCase();
+
+  if (key === "REVENUE") {
+    return `Revenue (Sales): ${fmtMoney(Number(basisValue || 0))}`;
+  }
+  if (key === "CBM") {
+    return `CBM: ${fmtMoney(Number(basisValue || 0))}`;
+  }
+  if (key === "GW") {
+    return `GW: ${fmtMoney(Number(basisValue || 0))}`;
+  }
+  if (key === "QTY") {
+    return `Qty: ${fmtMoney(Number(basisValue || 0))}`;
+  }
+  if (key === "EQUAL") {
+    return "Equal Split";
+  }
+  if (key === "MANUAL") {
+    return basisValue != null ? `Manual: ${fmtMoney(Number(basisValue || 0))}` : "Manual";
+  }
+
+  return basisValue != null ? `${basis || "-"}: ${fmtMoney(Number(basisValue || 0))}` : (basis || "-");
 }
 
 export default function ExpenseDetailPage() {
@@ -40,8 +72,9 @@ export default function ExpenseDetailPage() {
 
   React.useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  const confirmDialog = (msg: string) => window.confirm(msg);
 
   const confirm = async () => {
     if (!confirmDialog("Confirm this expense? It will be locked and allocation results will be snapshotted.")) return;
@@ -64,7 +97,6 @@ export default function ExpenseDetailPage() {
     if (!confirmDialog("Void this expense? (soft delete results).")) return;
     setLoading(true);
     try {
-      // mark status VOID (only if not CONFIRMED? allowed for now)
       const res = await fetch(`/api/finance/expenses/${id}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -97,11 +129,6 @@ export default function ExpenseDetailPage() {
     }
   };
 
-  const confirmDialog = (msg: string) => {
-    // eslint-disable-next-line no-restricted-globals
-    return window.confirm(msg);
-  };
-
   const header = data?.header;
   const allocations = (data?.allocations || []) as AllocationRow[];
   const results = (data?.results || []) as any[];
@@ -118,10 +145,12 @@ export default function ExpenseDetailPage() {
       <div className="space-y-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle className="flex items-center gap-2">
-              {header?.expense_no || id}
-              {header?.status ? statusBadge(header.status) : null}
-            </CardTitle>
+            <div className="space-y-1">
+              <CardTitle className="flex items-center gap-2">
+                {header?.expense_no || "Expense Detail"}
+                {header?.status ? statusBadge(header.status) : null}
+              </CardTitle>
+            </div>
 
             <div className="flex items-center gap-2">
               <Button variant="outline" onClick={load} disabled={loading}>
@@ -205,17 +234,14 @@ export default function ExpenseDetailPage() {
                 <tbody>
                   {results.map((r: any) => (
                     <tr key={r.id} className="border-t">
-                      <td className="p-2">{r.posting_month}</td>
-                      <td className="p-2 font-mono">{r.po_header_id || ""}</td>
-                      <td className="p-2 font-mono">{r.po_line_id || ""}</td>
-                      <td className="p-2 font-mono">{r.shipment_id || ""}</td>
-                      <td className="p-2 font-mono">{r.buyer_id || ""}</td>
-                      <td className="p-2">{r.brand_name || ""}</td>
+                      <td className="p-2">{fmtDate(r.posting_month)}</td>
+                      <td className="p-2">{r.po_no || "-"}</td>
+                      <td className="p-2">{r.po_line_label || "-"}</td>
+                      <td className="p-2">{r.shipment_no || "-"}</td>
+                      <td className="p-2">{r.buyer_name || "-"}</td>
+                      <td className="p-2">{r.brand_name || "-"}</td>
                       <td className="p-2 text-right">{fmtMoney(Number(r.allocated_usd || 0))}</td>
-                      <td className="p-2">
-                        {r.allocated_basis}
-                        {r.basis_value != null ? ` (${Number(r.basis_value).toFixed(4)})` : ""}
-                      </td>
+                      <td className="p-2">{formatBasisLabel(r.allocated_basis, r.basis_value)}</td>
                     </tr>
                   ))}
                   {!results.length ? (
