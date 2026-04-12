@@ -55,18 +55,7 @@ async function fetchCompanies(opts: { q: string; limit: number; useTypeFilter: b
 
     // ✅ 기존: neq("BUYER") 는 NULL/다른값을 다 통과시켜서 위험
     // ✅ 수정: FACTORY / SUPPLIER 만 허용
-    if (opts.useTypeFilter) {
-      // supabase-js .in()은 대소문자 민감할 수 있어, DB 데이터가 섞여있을 가능성 대비해서 or로 안전하게 처리
-      qb = qb.or(
-        [
-          "company_type.eq.FACTORY",
-          "company_type.eq.SUPPLIER",
-          "company_type.eq.factory",
-          "company_type.eq.supplier",
-        ].join(",")
-      );
-    }
-
+    
     if (q) {
       const t = escapeIlike(q);
       qb = qb.or(`company_name.ilike.%${t}%,code.ilike.%${t}%`);
