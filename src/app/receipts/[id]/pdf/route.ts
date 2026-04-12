@@ -1,11 +1,11 @@
 // src/app/receipts/[id]/pdf/route.ts
 import React from "react";
-import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { NextRequest, NextResponse } from "next/server";
 import { renderToBuffer } from "@react-pdf/renderer";
 import ReceiptPDF, { ReceiptPdfData } from "@/components/pdf/ReceiptPDF";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Ctx = { params: { id: string } };
@@ -14,135 +14,172 @@ function num(x: any) {
   const n = Number(x);
   return Number.isFinite(n) ? n : 0;
 }
+function s(v: any) {
+  return (v ?? "").toString().trim();
+}
+function round2(n: number) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
 function pickFirst<T>(...vals: Array<T | null | undefined>): T | null {
-  for (const v of vals) if (v !== undefined && v !== null) return v;
+  for (const v of vals) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
   return null;
 }
 
-function getSupabase() {
-  const cookieStore = cookies();
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get(name: string) {
-          return cookieStore.get(name)?.value;
-        },
-        // Route handlers can't set cookies via this client in a reliable way (we're read-only here)
-        set() {},
-        remove() {},
-      },
-    }
-  );
-}
-
-export async function GET(_req: Request, ctx: Ctx) {
+export async function GET(_req: NextRequest, ctx: Ctx) {
   try {
-    const id = ctx.params.id;
-    const supabase = getSupabase();
+    const id = s(ctx.params.id);
+    if (!id) {
+      return NextResponse.json({ error: "receipt id required" }, { status: 400 });
+    }
 
     // 1) receipt header
-    const { data: rh, error: rhErr } = await supabase
+    const { data: rh, error: rhErr } = await supabaseAdmin
       .from("receipt_headers")
       .select("*")
       .eq("id", id)
+      .eq("is_deleted", false)
       .maybeSingle();
 
     if (rhErr) throw rhErr;
-    if (!rh) return NextResponse.json({ error: "Receipt not found" }, { status: 404 });
+    if (!rh) {
+      return NextResponse.json({ error: "Receipt not found" }, { status: 404 });
+    }
 
-    // 2) buyer/company (do NOT assume companies.is_deleted exists)
-    let buyerName: string | null = null;
-    let buyerCode: string | null = null;
-    const buyerId = (rh as any).buyer_id ?? (rh as any).company_id ?? null;
-    if (buyerId) {
-      const { data: buyer, error: bErr } = await supabase
+    // 2) buyer/company
+    let buyerName: string | null = s((rh as any).buyer_name) || null;
+    let buyerCode: string | null = s((rh as any).buyer_code) || null;
+    const buyerId = s((rh as any).buyer_id ?? (rh as any).company_id) || null;
+
+    if (buyerId && (!buyerName || !buyerCode)) {
+      const { data: buyer, error: bErr } = await supabaseAdmin
         .from("companies")
         .select("id, name, company_name, code, buyer_code")
         .eq("id", buyerId)
         .maybeSingle();
+
       if (!bErr && buyer) {
-        buyerName = (buyer as any).name ?? (buyer as any).company_name ?? null;
-        buyerCode = (buyer as any).buyer_code ?? (buyer as any).code ?? null;
+        buyerName =
+          buyerName ||
+          s((buyer as any).company_name) ||
+          s((buyer as any).name) ||
+          null;
+        buyerCode =
+          buyerCode ||
+          s((buyer as any).buyer_code) ||
+          s((buyer as any).code) ||
+          null;
       }
     }
 
     // 3) bank account (optional)
-    let bankAccountName: string | null = null;
+    let bankAccountName: string | null = s((rh as any).bank_account_label) || null;
     let bankAccountNumber: string | null = null;
     let bankSwift: string | null = null;
-    const bankAccountId = (rh as any).bank_account_id ?? null;
+    const bankAccountId = s((rh as any).bank_account_id) || null;
+
     if (bankAccountId) {
-      const { data: ba, error: baErr } = await supabase
+      const { data: ba, error: baErr } = await supabaseAdmin
         .from("bank_accounts")
         .select("*")
         .eq("id", bankAccountId)
         .maybeSingle();
+
       if (!baErr && ba) {
         bankAccountName =
-          (ba as any).account_name ?? (ba as any).bank_name ?? (ba as any).name ?? null;
+          bankAccountName ||
+          s((ba as any).account_name) ||
+          s((ba as any).bank_name) ||
+          s((ba as any).name) ||
+          null;
         bankAccountNumber =
-          (ba as any).account_no ?? (ba as any).account_number ?? null;
+          s((ba as any).account_no) ||
+          s((ba as any).account_number) ||
+          s((ba as any).account_no_masked) ||
+          null;
         bankSwift =
-          (ba as any).swift ?? (ba as any).swift_code ?? null;
+          s((ba as any).swift) ||
+          s((ba as any).swift_code) ||
+          null;
       }
     }
 
-    // 4) receipt applications → invoices
-    const { data: apps, error: appErr } = await supabase
-      .from("receipt_applications")
-      .select("id, invoice_id, applied_amount, is_deleted")
-      .eq("receipt_id", id);
+    // 4) receipt lines -> invoices
+    const { data: lines, error: lineErr } = await supabaseAdmin
+      .from("receipt_lines")
+      .select("id, receipt_header_id, invoice_id, applied_amount, writeoff_amount, is_deleted")
+      .eq("receipt_header_id", id)
+      .eq("is_deleted", false);
 
-    if (appErr) throw appErr;
+    if (lineErr) throw lineErr;
 
-    const aliveApps = (apps || []).filter((a: any) => a && a.is_deleted !== true);
+    const aliveLines = (lines || []).filter((x: any) => x && x.is_deleted !== true);
     const invoiceIds = Array.from(
-      new Set(aliveApps.map((a: any) => a.invoice_id).filter(Boolean))
+      new Set(aliveLines.map((x: any) => s(x.invoice_id)).filter(Boolean))
     );
 
     const invoiceMap = new Map<string, any>();
     if (invoiceIds.length > 0) {
-      const { data: invs, error: invErr } = await supabase
+      const { data: invs, error: invErr } = await supabaseAdmin
         .from("invoice_headers")
-        .select("id, invoice_no, invoice_date, total_amount")
-        .in("id", invoiceIds as any);
+        .select("id, invoice_no, invoice_date, total_amount, paid_amount, balance_amount")
+        .in("id", invoiceIds);
       if (invErr) throw invErr;
-      (invs || []).forEach((inv: any) => invoiceMap.set(inv.id, inv));
+      for (const inv of invs || []) {
+        invoiceMap.set(String((inv as any).id), inv);
+      }
     }
 
-    const invoices = aliveApps.map((a: any) => {
-      const inv = a.invoice_id ? invoiceMap.get(a.invoice_id) : null;
+    const lineTotal = round2(
+      aliveLines.reduce((sum: number, line: any) => sum + num(line.applied_amount), 0)
+    );
+
+    const invoices = aliveLines.map((line: any) => {
+      const invoiceId = s(line.invoice_id) || null;
+      const inv = invoiceId ? invoiceMap.get(invoiceId) : null;
+      const ratio = lineTotal > 0 ? num(line.applied_amount) / lineTotal : 0;
+
       return {
-        invoice_id: a.invoice_id ?? null,
-        invoice_no: inv?.invoice_no ?? null,
+        invoice_id: invoiceId,
+        invoice_no: s(inv?.invoice_no) || null,
         invoice_date: inv?.invoice_date ?? null,
-        invoice_total: num(inv?.total_amount ?? 0),
-        applied_amount: num(a.applied_amount ?? 0),
+        invoice_total: num(inv?.total_amount),
+        applied_amount: round2(num(line.applied_amount)),
+        writeoff_amount: round2(num(line.writeoff_amount)),
+        allocated_our_fee: round2(ratio * num((rh as any).bank_fee_amount)),
+        allocated_buyer_fee: round2(ratio * num((rh as any).buyer_bank_fee_amount)),
+        allocated_claim_deduction: round2(ratio * num((rh as any).claim_deduction_amount)),
+        settled_amount: round2(
+          num(line.applied_amount) +
+            ratio * num((rh as any).bank_fee_amount) +
+            ratio * num((rh as any).buyer_bank_fee_amount) +
+            ratio * num((rh as any).claim_deduction_amount) +
+            num(line.writeoff_amount)
+        ),
       };
     });
 
-    const currency = (rh as any).currency ?? "USD";
+    const currency = s((rh as any).currency) || "USD";
 
     const data: ReceiptPdfData = {
-      receipt_id: (rh as any).id,
-      receipt_no: (rh as any).receipt_no ?? null,
-      deposit_date: pickFirst((rh as any).deposit_date, (rh as any).received_date) as any,
+      receipt_id: String((rh as any).id),
+      receipt_no: pickFirst((rh as any).reference_no, (rh as any).receipt_no, (rh as any).id) as any,
+      deposit_date: pickFirst((rh as any).deposit_date, (rh as any).receipt_date) as any,
       currency,
 
       buyer_name: buyerName,
       buyer_code: buyerCode,
 
-      method: (rh as any).method ?? "WIRE",
-      reference_no: (rh as any).reference_no ?? null,
-      note: (rh as any).note ?? null,
+      method: pickFirst((rh as any).method, (rh as any).payment_method, "WIRE") as any,
+      reference_no: pickFirst((rh as any).reference_no, null) as any,
+      note: pickFirst((rh as any).note, null) as any,
 
-      total_received_amount: num((rh as any).total_received_amount ?? (rh as any).total_amount ?? 0),
-      bank_fee_our_amount: num((rh as any).bank_fee_our_amount ?? 0),
-      bank_fee_buyer_amount: num((rh as any).bank_fee_buyer_amount ?? 0),
-      claim_deduction_amount: num((rh as any).claim_deduction_amount ?? 0),
-      net_received_amount: num((rh as any).net_received_amount ?? 0),
+      total_received_amount: num((rh as any).total_received ?? (rh as any).received_amount),
+      bank_fee_our_amount: num((rh as any).bank_fee_amount),
+      bank_fee_buyer_amount: num((rh as any).buyer_bank_fee_amount),
+      claim_deduction_amount: num((rh as any).claim_deduction_amount),
+      net_received_amount: num((rh as any).net_received_amount),
 
       bank_account_name: bankAccountName,
       bank_account_number: bankAccountNumber,
@@ -151,15 +188,11 @@ export async function GET(_req: Request, ctx: Ctx) {
       invoices,
     };
 
-    // 5) render PDF buffer
-    // NOTE: @react-pdf/renderer renderToBuffer expects a ReactElement<DocumentProps>.
-    // Your ReceiptPDF component returns a <Document />, but TS can't always infer that.
-    // Cast to break the overly-strict generic constraint.
     const element = React.createElement(ReceiptPDF as any, { data }) as any;
     const pdf = await renderToBuffer(element);
 
-    const filename = data.receipt_no
-      ? `Receipt-${data.receipt_no}.pdf`
+    const filename = data.reference_no
+      ? `Receipt-${data.reference_no}.pdf`
       : `Receipt-${data.receipt_id}.pdf`;
 
     return new NextResponse(pdf as any, {

@@ -384,7 +384,7 @@ function calcLineActualSync(
   const plannedLocalUnit = calcMaterialsPlannedAmt(specs);
   const plannedUnitUsd = calcPlannedUnitUsd(
     plannedLocalUnit,
-    (line as any)?.vendor_currency ?? "USD",
+    "CNY",
     (line as any)?.fx_rate ?? null
   );
   const actualQty = nnumNullable((line as any)?.qty) ?? 0;
@@ -790,7 +790,7 @@ export default function WorkSheetDetailPage() {
   function confirmIfDirty(actionLabel: string) {
     if (!isDirty) return true;
     return window.confirm(
-      `저장되지 않은 변경사항이 있습니다(Draft).\n그래도 ${actionLabel} 하시겠습니까?`
+      `저장되지 않은 변경사항이 있습니다(Unsaved).\n그래도 ${actionLabel} 하시겠습니까?`
     );
   }
 
@@ -832,7 +832,7 @@ export default function WorkSheetDetailPage() {
         const fxRate = nnumNullable((l as any)?.fx_rate);
         const plannedUnitUsd = calcPlannedUnitUsd(
           plannedLocalUnit,
-          (l as any)?.vendor_currency ?? "USD",
+          "CNY",
           fxRate
         );
         const sync = calcLineActualSync(
@@ -841,10 +841,20 @@ export default function WorkSheetDetailPage() {
           vendorActualUnitInputByLineId[l.id]
         );
 
+        const manualVendorLocal =
+          nnumNullable((l as any)?.vendor_unit_cost_local) ??
+          parseDec2ToNumber(l.id ? (vendorUnitInputByLineId[l.id] ?? "") : "") ??
+          plannedLocalUnit;
+        const manualVendorUsd = calcPlannedUnitUsd(
+          manualVendorLocal,
+          "CNY",
+          fxRate
+        );
+
         return {
           ...l,
-          vendor_unit_cost_local: plannedLocalUnit,
-          vendor_unit_cost_usd: plannedUnitUsd,
+          vendor_unit_cost_local: manualVendorLocal,
+          vendor_unit_cost_usd: manualVendorUsd,
           fx_rate: fxRate,
           fx_as_of: fxRate ? new Date().toISOString().slice(0, 10) : (l as any).fx_as_of ?? null,
           actual_unit: sync.actualUnit,
@@ -1057,6 +1067,8 @@ export default function WorkSheetDetailPage() {
       });
       didInitRef.current = true;
 
+      await load();
+
       if (showSuccessToast) {
         toast.success("Saved successfully", {
           description: "Actual values were synchronized.",
@@ -1066,7 +1078,13 @@ export default function WorkSheetDetailPage() {
     } catch (e: any) {
       const msg = e?.message ?? "Save error";
       setError(msg);
-      toast.error("Save failed", { description: msg });
+      if (String(msg).includes("Actual cost is CONFIRMED")) {
+        toast.error("Actual is locked", {
+          description: "Unlock Actual을 눌러 Actual 필드를 수정하거나, 일반 필드만 다시 저장해 주세요.",
+        });
+      } else {
+        toast.error("Save failed", { description: msg });
+      }
       return false;
     } finally {
       setSaving(false);
@@ -1150,6 +1168,34 @@ export default function WorkSheetDetailPage() {
     }
   };
 
+  const onUnlockActualCost = async () => {
+    if (!id) return;
+
+    try {
+      setConfirmingActual(true);
+
+      const res = await fetch(`/api/work-sheets/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unlock_actual_cost: true }),
+      });
+
+      const j = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(j?.error || "Failed to unlock actual cost");
+
+      await load();
+      toast.success("Actual unlocked", {
+        description: "Actual fields can be edited again.",
+      });
+    } catch (e: any) {
+      toast.error("Unlock failed", {
+        description: e?.message ?? "Server error",
+      });
+    } finally {
+      setConfirmingActual(false);
+    }
+  };
+
 
 
   const reqShipDate = fmtDate(po?.requested_ship_date ?? null);
@@ -1207,7 +1253,7 @@ export default function WorkSheetDetailPage() {
             <div className="flex flex-wrap items-center gap-2">
               {didInitRef.current ? (
                 isDirty ? (
-                  <Badge variant="destructive">Draft</Badge>
+                  <Badge variant="destructive">Unsaved</Badge>
                 ) : (
                   <Badge variant="secondary">Saved</Badge>
                 )
@@ -1468,7 +1514,45 @@ export default function WorkSheetDetailPage() {
               const poSubtotal = Number(po?.subtotal ?? 0);
               const poCurrency = (po?.currency ?? header?.currency ?? "USD") as string;
               const totalQty = (lines || []).reduce((s: number, ln: any) => s + (Number(ln?.qty) || 0), 0) || 0;
-              const unitPrice = totalQty ? poSubtotal / totalQty : 0;
+
+              const lineQty = Number((activeLine as any)?.qty ?? 0) || 0;
+
+              const directUnitPriceRaw =
+                (activeLine as any)?.unit_price ??
+                (activeLine as any)?.po_unit_price ??
+                (activeLine as any)?.price ??
+                null;
+              const directUnitPrice =
+                directUnitPriceRaw === null || directUnitPriceRaw === undefined || directUnitPriceRaw === ""
+                  ? null
+                  : Number(directUnitPriceRaw);
+
+              const lineAmountRaw =
+                (activeLine as any)?.amount ??
+                (activeLine as any)?.line_amount ??
+                (activeLine as any)?.total_amount ??
+                null;
+              const lineAmount =
+                lineAmountRaw === null || lineAmountRaw === undefined || lineAmountRaw === ""
+                  ? null
+                  : Number(lineAmountRaw);
+
+              const hasDirectUnitPrice = Number.isFinite(directUnitPrice as number);
+              const hasLineAmount = Number.isFinite(lineAmount as number) && lineQty > 0;
+
+              const unitPrice = hasDirectUnitPrice
+                ? Number(directUnitPrice)
+                : hasLineAmount
+                ? Number(lineAmount) / lineQty
+                : totalQty
+                ? poSubtotal / totalQty
+                : 0;
+
+              const unitPriceMeta = hasDirectUnitPrice
+                ? `PO Line Unit Price: ${Number(directUnitPrice).toFixed(4)}`
+                : hasLineAmount
+                ? `Line Amount: ${Number(lineAmount).toFixed(2)} / Qty: ${lineQty.toLocaleString()}`
+                : `PO Subtotal: ${poSubtotal.toFixed(2)} / Qty: ${totalQty.toLocaleString()}`;
 
               // activeLineId can be typed as string | null, so guard before indexing
               const _lineId = (activeLineId ?? (activeLine as any)?.id ?? "") as string;
@@ -1534,7 +1618,7 @@ export default function WorkSheetDetailPage() {
                     <CardContent className="p-4">
                       <div className="text-xs text-muted-foreground">Unit Price (PO Currency: {poCurrency})</div>
                       <div className="mt-1 text-2xl font-semibold tabular-nums">{unitPrice.toFixed(4)}</div>
-                      <div className="mt-1 text-xs text-muted-foreground">PO Subtotal: {poSubtotal.toFixed(2)} / Qty: {totalQty.toLocaleString()}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">{unitPriceMeta}</div>
                     </CardContent>
                   </Card>
                   <Card>
@@ -2082,8 +2166,8 @@ export default function WorkSheetDetailPage() {
 
                     return (
                       <>
-                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Planned Unit Cost (USD)</div><div className="mt-1 text-2xl font-semibold tabular-nums">{fmtMoney(plannedUnit)}</div><div className="mt-1 text-xs text-muted-foreground">{fmtFxMeta((activeLine as any)?.vendor_currency ?? "USD", plannedLocal, (activeLine as any)?.fx_rate ?? null)}</div></CardContent></Card>
-                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Actual Unit Cost (USD)</div><div className="mt-1 text-2xl font-semibold tabular-nums">{actualUnit ? fmtMoney(actualUnit) : "-"}</div><div className="mt-1 text-xs text-muted-foreground">{resolvedProductionMode === "OUTSOURCED" ? fmtFxMeta((activeLine as any)?.vendor_currency ?? "USD", actualLocal, actualFx) : "IN_HOUSE actual sum"}</div></CardContent></Card>
+                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">{resolvedProductionMode === "IN_HOUSE" ? "Planned Unit Cost (Local)" : "Planned Unit Cost (USD)"}</div><div className="mt-1 text-2xl font-semibold tabular-nums">{fmtMoney(resolvedProductionMode === "IN_HOUSE" ? plannedLocal : plannedUnit)}</div><div className="mt-1 text-xs text-muted-foreground">{resolvedProductionMode === "OUTSOURCED" ? fmtFxMeta("CNY", plannedLocal, (activeLine as any)?.fx_rate ?? null) : "IN_HOUSE planned sum"}</div></CardContent></Card>
+                        <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">{resolvedProductionMode === "IN_HOUSE" ? "Actual Unit Cost (Local)" : "Actual Unit Cost (USD)"}</div><div className="mt-1 text-2xl font-semibold tabular-nums">{actualUnit ? fmtMoney(actualUnit) : "-"}</div><div className="mt-1 text-xs text-muted-foreground">{resolvedProductionMode === "OUTSOURCED" ? fmtFxMeta((activeLine as any)?.vendor_currency ?? "USD", actualLocal, actualFx) : "IN_HOUSE actual sum"}</div></CardContent></Card>
                         <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Δ Unit Cost (USD)</div><div className="mt-1 text-2xl font-semibold tabular-nums">{plannedUnit && actualUnit ? `${deltaUnit >= 0 ? "+" : ""}${fmtMoney(deltaUnit)}` : "-"}</div></CardContent></Card>
                         <Card><CardContent className="p-4"><div className="text-xs text-muted-foreground">Δ %</div><div className="mt-1 text-2xl font-semibold tabular-nums">{plannedUnit && actualUnit ? `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(2)}%` : "-"}</div></CardContent></Card>
                       </>
@@ -2126,6 +2210,8 @@ export default function WorkSheetDetailPage() {
                     </Select>
                   </div>
 
+                  {resolvedProductionMode === "OUTSOURCED" ? (
+                  <>
                   <div className="space-y-1">
                     <Label>Vendor</Label>
                     <Select
@@ -2229,20 +2315,22 @@ export default function WorkSheetDetailPage() {
                         setLines((prev) =>
                           (prev || []).map((ln) => {
                             if (ln.id !== lineId) return ln;
-                            const localUnit = calcMaterialsPlannedAmt(materialsByLineId[lineId] ?? []);
-                            const nextCurrency = (ln as any)?.vendor_currency ?? "CNY";
+                            const manualLocal =
+                              nnumNullable((ln as any)?.vendor_unit_cost_local) ??
+                              parseDec2ToNumber(vendorUnitInputByLineId[lineId] ?? "") ??
+                              calcMaterialsPlannedAmt(materialsByLineId[lineId] ?? []);
                             const actualLocal = (ln as any)?.actual_vendor_unit_cost_local ?? null;
                             return {
                               ...(ln as any),
                               fx_rate: n,
                               fx_mode: "MANUAL",
                               fx_as_of: new Date().toISOString().slice(0, 10),
-                              vendor_unit_cost_local: localUnit,
-                              vendor_unit_cost_usd: calcPlannedUnitUsd(localUnit, nextCurrency, n),
+                              vendor_unit_cost_local: manualLocal,
+                              vendor_unit_cost_usd: calcPlannedUnitUsd(manualLocal, "CNY", n),
                               actual_fx_rate: n,
                               actual_fx_mode: "MANUAL",
                               actual_fx_as_of: new Date().toISOString().slice(0, 10),
-                              actual_vendor_unit_cost_usd: calcActualVendorUnitUsd(actualLocal, nextCurrency, n),
+                              actual_vendor_unit_cost_usd: calcActualVendorUnitUsd(actualLocal, ((ln as any)?.vendor_currency ?? "CNY"), n),
                             } as any;
                           })
                         );
@@ -2352,6 +2440,12 @@ export default function WorkSheetDetailPage() {
                     <Label>Actual Locked</Label>
                     <Input value={activeActualLocked ? "YES (Confirmed)" : "NO"} readOnly />
                   </div>
+                  </>
+                ) : (
+                  <div className="md:col-span-3 rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
+                    IN_HOUSE mode에서는 Vendor / Vendor Currency / FX / Vendor Unit Price / Vendor Actual Unit Cost / LC Price를 표시하지 않습니다.
+                  </div>
+                )}
                 </div>
 
                 <div className="text-sm text-muted-foreground">
@@ -2361,7 +2455,7 @@ export default function WorkSheetDetailPage() {
                   <br />
                   <span className="font-medium text-foreground">Vendor Unit Price</span> 는
                   벤더에게 지급하는 <span className="font-medium text-foreground">하청 단가</span>
-                  (로컬통화)를 입력합니다.
+                  (로컬통화)를 입력합니다. 이 항목은 <span className="font-medium text-foreground">OUTSOURCED</span> 에서만 사용됩니다.
                   <br />
                   <span className="font-medium text-foreground">연동 규칙:</span>{" "}
                   Vendor 선택 → 자동 OUTSOURCED, Mode를 IN_HOUSE로 변경 → Vendor 자동
@@ -2407,6 +2501,14 @@ export default function WorkSheetDetailPage() {
                       : confirmingActual && (resolvedProductionMode ?? "IN_HOUSE") === "OUTSOURCED"
                       ? "Confirming..."
                       : "Confirm Actual (OUTSOURCED)"}
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    onClick={onUnlockActualCost}
+                    disabled={saving || loading || !header || !activeActualLocked || confirmingActual}
+                  >
+                    {confirmingActual && activeActualLocked ? "Unlocking..." : "Unlock Actual"}
                   </Button>
                 </div>
               </CardContent>

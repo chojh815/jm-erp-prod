@@ -63,6 +63,7 @@ type PdfData = {
   materials?: MaterialRow[] | null;
 
   // ✅ 협력사 공유용(완제품 단가 박스)
+  productionMode?: "IN_HOUSE" | "OUTSOURCED" | null;
   vendorCurrency?: string | null;
   vendorUnitCostLocal?: number | string | null;
 
@@ -287,6 +288,11 @@ function mapApiToPdfData(json: any): PdfData {
   const qty = line0?.qty ?? null;
   const uom = header?.uom ?? line0?.uom ?? "PCS";
 
+  const productionMode =
+    line0?.production_mode ??
+    line0?.productionMode ??
+    (line0?.vendor_id ? "OUTSOURCED" : "IN_HOUSE");
+
   // ✅ 협력사 공유용(완제품 단가)
   // - 대표라인(line0)에 값이 없을 수 있으니, lines 전체에서 먼저 찾는다.
   const vendorLine =
@@ -311,16 +317,21 @@ function mapApiToPdfData(json: any): PdfData {
   // ✅ fallback: if vendor currency missing, use PO currency (common case when vendor pays in same currency)
   const poCurrency = toStr(po?.currency ?? header?.currency).trim() || null;
 
-  const vendorCurrency = vendorCurrencyClean ?? poCurrency;
+  const vendorCurrency =
+    productionMode === "OUTSOURCED" ? (vendorCurrencyClean ?? poCurrency) : null;
 
   const vendorUnitCostLocal =
-    vendorLine?.vendor_unit_cost_local ??
-    vendorLine?.vendorUnitCostLocal ??
-    line0?.vendor_unit_cost_local ??
-    line0?.vendorUnitCostLocal ??
-    header?.vendor_unit_cost_local ??
-    header?.vendorUnitCostLocal ??
-    null;
+    productionMode === "OUTSOURCED"
+      ? (
+          vendorLine?.vendor_unit_cost_local ??
+          vendorLine?.vendorUnitCostLocal ??
+          line0?.vendor_unit_cost_local ??
+          line0?.vendorUnitCostLocal ??
+          header?.vendor_unit_cost_local ??
+          header?.vendorUnitCostLocal ??
+          null
+        )
+      : null;
 
   // ✅ Special Instructions(공통 주의사항)
   // - DB: work_sheet_headers.special_instructions
@@ -459,6 +470,7 @@ function mapApiToPdfData(json: any): PdfData {
     qty,
     uom,
 
+    productionMode,
     vendorCurrency,
     vendorUnitCostLocal,
 
@@ -786,7 +798,8 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   // L.P (Local Price) - top right (avoid extra box pushing content)
   const lpCur = toStr(d.vendorCurrency).trim();
   const lpUnit = toStr(d.vendorUnitCostLocal).trim();
-  if (lpCur && lpUnit) {
+  const pdfProductionMode = toStr(d.productionMode).trim().toUpperCase();
+  if (pdfProductionMode === "OUTSOURCED" && lpCur && lpUnit) {
     const lpText = `L.P : ${lpCur} ${lpUnit}`;
     doc.text(lpText, pageW - margin, 23.5, { align: "right" });
   }

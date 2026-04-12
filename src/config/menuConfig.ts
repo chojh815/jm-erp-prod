@@ -188,6 +188,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         href: "/dashboards/expected-profitability",
         perm: ["dashboard.profitability", "dashboard.finance"],
       },
+      {
+      label: "A/R Aging",
+      href: "dashboards/ar-aging",
+      perm: "receipts.view",
+    },
     ],
   },
 

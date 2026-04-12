@@ -105,6 +105,31 @@ type ReceiptRow = {
   is_deleted?: boolean | null;
 };
 
+type ReceiptTraceRow = {
+  receipt_id: string;
+  receipt_date: string | null;
+  receipt_no?: string | null;
+  gross_amount: number;
+  applied_amount: number;
+  writeoff_amount?: number;
+  our_fee_amount?: number;
+  buyer_fee_amount?: number;
+  claim_amount?: number;
+  method?: string | null;
+  reference_no?: string | null;
+  note?: string | null;
+  created_by_email?: string | null;
+};
+
+type ReceiptTraceSummary = {
+  invoice_total: number;
+  gross_received_total: number;
+  applied_total: number;
+  balance: number;
+  payment_status: string;
+  rows: ReceiptTraceRow[];
+};
+
 function todayISODate() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -200,6 +225,17 @@ function groupInvoiceLines(lines: InvoiceLine[]) {
   });
 }
 
+
+function InfoBox({ label, value }: { label: string; value: string | number | null | undefined }) {
+  return (
+    <div className="rounded-md border p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 text-base font-semibold">{value ?? "—"}</div>
+    </div>
+  );
+}
+
+
 export default function InvoiceDetailPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -219,6 +255,11 @@ export default function InvoiceDetailPage() {
 
   const [receiptsLoading, setReceiptsLoading] = React.useState(false);
   const [receipts, setReceipts] = React.useState<ReceiptRow[]>([]);
+
+  const [traceLoading, setTraceLoading] = React.useState(false);
+  const [traceSummary, setTraceSummary] = React.useState<ReceiptTraceSummary | null>(null);
+  const [selectedReceipt, setSelectedReceipt] = React.useState<any | null>(null);
+  const [receiptDetailLoading, setReceiptDetailLoading] = React.useState(false);
 
   const [creatingReceipt, setCreatingReceipt] = React.useState(false);
   const [savingReceipt, setSavingReceipt] = React.useState(false);
@@ -276,28 +317,101 @@ export default function InvoiceDetailPage() {
     loadReceipts();
   }, [loadReceipts]);
 
+  const loadReceiptTrace = React.useCallback(async () => {
+    if (!invoiceId) return;
+    setTraceLoading(true);
+    try {
+      const res = await fetch(
+        `/api/invoices/${encodeURIComponent(invoiceId)}/receipt-trace`,
+        { cache: "no-store" }
+      );
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        console.warn("Failed to load receipt trace", json);
+        setTraceSummary(null);
+        return;
+      }
+
+      const payload = json?.data ?? json ?? {};
+      setTraceSummary({
+        invoice_total: Number(payload?.invoice_total || 0),
+        gross_received_total: Number(payload?.gross_received_total || 0),
+        applied_total: Number(payload?.applied_total || 0),
+        balance: Number(payload?.balance || 0),
+        payment_status: String(payload?.payment_status || "UNPAID"),
+        rows: Array.isArray(payload?.rows) ? payload.rows : [],
+      });
+    } catch (e) {
+      console.error(e);
+      setTraceSummary(null);
+    } finally {
+      setTraceLoading(false);
+    }
+  }, [invoiceId]);
+
+  React.useEffect(() => {
+    loadReceipts();
+    loadReceiptTrace();
+  }, [loadReceipts, loadReceiptTrace]);
+
+
+  const openReceiptDetail = React.useCallback(async (receiptId: string) => {
+    if (!receiptId) return;
+    setReceiptDetailLoading(true);
+    try {
+      const res = await fetch(`/api/receipts/${encodeURIComponent(receiptId)}`, {
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        alert(json?.error || json?.message || "Failed to load receipt detail.");
+        return;
+      }
+      setSelectedReceipt(json?.row ?? null);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to load receipt detail.");
+    } finally {
+      setReceiptDetailLoading(false);
+    }
+  }, []);
+
+  const closeReceiptDetail = React.useCallback(() => {
+    setSelectedReceipt(null);
+  }, []);
+
   const recomputeTotal = React.useMemo(() => {
     const sum = (lines || []).reduce((acc, l) => acc + Number(l.amount || 0), 0);
     return sum;
   }, [lines]);
 
-  const receivedTotal = React.useMemo(() => {
+  const grossReceivedTotal = React.useMemo(() => {
+    if (traceSummary) return Number(traceSummary.gross_received_total || 0);
     return (receipts || []).reduce((sum, r) => sum + parseAmount(r.received_amount), 0);
-  }, [receipts]);
+  }, [receipts, traceSummary]);
 
   const invoiceTotalForPayment = React.useMemo(() => {
     const t =
-      header?.total_amount != null && Number(header.total_amount) > 0
+      traceSummary?.invoice_total != null && Number(traceSummary.invoice_total) > 0
+        ? Number(traceSummary.invoice_total)
+        : header?.total_amount != null && Number(header.total_amount) > 0
         ? Number(header.total_amount)
         : Number(recomputeTotal || 0);
     return Number.isFinite(t) ? t : 0;
-  }, [header?.total_amount, recomputeTotal]);
+  }, [traceSummary?.invoice_total, header?.total_amount, recomputeTotal]);
+
+  const receivedTotal = React.useMemo(() => {
+    if (traceSummary) return Number(traceSummary.applied_total || 0);
+    return 0;
+  }, [traceSummary]);
 
   const balance = React.useMemo(() => {
+    if (traceSummary) return Number(traceSummary.balance || 0);
     return invoiceTotalForPayment - receivedTotal;
-  }, [invoiceTotalForPayment, receivedTotal]);
+  }, [invoiceTotalForPayment, receivedTotal, traceSummary]);
 
   const paymentStatus = React.useMemo(() => {
+    if (traceSummary?.payment_status) return traceSummary.payment_status;
     const inv = Number(invoiceTotalForPayment || 0);
     const rec = Number(receivedTotal || 0);
     const tol = 0.005;
@@ -306,7 +420,7 @@ export default function InvoiceDetailPage() {
     if (rec < inv - tol) return "PARTIALLY_PAID";
     if (Math.abs(rec - inv) <= tol) return "PAID";
     return "OVERPAID";
-  }, [invoiceTotalForPayment, receivedTotal]);
+  }, [invoiceTotalForPayment, receivedTotal, traceSummary]);
 
   const resetNewReceiptDefaults = React.useCallback(() => {
     setNewReceipt({
@@ -341,7 +455,9 @@ export default function InvoiceDetailPage() {
           body: JSON.stringify({
             receipt_date: newReceipt.receipt_date || null,
             received_amount: amt,
+            amount: amt,
             payment_method: (newReceipt.payment_method || "WIRE").trim(),
+            method: (newReceipt.payment_method || "WIRE").trim(),
             reference_no: (newReceipt.reference_no || "").trim() || null,
             note: (newReceipt.note || "").trim() || null,
           }),
@@ -354,7 +470,7 @@ export default function InvoiceDetailPage() {
         return;
       }
 
-      await loadReceipts();
+      await Promise.all([loadReceipts(), loadReceiptTrace()]);
       resetNewReceiptDefaults();
     } catch (e) {
       console.error(e);
@@ -408,7 +524,7 @@ export default function InvoiceDetailPage() {
         }
 
         setEditingReceiptId(null);
-        await loadReceipts();
+        await Promise.all([loadReceipts(), loadReceiptTrace()]);
       } catch (e) {
         console.error(e);
         alert("Update failed.");
@@ -433,7 +549,7 @@ export default function InvoiceDetailPage() {
           alert(json?.error || json?.message || `Delete failed (${res.status})`);
           return;
         }
-        await loadReceipts();
+        await Promise.all([loadReceipts(), loadReceiptTrace()]);
       } catch (e) {
         console.error(e);
         alert("Delete failed.");
@@ -706,6 +822,10 @@ export default function InvoiceDetailPage() {
         `Currency: ${cur}`,
         `Incoterm: ${incoterm}`,
         `Payment Term: ${payTerm}`,
+        `Payment Status: ${paymentStatus.replaceAll("_", " ")}`,
+        `Gross Received: ${cur} ${fmtMoney2(grossReceivedTotal)}`,
+        `Applied: ${cur} ${fmtMoney2(receivedTotal)}`,
+        `Balance: ${cur} ${fmtMoney2(balance)}`,
       ];
 
       for (const line of infoBase) {
@@ -1105,10 +1225,92 @@ export default function InvoiceDetailPage() {
           </CardHeader>
 
           <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Invoice Total</div>
+                <div className="mt-1 text-lg font-semibold">{currency} {fmtMoney2(invoiceTotalForPayment)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Gross Received</div>
+                <div className="mt-1 text-lg font-semibold">{currency} {fmtMoney2(grossReceivedTotal)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Applied</div>
+                <div className="mt-1 text-lg font-semibold text-blue-600">{currency} {fmtMoney2(receivedTotal)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Balance</div>
+                <div className="mt-1 text-lg font-semibold">{currency} {fmtMoney2(balance)}</div>
+              </div>
+            </div>
+
+            <div className="rounded-md border">
+              <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/30">
+                <div className="font-semibold">Receipt Trace</div>
+                <div className="text-xs text-muted-foreground">
+                  {traceLoading ? "Loading..." : `${traceSummary?.rows?.length || 0} item(s)`}
+                </div>
+              </div>
+              <div className="w-full overflow-auto">
+                <table className="w-full text-sm table-fixed">
+                  <thead className="bg-muted/20">
+                    <tr className="[&>th]:px-3 [&>th]:py-0 [&>th]:h-14 [&>th]:text-left [&>th]:align-middle">
+                      <th className="min-w-[110px]">Date</th>
+                      <th className="min-w-[130px]">Receipt</th>
+                      <th className="min-w-[120px] text-right">Gross</th>
+                      <th className="min-w-[120px] text-right">Applied</th>
+                      <th className="min-w-[110px] text-right">Our Fee</th>
+                      <th className="min-w-[110px] text-right">Buyer Fee</th>
+                      <th className="min-w-[110px] text-right">Claim</th>
+                      <th className="min-w-[120px]">Method</th>
+                      <th className="min-w-[180px]">Reference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(traceSummary?.rows || []).length === 0 ? (
+                      <tr className="border-t">
+                        <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={9}>
+                          No receipt trace.
+                        </td>
+                      </tr>
+                    ) : (
+                      (traceSummary?.rows || []).map((r) => (
+                        <tr key={`${r.receipt_id}-${r.receipt_date || ""}`} className="border-t [&>td]:px-3 [&>td]:py-0 [&>td]:h-16 [&>td]:align-middle">
+                          <td className="whitespace-nowrap">{fmtDate10(r.receipt_date)}</td>
+                          <td className="break-all">
+                            <button
+                              type="button"
+                              className="text-left font-medium text-blue-600 hover:underline"
+                              onClick={() => openReceiptDetail(r.receipt_id)}
+                            >
+                              <button
+                              type="button"
+                              className="text-left font-medium text-blue-600 hover:underline"
+                              onClick={() => openReceiptDetail(r.receipt_id)}
+                            >
+                              {r.receipt_no || r.receipt_id}
+                            </button>
+                            </button>
+                          </td>
+                          <td className="text-right whitespace-nowrap">{fmtMoney2(r.gross_amount)}</td>
+                          <td className="text-right font-semibold text-blue-600 whitespace-nowrap">{fmtMoney2(r.applied_amount)}</td>
+                          <td className="text-right whitespace-nowrap">{fmtMoney2(r.our_fee_amount)}</td>
+                          <td className="text-right whitespace-nowrap">{fmtMoney2(r.buyer_fee_amount)}</td>
+                          <td className="text-right whitespace-nowrap">{fmtMoney2(r.claim_amount)}</td>
+                          <td className="whitespace-nowrap">{r.method || ""}</td>
+                          <td>{r.reference_no || ""}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <div className="w-full overflow-auto rounded-md border">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm table-fixed">
                 <thead className="bg-muted/40">
-                  <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+                  <tr className="[&>th]:px-3 [&>th]:py-0 [&>th]:h-14 [&>th]:text-left [&>th]:align-middle">
                     <th className="min-w-[150px]">PO No</th>
                     <th className="min-w-[120px]">Style No</th>
                     <th className="min-w-[240px]">Description</th>
@@ -1154,7 +1356,7 @@ export default function InvoiceDetailPage() {
                           const idx = lines.findIndex((x) => x.id === l.id);
 
                           return (
-                            <tr key={l.id} className="border-t [&>td]:px-3 [&>td]:py-2">
+                            <tr key={l.id} className="border-t [&>td]:px-3 [&>td]:py-0 [&>td]:h-16 [&>td]:align-middle">
                               <td>{l.po_no ?? ""}</td>
                               <td>{l.style_no ?? ""}</td>
                               <td>
@@ -1256,7 +1458,10 @@ export default function InvoiceDetailPage() {
             <CardTitle>Receipts</CardTitle>
             <div className="flex items-center gap-2">
               <div className="text-sm text-muted-foreground">
-                Received: {currency} {fmtMoney2(receivedTotal)}
+                Gross: {currency} {fmtMoney2(grossReceivedTotal)}
+              </div>
+              <div className="text-sm text-muted-foreground">
+                Applied: {currency} {fmtMoney2(receivedTotal)}
               </div>
               <div className="text-sm text-muted-foreground">
                 Balance: {currency} {fmtMoney2(balance)}
@@ -1278,10 +1483,13 @@ export default function InvoiceDetailPage() {
               </div>
               <Button
                 variant="outline"
-                onClick={loadReceipts}
-                disabled={receiptsLoading}
+                onClick={() => {
+                  loadReceipts();
+                  loadReceiptTrace();
+                }}
+                disabled={receiptsLoading || traceLoading}
               >
-                {receiptsLoading ? "Loading..." : "Refresh"}
+                {receiptsLoading || traceLoading ? "Loading..." : "Refresh"}
               </Button>
             </div>
           </CardHeader>
@@ -1357,6 +1565,74 @@ export default function InvoiceDetailPage() {
               </div>
             </div>
 
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Invoice Total</div>
+                <div className="mt-1 text-lg font-semibold">{currency} {fmtMoney2(invoiceTotalForPayment)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Gross Received</div>
+                <div className="mt-1 text-lg font-semibold">{currency} {fmtMoney2(grossReceivedTotal)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Applied</div>
+                <div className="mt-1 text-lg font-semibold text-blue-600">{currency} {fmtMoney2(receivedTotal)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Balance</div>
+                <div className="mt-1 text-lg font-semibold">{currency} {fmtMoney2(balance)}</div>
+              </div>
+            </div>
+
+            <div className="rounded-md border">
+              <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/30">
+                <div className="font-semibold">Receipt Trace</div>
+                <div className="text-xs text-muted-foreground">
+                  {traceLoading ? "Loading..." : `${traceSummary?.rows?.length || 0} item(s)`}
+                </div>
+              </div>
+              <div className="w-full overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/20">
+                    <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+                      <th className="min-w-[110px]">Date</th>
+                      <th className="min-w-[130px]">Receipt</th>
+                      <th className="min-w-[120px] text-right">Gross</th>
+                      <th className="min-w-[120px] text-right">Applied</th>
+                      <th className="min-w-[110px] text-right">Our Fee</th>
+                      <th className="min-w-[110px] text-right">Buyer Fee</th>
+                      <th className="min-w-[110px] text-right">Claim</th>
+                      <th className="min-w-[120px]">Method</th>
+                      <th className="min-w-[180px]">Reference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(traceSummary?.rows || []).length === 0 ? (
+                      <tr className="border-t">
+                        <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={10}>
+                          No receipt trace.
+                        </td>
+                      </tr>
+                    ) : (
+                      (traceSummary?.rows || []).map((r) => (
+                        <tr key={`${r.receipt_id}-${r.receipt_date || ""}`} className="border-t [&>td]:px-3 [&>td]:py-0 [&>td]:h-16 [&>td]:align-middle">
+                          <td>{fmtDate10(r.receipt_date)}</td>
+                          <td>{r.receipt_no || r.receipt_id}</td>
+                          <td className="text-right">{fmtMoney2(r.gross_amount)}</td>
+                          <td className="text-right font-semibold text-blue-600">{fmtMoney2(r.applied_amount)}</td>
+                          <td className="text-right">{fmtMoney2(r.our_fee_amount)}</td>
+                          <td className="text-right">{fmtMoney2(r.buyer_fee_amount)}</td>
+                          <td className="text-right">{fmtMoney2(r.claim_amount)}</td>
+                          <td>{r.method || ""}</td>
+                          <td>{r.reference_no || ""}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <div className="w-full overflow-auto rounded-md border">
               <table className="w-full text-sm">
                 <thead className="bg-muted/40">
@@ -1366,14 +1642,13 @@ export default function InvoiceDetailPage() {
                     <th className="min-w-[130px]">Method</th>
                     <th className="min-w-[200px]">Reference</th>
                     <th className="min-w-[260px]">Note</th>
-                    <th className="min-w-[140px]">Created By</th>
                     <th className="min-w-[140px] text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {receipts.length === 0 ? (
                     <tr className="border-t">
-                      <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={7}>
+                      <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={6}>
                         No receipts.
                       </td>
                     </tr>
@@ -1381,7 +1656,7 @@ export default function InvoiceDetailPage() {
                     receipts.map((r) => {
                       const isEditing = editingReceiptId === r.id;
                       return (
-                        <tr key={r.id} className="border-t [&>td]:px-3 [&>td]:py-2">
+                        <tr key={r.id} className="border-t [&>td]:px-3 [&>td]:py-0 [&>td]:h-16 [&>td]:align-middle">
                           <td>
                             {isEditing ? (
                               <Input
@@ -1462,9 +1737,6 @@ export default function InvoiceDetailPage() {
                             )}
                           </td>
 
-                          <td className="text-xs text-muted-foreground">
-                            {r.created_by_email || ""}
-                          </td>
 
                           <td className="text-right">
                             {isEditing ? (
@@ -1511,6 +1783,188 @@ export default function InvoiceDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {selectedReceipt ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-4xl rounded-2xl bg-background shadow-2xl border">
+            <div className="flex items-center justify-between border-b px-5 py-4">
+              <div>
+                <div className="text-lg font-semibold">Receipt Detail</div>
+                {receiptDetailLoading ? <div className="text-xs text-muted-foreground">Loading...</div> : null}
+                <div className="text-sm text-muted-foreground">
+                  {selectedReceipt.reference_no || selectedReceipt.id || "—"}
+                </div>
+              </div>
+              <Button variant="outline" onClick={closeReceiptDetail}>Close</Button>
+            </div>
+
+            <div className="grid gap-4 p-5">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <InfoBox label="Deposit Date" value={fmtDate10(selectedReceipt.deposit_date || selectedReceipt.receipt_date)} />
+                <InfoBox label="Gross Received" value={fmtMoney2(selectedReceipt.total_received ?? selectedReceipt.received_amount)} />
+                <InfoBox label="Net Received" value={fmtMoney2(selectedReceipt.net_received_amount)} />
+                <InfoBox label="Method" value={selectedReceipt.method || selectedReceipt.payment_method || "—"} />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <InfoBox label="Our Fee" value={fmtMoney2(selectedReceipt.bank_fee_amount)} />
+                <InfoBox label="Buyer Fee" value={fmtMoney2(selectedReceipt.buyer_bank_fee_amount)} />
+                <InfoBox label="Claim" value={fmtMoney2(selectedReceipt.claim_deduction_amount)} />
+                <InfoBox label="Writeoff" value={fmtMoney2(selectedReceipt.buyer_wire_fee_writeoff_amount)} />
+              </div>
+
+              <div className="rounded-md border">
+                <div className="border-b px-4 py-3 font-semibold">Applied Invoices</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/30">
+                      <tr className="border-b">
+                        <th className="p-2 text-left">Invoice</th>
+                        <th className="p-2 text-left">Invoice Date</th>
+                        <th className="p-2 text-right">Invoice Total</th>
+                        <th className="p-2 text-right">Applied</th>
+                        <th className="p-2 text-right">Writeoff</th>
+                        <th className="p-2 text-right">Our Fee</th>
+                        <th className="p-2 text-right">Buyer Fee</th>
+                        <th className="p-2 text-right">Claim</th>
+                        <th className="p-2 text-right">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(selectedReceipt.details || []).length === 0 ? (
+                        <tr>
+                          <td className="p-4 text-muted-foreground" colSpan={9}>No applied invoices.</td>
+                        </tr>
+                      ) : (
+                        (selectedReceipt.details || []).map((d: any, idx: number) => (
+                          <tr key={`${d.invoice_id || d.invoice_no || "row"}-${idx}`} className="border-t">
+                            <td className="p-2">
+                              <button
+                                type="button"
+                                className="font-medium text-blue-600 hover:underline"
+                                onClick={() => router.push(`/invoices/${encodeURIComponent(d.invoice_no || d.invoice_id)}`)}
+                              >
+                                {d.invoice_no || d.invoice_id || "—"}
+                              </button>
+                            </td>
+                            <td className="p-2">{fmtDate10(d.invoice_date)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.invoice_total)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.applied_amount)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.writeoff_amount)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.allocated_our_fee)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.allocated_buyer_fee)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.allocated_claim_deduction)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.invoice_balance)}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {selectedReceipt.note ? (
+                <div className="rounded-md border p-4">
+                  <div className="mb-1 font-semibold">Note</div>
+                  <div className="text-sm text-muted-foreground whitespace-pre-wrap">{selectedReceipt.note}</div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+
+      {selectedReceipt ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-4xl rounded-2xl bg-background shadow-2xl border">
+            <div className="flex items-center justify-between border-b px-5 py-4">
+              <div>
+                <div className="text-lg font-semibold">Receipt Detail</div>
+                {receiptDetailLoading ? <div className="text-xs text-muted-foreground">Loading...</div> : null}
+                <div className="text-sm text-muted-foreground">
+                  {selectedReceipt.reference_no || selectedReceipt.id || "—"}
+                </div>
+              </div>
+              <Button variant="outline" onClick={closeReceiptDetail}>Close</Button>
+            </div>
+
+            <div className="grid gap-4 p-5">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <InfoBox label="Deposit Date" value={fmtDate10(selectedReceipt.deposit_date || selectedReceipt.receipt_date)} />
+                <InfoBox label="Gross Received" value={fmtMoney2(selectedReceipt.total_received ?? selectedReceipt.received_amount)} />
+                <InfoBox label="Net Received" value={fmtMoney2(selectedReceipt.net_received_amount)} />
+                <InfoBox label="Method" value={selectedReceipt.method || selectedReceipt.payment_method || "—"} />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <InfoBox label="Our Fee" value={fmtMoney2(selectedReceipt.bank_fee_amount)} />
+                <InfoBox label="Buyer Fee" value={fmtMoney2(selectedReceipt.buyer_bank_fee_amount)} />
+                <InfoBox label="Claim" value={fmtMoney2(selectedReceipt.claim_deduction_amount)} />
+                <InfoBox label="Writeoff" value={fmtMoney2(selectedReceipt.buyer_wire_fee_writeoff_amount)} />
+              </div>
+
+              <div className="rounded-md border">
+                <div className="border-b px-4 py-3 font-semibold">Applied Invoices</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/30">
+                      <tr className="border-b">
+                        <th className="p-2 text-left">Invoice</th>
+                        <th className="p-2 text-left">Invoice Date</th>
+                        <th className="p-2 text-right">Invoice Total</th>
+                        <th className="p-2 text-right">Applied</th>
+                        <th className="p-2 text-right">Writeoff</th>
+                        <th className="p-2 text-right">Our Fee</th>
+                        <th className="p-2 text-right">Buyer Fee</th>
+                        <th className="p-2 text-right">Claim</th>
+                        <th className="p-2 text-right">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(selectedReceipt.details || []).length === 0 ? (
+                        <tr>
+                          <td className="p-4 text-muted-foreground" colSpan={9}>No applied invoices.</td>
+                        </tr>
+                      ) : (
+                        (selectedReceipt.details || []).map((d: any, idx: number) => (
+                          <tr key={`${d.invoice_id || d.invoice_no || "row"}-${idx}`} className="border-t">
+                            <td className="p-2">
+                              <button
+                                type="button"
+                                className="font-medium text-blue-600 hover:underline"
+                                onClick={() => router.push(`/invoices/${encodeURIComponent(d.invoice_id || d.invoice_no)}`)}
+                              >
+                                {d.invoice_no || d.invoice_id || "—"}
+                              </button>
+                            </td>
+                            <td className="p-2">{fmtDate10(d.invoice_date)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.invoice_total)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.applied_amount)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.writeoff_amount)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.allocated_our_fee)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.allocated_buyer_fee)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.allocated_claim_deduction)}</td>
+                            <td className="p-2 text-right">{fmtMoney2(d.invoice_balance)}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {selectedReceipt.note ? (
+                <div className="rounded-md border p-4">
+                  <div className="mb-1 font-semibold">Note</div>
+                  <div className="text-sm text-muted-foreground whitespace-pre-wrap">{selectedReceipt.note}</div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
     </AppShell>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 
 import AppShell from "@/components/layout/AppShell";
 import type { AppRole } from "@/config/menuConfig";
@@ -123,6 +124,7 @@ function downloadText(filename: string, content: string, mime = "text/csv;charse
 
 export default function ReceiptsPage() {
   const role: DevRole = "admin" as DevRole;
+  const router = useRouter();
   const supabase = React.useMemo(() => createSupabaseBrowserClient(), []);
 
   const [buyers, setBuyers] = React.useState<BuyerRow[]>([]);

@@ -77,6 +77,7 @@ type NextShipRow = {
 };
 
 type CashWatchRow = {
+  invoice_id: string | null;
   buyer_name: string | null;
   invoice_no: string | null;
   invoice_date: string | null;
@@ -404,6 +405,41 @@ export default function OverviewDashboardPage() {
       selected_id: first?.id || undefined,
       request_no: first?.request_no || undefined,
     });
+  }
+
+
+  function normalizeBuyerKey(v: string | null | undefined) {
+    return String(v || "").trim().toLowerCase();
+  }
+
+  function resolveBuyerId(name?: string | null) {
+    const nk = normalizeBuyerKey(name);
+    const hit = buyerOptions.find(
+      (b) => (nk && normalizeBuyerKey(b.name) === nk) || (nk && normalizeBuyerKey(b.code) === nk)
+    );
+    return hit?.id || null;
+  }
+
+  function openInvoice(invoiceId: string | null | undefined, invoiceNo?: string | null) {
+    const target = String(invoiceId || "").trim();
+    if (!target) {
+      alert(`Invoice id is missing for ${invoiceNo || "this invoice"}.`);
+      return;
+    }
+    router.push(`/invoices/${encodeURIComponent(target)}`);
+  }
+
+  function openBuyerAging(name?: string | null) {
+    const buyerId = resolveBuyerId(name);
+    if (!buyerId) return;
+    const q = buildQuery({
+      preset,
+      start: preset === "CUSTOM" ? start : "",
+      end: preset === "CUSTOM" ? end : "",
+      buyerIds: buyerId,
+      siteIds: allSites ? "ALL" : siteIds.join(",") || "ALL",
+    });
+    router.push(`/dashboards/ar-aging${q}`);
   }
 
   const headerRight = (
@@ -782,7 +818,7 @@ export default function OverviewDashboardPage() {
                 <NextShipTable rows={data?.lists.next_ship || []} />
               </TabsContent>
               <TabsContent value="cash_watch" className="mt-3">
-                <CashWatchTable rows={data?.lists.cash_watch || []} />
+                <CashWatchTable rows={data?.lists.cash_watch || []} onOpenInvoice={openInvoice} onOpenBuyer={openBuyerAging} />
               </TabsContent>
               <TabsContent value="sample_overdue" className="mt-3">
                 <SampleListTable
@@ -1051,7 +1087,31 @@ function NextShipTable({ rows }: { rows: NextShipRow[] }) {
   );
 }
 
-function CashWatchTable({ rows }: { rows: CashWatchRow[] }) {
+function CashWatchTable({
+  rows,
+  onOpenInvoice,
+  onOpenBuyer,
+}: {
+  rows: CashWatchRow[];
+  onOpenInvoice?: (invoiceId?: string | null, invoiceNo?: string | null) => void;
+  onOpenBuyer?: (buyerName?: string | null) => void;
+}) {
+  const tone = (days?: number | null) => {
+    if ((days ?? 0) > 90) return "text-red-700 bg-red-50";
+    if ((days ?? 0) > 60) return "text-orange-700 bg-orange-50";
+    if ((days ?? 0) > 30) return "text-amber-700 bg-amber-50";
+    if ((days ?? 0) > 0) return "text-yellow-700 bg-yellow-50";
+    return "";
+  };
+
+  const badge = (days?: number | null) => {
+    if ((days ?? 0) > 90) return "bg-red-100 text-red-700 border-red-200";
+    if ((days ?? 0) > 60) return "bg-orange-100 text-orange-700 border-orange-200";
+    if ((days ?? 0) > 30) return "bg-amber-100 text-amber-700 border-amber-200";
+    if ((days ?? 0) > 0) return "bg-yellow-100 text-yellow-700 border-yellow-200";
+    return "bg-blue-100 text-blue-700 border-blue-200";
+  };
+
   return (
     <div className="overflow-x-auto">
       <table className="min-w-full text-sm">
@@ -1066,12 +1126,36 @@ function CashWatchTable({ rows }: { rows: CashWatchRow[] }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={`${r.invoice_no}-${i}`} className="border-t">
-              <td className="py-2 pr-3">{r.buyer_name || "—"}</td>
-              <td className="py-2 px-3">{r.invoice_no || "—"}</td>
+            <tr key={`${r.invoice_no}-${i}`} className={`border-t ${tone(r.overdue_days)}`}>
+              <td className="py-2 pr-3">
+                <button
+                  type="button"
+                  className="text-blue-600 hover:underline"
+                  onClick={() => onOpenBuyer?.(r.buyer_name)}
+                >
+                  {r.buyer_name || "—"}
+                </button>
+              </td>
+              <td className="py-2 px-3">
+                {r.invoice_no ? (
+                  <button
+                    type="button"
+                    className="font-medium text-blue-600 hover:underline"
+                    onClick={() => onOpenInvoice?.(r.invoice_id, r.invoice_no)}
+                  >
+                    {r.invoice_no}
+                  </button>
+                ) : (
+                  "—"
+                )}
+              </td>
               <td className="py-2 px-3">{r.invoice_date || "—"}</td>
-              <td className="py-2 px-3 text-right">{r.overdue_days ?? "—"}</td>
-              <td className="py-2 pl-3 text-right">{fmtMoneyUSD(r.balance_usd)}</td>
+              <td className="py-2 px-3 text-right">
+                <span className={`inline-flex rounded-full border px-2 py-1 text-xs font-medium ${badge(r.overdue_days)}`}>
+                  {r.overdue_days ?? 0}
+                </span>
+              </td>
+              <td className="py-2 pl-3 text-right font-medium">{fmtMoneyUSD(r.balance_usd)}</td>
             </tr>
           ))}
           {!rows.length && (

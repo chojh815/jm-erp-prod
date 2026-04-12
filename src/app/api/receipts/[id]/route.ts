@@ -14,6 +14,39 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+async function syncInvoiceStatuses(invoiceIds: string[]) {
+  const ids = Array.from(new Set((invoiceIds || []).map((x) => String(x || "").trim()).filter(Boolean)));
+  if (!ids.length) return;
+
+  const { data: invoices, error } = await supabaseAdmin
+    .from("invoice_headers")
+    .select("id, total_amount, paid_amount, balance_amount, status")
+    .in("id", ids);
+
+  if (error || !invoices?.length) return;
+
+  for (const inv of invoices) {
+    const total = round2(toNum(inv.total_amount));
+    const paid = round2(toNum(inv.paid_amount));
+    const balance = round2(toNum(inv.balance_amount));
+    const tol = 0.01;
+
+    const nextStatus =
+      balance <= tol || (total > 0 && paid >= total - tol)
+        ? "PAID"
+        : paid > tol
+        ? "PARTIALLY_PAID"
+        : "UNPAID";
+
+    if (String(inv.status || "").trim().toUpperCase() === nextStatus) continue;
+
+    await supabaseAdmin
+      .from("invoice_headers")
+      .update({ status: nextStatus, updated_at: new Date().toISOString() })
+      .eq("id", inv.id);
+  }
+}
+
 async function fetchReceipt(receiptId: string) {
   const { data: header, error: hErr } = await supabaseAdmin
     .from("receipt_headers")
@@ -150,7 +183,9 @@ export async function PUT(
     const { error: iErr } = await supabaseAdmin.from("receipt_lines").insert(lineRows);
     if (iErr) throw iErr;
 
-    await recalcInvoicesFromReceipts(supabaseAdmin as any, Array.from(new Set([...oldInvoiceIds, ...newInvoiceIds])));
+    const affectedInvoiceIds = Array.from(new Set([...oldInvoiceIds, ...newInvoiceIds]));
+    await recalcInvoicesFromReceipts(supabaseAdmin as any, affectedInvoiceIds);
+    await syncInvoiceStatuses(affectedInvoiceIds);
     return NextResponse.json({ success: true, receipt_id: receiptId });
   } catch (e: any) {
     return NextResponse.json({ success: false, error: e?.message || "Receipt update failed" }, { status: 500 });
@@ -182,6 +217,7 @@ export async function DELETE(
     if (hErr) throw hErr;
 
     await recalcInvoicesFromReceipts(supabaseAdmin as any, invoiceIds);
+    await syncInvoiceStatuses(invoiceIds);
     return NextResponse.json({ success: true, id: receiptId });
   } catch (e: any) {
     return NextResponse.json({ success: false, error: e?.message || "Receipt delete failed" }, { status: 500 });

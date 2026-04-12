@@ -243,6 +243,40 @@ async function enrichLinesFromPo(wsLines: any[]) {
           "";
       }
 
+      // ✅ unit price / amount backfill for Spec tab
+      if (
+        (l as any)?.unit_price === null ||
+        (l as any)?.unit_price === undefined ||
+        (l as any)?.unit_price === ""
+      ) {
+        const up =
+          (pl as any)?.unit_price ??
+          (pl as any)?.po_unit_price ??
+          (pl as any)?.price ??
+          (pl as any)?.unit_cost ??
+          null;
+        if (up !== null && up !== undefined && up !== "") {
+          (l as any).unit_price = Number(up) || 0;
+        }
+      }
+
+      if (
+        (l as any)?.amount === null ||
+        (l as any)?.amount === undefined ||
+        (l as any)?.amount === ""
+      ) {
+        const amt =
+          (pl as any)?.amount ??
+          (pl as any)?.line_amount ??
+          (pl as any)?.total_amount ??
+          (pl as any)?.order_amount ??
+          (pl as any)?.ext_amount ??
+          null;
+        if (amt !== null && amt !== undefined && amt !== "") {
+          (l as any).amount = Number(amt) || 0;
+        }
+      }
+
       // images
       if (!((l as any)?.image_url_primary) && imgs.length > 0) {
         (l as any).image_url_primary = imgs[0] ?? null;
@@ -729,6 +763,23 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
 
       return NextResponse.json({ success: true });
     }
+
+    // ✅ Unlock Actual Cost (reopen actual fields)
+    if (body?.unlock_actual_cost === true) {
+      const { error: unlockErr } = await supabaseAdmin
+        .from("work_sheet_lines")
+        .update({ actual_cost_confirmed: false })
+        .eq("work_sheet_id", id);
+
+      if (unlockErr) {
+        return NextResponse.json(
+          { success: false, error: unlockErr.message },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({ success: true });
+    }
     if (!body) return bad("Invalid JSON body", 400);
 
     const headerPatch = body?.header ?? null;
@@ -1070,12 +1121,11 @@ const allowed = [
         }
 
         if (prevConfirmed) {
-          // prevent unconfirm
-          if ("actual_cost_confirmed" in patch && !(patch as any).actual_cost_confirmed) {
-            return bad("Actual cost is already CONFIRMED and cannot be reverted.", 409);
-          }
+          // Keep actual locked, but allow non-actual fields to save.
+          // If client sends actual-field edits while confirmed, preserve existing values.
+          (patch as any).actual_cost_confirmed = true;
 
-          const fields = [
+          const lockedActualFields = [
             "actual_vendor_unit_cost_local",
             "actual_vendor_unit_cost_usd",
             "actual_fx_rate",
@@ -1084,15 +1134,13 @@ const allowed = [
             "actual_cost_notes",
             "actual_cost_confirmed_at",
             "actual_cost_confirmed_by",
+            "actual_unit",
+            "actual_amt",
           ] as const;
 
-          for (const f of fields) {
+          for (const f of lockedActualFields) {
             if (!(f in patch)) continue;
-            const a = (patch as any)[f];
-            const b = (existingLine as any)?.[f];
-            if (String(a ?? "") !== String(b ?? "")) {
-              return bad("Actual cost is CONFIRMED. Actual fields are locked.", 409);
-            }
+            (patch as any)[f] = (existingLine as any)?.[f] ?? (patch as any)[f];
           }
         } else {
           // if confirming now, set confirmed_at if missing
