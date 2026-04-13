@@ -914,13 +914,15 @@ export async function GET(req: Request) {
     }
 
     if (pendingOnly) {
-      itemsBase = itemsBase.filter((it) => n(it.pendingQty, 0) > 0);
+      itemsBase = itemsBase.filter(
+  (it) => n(it.totals.orderQty, 0) - n(it.totals.shippedQty, 0) > 0
+);
     }
 
     if (lateOnly) {
       const today = new Date().toISOString().slice(0, 10);
       itemsBase = itemsBase.filter((it) => {
-        const pendingQty = n(it.pendingQty, 0);
+        const pendingQty = n(it.totals.orderQty, 0) - n(it.totals.shippedQty, 0);
         const reqShipDate = asText(it.reqShipDate).trim().slice(0, 10);
         return pendingQty > 0 && !!reqShipDate && reqShipDate < today;
       });

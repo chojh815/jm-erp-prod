@@ -881,6 +881,14 @@ ${shipperAddress}` : `${shipperName}`,
       y += transportH;
 
       const originCode = (header.shipping_origin_code || "").toUpperCase();
+      const originDisplay =
+      originCode.includes("VN")
+    ? "MADE IN VIETNAM"
+    : originCode.includes("KR")
+    ? "MADE IN KOREA"
+    : originCode.includes("CN")
+    ? "MADE IN CHINA"
+    : "-";
       const cooH = 18;
       doc.rect(margin, y, contentWidth, cooH);
       doc.setFont("helvetica", "bold");

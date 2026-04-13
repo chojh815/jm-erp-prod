@@ -168,8 +168,13 @@ export async function GET(req: Request) {
       };
     });
 
-    const sortDesc = (key: string) => [...vendors].sort((x, y) => safeNum(y[key]) - safeNum(x[key]));
-    const sortAsc = (key: string) => [...vendors].sort((x, y) => safeNum(x[key]) - safeNum(y[key]));
+    type VendorItem = (typeof vendors)[number];
+
+const sortDesc = <K extends keyof VendorItem>(key: K) =>
+  [...vendors].sort((x, y) => safeNum(y[key]) - safeNum(x[key]));
+
+const sortAsc = <K extends keyof VendorItem>(key: K) =>
+  [...vendors].sort((x, y) => safeNum(x[key]) - safeNum(y[key]));
 
     return ok({
       filters: {
