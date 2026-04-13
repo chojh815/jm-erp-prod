@@ -9,15 +9,30 @@
  * ✅ IMPORTANT:
  * - Vendor dropdown에는 FACTORY / SUPPLIER만 나오게 "허용 목록(allowlist)"으로 강제한다.
  * - fallback(useTypeFilter:false)로 조회하더라도, 마지막 out 단계에서 다시 한번 필터하여 BUYER가 절대 섞이지 않게 한다.
+ * - 운영에서 stale API 응답이 남지 않도록 no-store + force-dynamic 적용
  */
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+function jsonNoStore(body: any, status = 200) {
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+    },
+  });
+}
+
 function ok(data: any = {}) {
-  return NextResponse.json({ success: true, ...data });
+  return jsonNoStore({ success: true, ...data }, 200);
 }
 function bad(message: string, status = 400) {
-  return NextResponse.json({ success: false, error: message }, { status });
+  return jsonNoStore({ success: false, error: message }, status);
 }
 function safeTrim(v: any) {
   return (v ?? "").toString().trim();
@@ -55,7 +70,7 @@ async function fetchCompanies(opts: { q: string; limit: number; useTypeFilter: b
 
     // ✅ 기존: neq("BUYER") 는 NULL/다른값을 다 통과시켜서 위험
     // ✅ 수정: FACTORY / SUPPLIER 만 허용
-    
+
     if (q) {
       const t = escapeIlike(q);
       qb = qb.or(`company_name.ilike.%${t}%,code.ilike.%${t}%`);
