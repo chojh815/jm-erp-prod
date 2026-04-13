@@ -466,6 +466,10 @@ export default function PurchaseOrderListPage() {
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
+  const [vendorFilter, setVendorFilter] = useState<string>("ALL");
+  const [vendorOptions, setVendorOptions] = useState<Array<{ id: string; name: string }>>([]);
+  const [pendingOnly, setPendingOnly] = useState(false);
+  const [lateOnly, setLateOnly] = useState(false);
 
   // ✅ Multi Sort (기본: Ship Date -> Brand -> Order Date)
   const [s1Field, setS1Field] = useState<SortField>("REQ_SHIP_DATE");
@@ -525,6 +529,28 @@ export default function PurchaseOrderListPage() {
     init();
   }, [router, supabase]);
 
+  useEffect(() => {
+    const loadVendors = async () => {
+      try {
+        const res = await fetch("/api/work-sheets/vendors?limit=2000", { cache: "no-store" });
+        const json = await safeJson<any>(res);
+        const base = json?.rows ?? json?.items ?? json?.data ?? [];
+        const arr = Array.isArray(base) ? base : [];
+        const normalized = arr
+          .map((v: any) => ({
+            id: String(v?.id ?? "").trim(),
+            name: String(v?.company_name ?? v?.name ?? "").trim(),
+          }))
+          .filter((v: any) => v.id && v.name)
+          .sort((a: any, b: any) => a.name.localeCompare(b.name));
+        setVendorOptions(normalized);
+      } catch (err) {
+        console.error("loadVendors error:", err);
+      }
+    };
+    void loadVendors();
+  }, []);
+
   // ---------- fetch list ----------
   const fetchList = async (newPage?: number) => {
     setLoading(true);
@@ -537,6 +563,9 @@ export default function PurchaseOrderListPage() {
       if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
       if (dateFrom) params.set("dateFrom", dateFrom);
       if (dateTo) params.set("dateTo", dateTo);
+      if (vendorFilter && vendorFilter !== "ALL") params.set("vendor_id", vendorFilter);
+      if (pendingOnly) params.set("pending_only", "true");
+      if (lateOnly) params.set("late_only", "true");
 
       params.set("s1Field", s1Field);
       params.set("s1Dir", s1Dir);
@@ -579,9 +608,17 @@ export default function PurchaseOrderListPage() {
   };
 
   useEffect(() => {
+    const qs = new URLSearchParams(window.location.search);
+    const incomingVendorId = (qs.get("vendor_id") ?? "").trim();
+    if (incomingVendorId) {
+      setVendorFilter(incomingVendorId);
+    }
+  }, []);
+
+  useEffect(() => {
     if (!authLoading && role) fetchList(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, role]);
+  }, [authLoading, role, vendorFilter, pendingOnly, lateOnly]);
 
   const handleApply = () => fetchList(1);
 
@@ -590,6 +627,9 @@ export default function PurchaseOrderListPage() {
     setStatusFilter("ALL");
     setDateFrom("");
     setDateTo("");
+    setVendorFilter("ALL");
+    setPendingOnly(false);
+    setLateOnly(false);
     fetchList(1);
   };
 
@@ -664,6 +704,9 @@ export default function PurchaseOrderListPage() {
       if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
       if (dateFrom) params.set("dateFrom", dateFrom);
       if (dateTo) params.set("dateTo", dateTo);
+      if (vendorFilter && vendorFilter !== "ALL") params.set("vendor_id", vendorFilter);
+      if (pendingOnly) params.set("pending_only", "true");
+      if (lateOnly) params.set("late_only", "true");
 
       params.set("s1Field", s1Field);
       params.set("s1Dir", s1Dir);
@@ -1264,7 +1307,7 @@ export default function PurchaseOrderListPage() {
 
           <CardContent className="space-y-4">
             {/* Filters + Sort */}
-            <div className="grid grid-cols-1 lg:grid-cols-6 gap-4 items-end">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end">
               <div className="space-y-1 lg:col-span-2">
                 <Label>Search</Label>
                 <Input
@@ -1275,7 +1318,7 @@ export default function PurchaseOrderListPage() {
                 />
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1 lg:col-span-2">
                 <Label>Status</Label>
                 <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v)}>
                   <SelectTrigger>
@@ -1293,17 +1336,56 @@ export default function PurchaseOrderListPage() {
                 </Select>
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1 lg:col-span-2">
+                <Label>Vendor</Label>
+                <Select value={vendorFilter} onValueChange={(v) => setVendorFilter(v)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="All Vendors" />
+                  </SelectTrigger>
+                  <SelectContent className="z-50">
+                    <SelectItem value="ALL">All Vendors</SelectItem>
+                    {vendorOptions.map((v) => (
+                      <SelectItem key={v.id} value={v.id}>
+                        {v.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1 lg:col-span-2">
                 <Label>Order Date (From)</Label>
                 <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1 lg:col-span-2">
                 <Label>Order Date (To)</Label>
                 <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
               </div>
 
-              <div className="flex gap-2 justify-end lg:col-span-6">
+              <div className="space-y-1 lg:col-span-2">
+                <Label className="opacity-0">Options</Label>
+                <div className="flex flex-col gap-2 rounded-md border px-3 py-2">
+                  <label className="flex items-center gap-2 text-sm whitespace-nowrap">
+                    <input
+                      type="checkbox"
+                      checked={pendingOnly}
+                      onChange={(e) => setPendingOnly(e.target.checked)}
+                    />
+                    <span>Pending Only</span>
+                  </label>
+                  <label className="flex items-center gap-2 text-sm whitespace-nowrap">
+                    <input
+                      type="checkbox"
+                      checked={lateOnly}
+                      onChange={(e) => setLateOnly(e.target.checked)}
+                    />
+                    <span>Late Only</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex gap-2 justify-end lg:col-span-12">
                 <Button
                   type="button"
                   variant="outline"

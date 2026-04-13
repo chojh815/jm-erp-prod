@@ -99,6 +99,21 @@ function fromCents(cents: number) {
   return cents / 100;
 }
 
+function normalizeDateOnly(v: any) {
+  const s = asText(v).trim();
+  if (!s) return "";
+  return s.slice(0, 10);
+}
+
+function addOneDay(dateText: string) {
+  const s = normalizeDateOnly(dateText);
+  if (!s) return "";
+  const d = new Date(`${s}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 function normStr(v: any) {
   return asText(v).trim().toUpperCase();
 }
@@ -508,8 +523,22 @@ export async function GET(req: Request) {
     // ------------------------------------------------------------------
     const qRaw = (url.searchParams.get("q") ?? url.searchParams.get("keyword") ?? "").trim();
     const statusRaw = (url.searchParams.get("status") ?? "").trim().toUpperCase();
-    const dateFrom = (url.searchParams.get("dateFrom") ?? "").trim();
-    const dateTo = (url.searchParams.get("dateTo") ?? "").trim();
+    const dateFrom = normalizeDateOnly(
+      url.searchParams.get("dateFrom") ??
+        url.searchParams.get("order_date_from") ??
+        url.searchParams.get("from") ??
+        ""
+    );
+    const dateTo = normalizeDateOnly(
+      url.searchParams.get("dateTo") ??
+        url.searchParams.get("order_date_to") ??
+        url.searchParams.get("to") ??
+        ""
+    );
+    const dateToExclusive = addOneDay(dateTo);
+    const vendorId = (url.searchParams.get("vendor_id") ?? "").trim();
+    const pendingOnly = (url.searchParams.get("pending_only") ?? "").trim().toLowerCase() === "true";
+    const lateOnly = (url.searchParams.get("late_only") ?? "").trim().toLowerCase() === "true";
 
     const page = Math.max(1, toInt(url.searchParams.get("page") ?? "1", 1));
     const pageSize = Math.min(200, Math.max(1, toInt(url.searchParams.get("pageSize") ?? "20", 20)));
@@ -565,7 +594,11 @@ export async function GET(req: Request) {
       q = q.eq("status", legacyHeaderStatusFilter);
     }
     if (dateFrom) q = q.gte("order_date", dateFrom);
-    if (dateTo) q = q.lte("order_date", dateTo);
+    if (dateToExclusive) {
+      q = q.lt("order_date", dateToExclusive);
+    } else if (dateTo) {
+      q = q.lte("order_date", dateTo);
+    }
 
     // NOTE:
     // Search by Buyer Style No / JM Style No cannot be handled reliably here
@@ -606,6 +639,7 @@ export async function GET(req: Request) {
         jmStyleNos: string[];
       }
     > = {};
+    const lineRowById: Record<string, any> = {};
 
     const allPoLineIds: string[] = [];
     if (headerIds.length > 0) {
@@ -658,6 +692,7 @@ export async function GET(req: Request) {
           if (r.id) {
             bucket.lineIds.push(r.id);
             allPoLineIds.push(r.id);
+            lineRowById[r.id] = r;
           }
 
           const buyerStyleNo = asText(r.buyer_style_no).trim();
@@ -667,6 +702,79 @@ export async function GET(req: Request) {
           if (jmStyleNo) bucket.jmStyleNos.push(jmStyleNo);
         }
       }
+    }
+
+    let vendorMatchedHeaderIds: Set<string> | null = null;
+    let vendorMatchedLineIds: Set<string> | null = null;
+    if (vendorId && allPoLineIds.length > 0) {
+      const wsRes = await supabaseAdmin
+        .from("work_sheet_lines")
+        .select(["po_line_id", "vendor_id", "is_deleted"].join(","))
+        .in("po_line_id", allPoLineIds)
+        .eq("vendor_id", vendorId)
+        .eq("is_deleted", false);
+
+      if (wsRes.error) return bad(wsRes.error.message || "Failed to load vendor filter rows", 500);
+
+      vendorMatchedLineIds = new Set(
+        ((wsRes.data ?? []) as any[])
+          .map((r) => asText(r?.po_line_id).trim())
+          .filter(Boolean)
+      );
+
+      vendorMatchedHeaderIds = new Set<string>();
+      for (const [hid, s] of Object.entries(lineSummaryByHeader)) {
+        const lineIds = Array.isArray((s as any)?.lineIds) ? ((s as any).lineIds as string[]) : [];
+        if (lineIds.some((id) => vendorMatchedLineIds!.has(asText(id).trim()))) {
+          vendorMatchedHeaderIds.add(hid);
+        }
+      }
+    }
+
+    const effectiveLineSummaryByHeader: typeof lineSummaryByHeader = {};
+
+    for (const [hid, bucket] of Object.entries(lineSummaryByHeader)) {
+      if (!vendorMatchedLineIds) {
+        effectiveLineSummaryByHeader[hid] = bucket;
+        continue;
+      }
+
+      const matchedLineRows = ((bucket.lineIds ?? []) as string[])
+        .map((id) => lineRowById[id])
+        .filter((r) => r && vendorMatchedLineIds!.has(asText(r.id).trim()));
+
+      if (matchedLineRows.length === 0) continue;
+
+      let totalAmountCents = 0;
+      let totalOrderQty = 0;
+      const buyerStyleNos: string[] = [];
+      const jmStyleNos: string[] = [];
+
+      for (const r of matchedLineRows) {
+        const lineAmount =
+          r.amount !== null && r.amount !== undefined
+            ? n(r.amount, 0)
+            : n(r.qty, 0) * n(r.unit_price, 0);
+
+        totalAmountCents += toCents(lineAmount);
+        totalOrderQty += n(r.qty, 0);
+
+        const buyerStyleNo = asText(r.buyer_style_no).trim();
+        const jmStyleNo = asText(r.jm_style_no).trim();
+
+        if (buyerStyleNo) buyerStyleNos.push(buyerStyleNo);
+        if (jmStyleNo) jmStyleNos.push(jmStyleNo);
+      }
+
+      effectiveLineSummaryByHeader[hid] = {
+        lineCount: matchedLineRows.length,
+        firstLine: matchedLineRows[0] ?? null,
+        totalAmountCents,
+        totalOrderQty,
+        lineIds: matchedLineRows.map((r) => r.id).filter(Boolean),
+        buyerStyleNos: uniq(buyerStyleNos),
+        jmStyleNos: uniq(jmStyleNos),
+      };
     }
 
     const allocQtyByLineId: Record<string, number> = {};
@@ -721,7 +829,7 @@ export async function GET(req: Request) {
     }
 
     const itemsAll = headerRows.map((h) => {
-      const s = lineSummaryByHeader[h.id] ?? {
+      const s = effectiveLineSummaryByHeader[h.id] ?? lineSummaryByHeader[h.id] ?? {
         lineCount: 0,
         firstLine: null,
         totalAmountCents: 0,
@@ -800,9 +908,27 @@ export async function GET(req: Request) {
       };
     });
 
+    let itemsBase = itemsAll;
+    if (vendorMatchedHeaderIds !== null) {
+      itemsBase = itemsAll.filter((it) => vendorMatchedHeaderIds!.has(asText(it.id).trim()));
+    }
+
+    if (pendingOnly) {
+      itemsBase = itemsBase.filter((it) => n(it.pendingQty, 0) > 0);
+    }
+
+    if (lateOnly) {
+      const today = new Date().toISOString().slice(0, 10);
+      itemsBase = itemsBase.filter((it) => {
+        const pendingQty = n(it.pendingQty, 0);
+        const reqShipDate = asText(it.reqShipDate).trim().slice(0, 10);
+        return pendingQty > 0 && !!reqShipDate && reqShipDate < today;
+      });
+    }
+
     const qNorm = qRaw.trim().toLowerCase();
     const itemsKeywordFiltered = qNorm
-      ? itemsAll.filter((it) => {
+      ? itemsBase.filter((it) => {
           const haystacks = [
             asText(it.poNo),
             asText(it.buyerName),
@@ -816,7 +942,7 @@ export async function GET(req: Request) {
 
           return haystacks.some((v) => asText(v).toLowerCase().includes(qNorm));
         })
-      : itemsAll;
+      : itemsBase;
 
     const itemsFiltered = computedStatusFilter
       ? itemsKeywordFiltered.filter((it) => it.status === computedStatusFilter)
@@ -871,6 +997,9 @@ export async function GET(req: Request) {
       pageTotalsByCurrency,
       grandTotal,
       grandTotalsByCurrency,
+      appliedVendorId: vendorId || null,
+      appliedPendingOnly: pendingOnly,
+      appliedLateOnly: lateOnly,
       statusLogic: {
         open: "No non-cancelled shipment allocation exists",
         partial: "Allocated qty > 0 but allocated qty < order qty",

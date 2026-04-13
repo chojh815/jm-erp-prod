@@ -100,6 +100,11 @@ type WorkSheetLine = {
   actual_qty?: number | null;
   actual_amt?: number | null;
 
+  // ✅ vendor delivery tracking
+  vendor_ready_date?: string | null;
+  vendor_delivery_status?: "PENDING" | "ON_TIME" | "LATE" | null;
+  vendor_delay_days?: number | null;
+
   is_deleted?: boolean;
 };
 
@@ -249,6 +254,29 @@ function addDaysYmd(ymd?: string | null, deltaDays: number = 0) {
   const dd = String(dt.getUTCDate()).padStart(2, "0");
   return `${yy}-${mm}-${dd}`;
 }
+
+function calcVendorDelivery(
+  requestedShipDate?: string | null,
+  vendorReadyDate?: string | null
+): { dueDate: string | null; status: "PENDING" | "ON_TIME" | "LATE"; delayDays: number | null } {
+  const req = (requestedShipDate ?? "").toString().slice(0, 10);
+  if (!req) return { dueDate: null, status: "PENDING", delayDays: null };
+
+  const dueDate = addDaysYmd(req, -7);
+  const ready = (vendorReadyDate ?? "").toString().slice(0, 10);
+  if (!ready) return { dueDate, status: "PENDING", delayDays: null };
+
+  const due = new Date(`${dueDate}T00:00:00`);
+  const actual = new Date(`${ready}T00:00:00`);
+  const diff = Math.round((actual.getTime() - due.getTime()) / 86400000);
+
+  return {
+    dueDate,
+    status: diff <= 0 ? "ON_TIME" : "LATE",
+    delayDays: diff,
+  };
+}
+
 function stableStringify(obj: any): string {
   const seen = new WeakSet();
   const replacer = (_k: string, v: any) => {
@@ -925,6 +953,10 @@ export default function WorkSheetDetailPage() {
           vendor_unit_cost_usd: (l as any).vendor_unit_cost_usd ?? null,
           fx_rate: (l as any).fx_rate ?? null,
           fx_as_of: (l as any).fx_as_of ?? null,
+
+          vendor_ready_date: (l as any).vendor_ready_date ?? null,
+          vendor_delivery_status: (l as any).vendor_delivery_status ?? null,
+          vendor_delay_days: (l as any).vendor_delay_days ?? null,
 
           production_mode: (l as any).production_mode ?? null,
 
@@ -2447,6 +2479,78 @@ export default function WorkSheetDetailPage() {
                   </div>
                 )}
                 </div>
+
+                {activeLine ? (
+                  (() => {
+                    const requestedShipDate =
+                      (po as any)?.requested_ship_date ??
+                      (po as any)?.requestedShipDate ??
+                      (po as any)?.req_ship_date ??
+                      null;
+
+                    const vd = calcVendorDelivery(
+                      requestedShipDate,
+                      (activeLine as any)?.vendor_ready_date ?? null
+                    );
+
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
+                        <div className="space-y-1">
+                          <Label>Vendor Due Date</Label>
+                          <Input value={vd.dueDate ?? ""} readOnly />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label>Vendor Ready Date</Label>
+                          <Input
+                            type="date"
+                            value={((activeLine as any)?.vendor_ready_date ?? "").toString().slice(0, 10)}
+                            onChange={(e) => {
+                              if (!activeLine?.id) return;
+                              const v = e.target.value || null;
+                              const next = calcVendorDelivery(requestedShipDate, v);
+
+                              updateLine(activeLine.id, {
+                                vendor_ready_date: v,
+                                vendor_delivery_status: next.status,
+                                vendor_delay_days: next.delayDays,
+                              } as any);
+                            }}
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label>Delivery Status</Label>
+                          <div className="h-10 flex items-center">
+                            <Badge
+                              variant={
+                                vd.status === "LATE"
+                                  ? "destructive"
+                                  : vd.status === "ON_TIME"
+                                  ? "default"
+                                  : "secondary"
+                              }
+                            >
+                              {vd.status}
+                            </Badge>
+                          </div>
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label>Delay Days</Label>
+                          <Input
+                            value={
+                              vd.delayDays === null || vd.delayDays === undefined
+                                ? ""
+                                : String(vd.delayDays)
+                            }
+                            readOnly
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : null}
 
                 <div className="text-sm text-muted-foreground">
                   이 탭은 <span className="font-medium text-foreground">마진 관리용</span>

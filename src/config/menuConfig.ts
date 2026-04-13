@@ -176,6 +176,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "dashboard.production",
       },
       {
+        label: "Vendor Dashboard",
+        href: "/dashboards/vendors",
+        perm: ["dashboard.production", "dashboard.performance", "dashboard.profitability"],
+      },
+      {
         // ✅ Profitability 페이지
         // - 새로운 권한 키: dashboard.profitability
         // - 과거/임시 키를 쓰고 있었다면 dashboard.finance 로도 접근 가능하게 OR 처리

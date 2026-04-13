@@ -798,43 +798,43 @@ export default function InvoiceDetailPage() {
         : [];
       const remarksLines = remarksLinesRaw.slice(0, 2);
 
-      const topBoxH = 32 + remarksLines.length * 4.5;
-
-      doc.rect(margin, y, half, topBoxH);
-      doc.setFont("helvetica", "bold");
-      doc.text("Shipper / Exporter", margin + 2, y + 6);
-      doc.setFont("helvetica", "normal");
-      const shipperLines = doc.splitTextToSize(
-        shipperAddress ? `${shipperName}\n${shipperAddress}` : `${shipperName}`,
-        half - 4
-      );
-      doc.text(shipperLines, margin + 2, y + 12);
-
-      doc.rect(margin + half, y, half, topBoxH);
-      doc.setFont("helvetica", "bold");
-      doc.text("Invoice Info", margin + half + 2, y + 6);
-      doc.setFont("helvetica", "normal");
-
-      let infoY = y + 12;
       const infoBase = [
         `Invoice No: ${invoiceNo}`,
         `Date: ${invoiceDate}`,
         `Currency: ${cur}`,
         `Incoterm: ${incoterm}`,
         `Payment Term: ${payTerm}`,
-        `Payment Status: ${paymentStatus.replaceAll("_", " ")}`,
-        `Gross Received: ${cur} ${fmtMoney2(grossReceivedTotal)}`,
-        `Applied: ${cur} ${fmtMoney2(receivedTotal)}`,
-        `Balance: ${cur} ${fmtMoney2(balance)}`,
       ];
 
+      const topBoxH = Math.max(
+        22 + remarksLines.length * 4,
+        9 + infoBase.length * 3.5 + (remarksLines.length > 0 ? 1 + remarksLines.length * 4 : 0) + 4
+      );
+
+      doc.rect(margin, y, half, topBoxH);
+      doc.setFont("helvetica", "bold");
+      doc.text("Shipper / Exporter", margin + 2, y + 4.8);
+      doc.setFont("helvetica", "normal");
+      const shipperLines = doc.splitTextToSize(
+        shipperAddress ? `${shipperName}
+${shipperAddress}` : `${shipperName}`,
+        half - 4
+      );
+      doc.text(shipperLines, margin + 2, y + 9.4);
+
+      doc.rect(margin + half, y, half, topBoxH);
+      doc.setFont("helvetica", "bold");
+      doc.text("Invoice Info", margin + half + 2, y + 4.8);
+      doc.setFont("helvetica", "normal");
+
+      let infoY = y + 9.4;
       for (const line of infoBase) {
         doc.text(line, margin + half + 2, infoY);
-        infoY += 4.2;
+        infoY += 3.5;
       }
 
       if (remarksLines.length > 0) {
-        infoY += 1.5;
+        infoY += 1;
         doc.text(remarksLines, margin + half + 2, infoY);
       }
 
@@ -843,44 +843,59 @@ export default function InvoiceDetailPage() {
       const consignee = (header.consignee_text || "").trim() || "-";
       const notify = (header.notify_party_text || "").trim() || "-";
 
-      const partyH = 30;
+      const consigneeLines = doc.splitTextToSize(consignee, half - 4);
+      const notifyLines = doc.splitTextToSize(notify, half - 4);
+      const partyBodyLines = Math.max(consigneeLines.length, notifyLines.length, 1);
+      const partyH = Math.max(20, 9 + partyBodyLines * 4 + 4);
       doc.rect(margin, y, half, partyH);
       doc.rect(margin + half, y, half, partyH);
 
       doc.setFont("helvetica", "bold");
-      doc.text("Consignee", margin + 2, y + 6);
-      doc.text("Notify Party", margin + half + 2, y + 6);
+      doc.text("Consignee", margin + 2, y + 4.8);
+      doc.text("Notify Party", margin + half + 2, y + 4.8);
 
       doc.setFont("helvetica", "normal");
-      doc.text(doc.splitTextToSize(consignee, half - 4), margin + 2, y + 12);
-      doc.text(doc.splitTextToSize(notify, half - 4), margin + half + 2, y + 12);
+      doc.text(consigneeLines, margin + 2, y + 9.4);
+      doc.text(notifyLines, margin + half + 2, y + 9.4);
 
       y += partyH;
 
-      const originCode = (header.shipping_origin_code || "").toUpperCase();
-      const originDisplay = originCode.includes("VN")
-        ? "MADE IN VIETNAM"
-        : originCode.includes("KR")
-        ? "MADE IN KOREA"
-        : originCode.includes("CN")
-        ? "MADE IN CHINA"
-        : "-";
+      const pol = (header.port_of_loading || "").trim() || "-";
+      const finalDest = (header.final_destination || header.destination || "").trim() || "-";
+      const polLines = doc.splitTextToSize(pol, half - 4);
+      const finalDestLines = doc.splitTextToSize(finalDest, half - 4);
+      const transportBodyLines = Math.max(polLines.length, finalDestLines.length, 1);
+      const transportH = Math.max(14, 10 + transportBodyLines * 4 + 3);
 
-      const cooH = 22;
+      doc.rect(margin, y, half, transportH);
+      doc.rect(margin + half, y, half, transportH);
+
+      doc.setFont("helvetica", "bold");
+      doc.text("Port of Loading", margin + 2, y + 5);
+      doc.text("Final Destination", margin + half + 2, y + 5);
+
+      doc.setFont("helvetica", "normal");
+      doc.text(polLines, margin + 2, y + 10);
+      doc.text(finalDestLines, margin + half + 2, y + 10);
+
+      y += transportH;
+
+      const originCode = (header.shipping_origin_code || "").toUpperCase();
+      const cooH = 18;
       doc.rect(margin, y, contentWidth, cooH);
       doc.setFont("helvetica", "bold");
-      doc.text("COO / Certification", margin + 2, y + 6);
+      doc.text("COO / Certification", margin + 2, y + 5);
       doc.setFont("helvetica", "normal");
 
       const cooText = (header.coo_text || "").trim();
-      doc.text(`COO: ${cooText || originDisplay || "-"}`, margin + 2, y + 12);
+      doc.text(`COO: ${cooText || originDisplay || "-"}`, margin + 2, y + 10);
       doc.text(
         "WE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.",
         margin + 2,
-        y + 17
+        y + 14
       );
 
-      y += cooH + 8;
+      y += cooH + 6;
 
       const showMatHs = shouldShowMaterialHS(header, lines);
 
@@ -963,12 +978,12 @@ export default function InvoiceDetailPage() {
       const sigTextTopGap = 6;
       const sigBottomGap = 8;
       const sigBlockH = sigTextTopGap + stampHeight + sigBottomGap + 10;
-      let stampY = y2 + 18;
+      let stampY = Math.max(y2 + 24, pageHeight - 12 - sigBlockH);
       const fitsSamePage = stampY + sigBlockH <= pageHeight - 12;
 
       if (!fitsSamePage) {
         doc.addPage();
-        stampY = 40;
+        stampY = pageHeight - 12 - sigBlockH;
       }
 
       const stampX = pageWidth - margin - stampWidth;

@@ -956,6 +956,11 @@ const allowed = [
           "fx_rate",
           "fx_as_of",
 
+          // ✅ vendor delivery tracking
+          "vendor_ready_date",
+          "vendor_delivery_status",
+          "vendor_delay_days",
+
           // ✅ actual (post) vendor cost fields
           "actual_vendor_unit_cost_local",
           "actual_vendor_unit_cost_usd",
@@ -974,6 +979,24 @@ const allowed = [
         for (const k of allowed) {
           if (k in incoming) patch[k] = (incoming as any)[k];
         }
+
+        if ("vendor_ready_date" in patch) {
+          patch.vendor_ready_date = isBlank(patch.vendor_ready_date)
+            ? null
+            : safeText(patch.vendor_ready_date).slice(0, 10);
+        }
+        if ("vendor_delivery_status" in patch) {
+          patch.vendor_delivery_status = isBlank(patch.vendor_delivery_status)
+            ? null
+            : safeText(patch.vendor_delivery_status).toUpperCase();
+        }
+        if ("vendor_delay_days" in patch) {
+          patch.vendor_delay_days =
+            patch.vendor_delay_days === null || patch.vendor_delay_days === undefined || patch.vendor_delay_days === ""
+              ? null
+              : Number(patch.vendor_delay_days);
+        }
+
         patch.updated_at = new Date().toISOString();
         if ((patch as any).vendor_currency === "USD") {
           if ((patch as any).fx_rate == null || (patch as any).fx_rate === "") {
