@@ -192,6 +192,17 @@ function poSort(a: string, b: string) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
+function buildLineSnapshot(lines: InvoiceLine[]) {
+  const snapshot: Record<string, { material_content: string; hs_code: string }> = {};
+  for (const l of lines || []) {
+    snapshot[l.id] = {
+      material_content: (l.material_content || "").trim(),
+      hs_code: (l.hs_code || "").trim(),
+    };
+  }
+  return snapshot;
+}
+
 function groupInvoiceLines(lines: InvoiceLine[]) {
   const alive = (lines || []).filter((l) => !l?.is_deleted);
 
@@ -252,6 +263,7 @@ export default function InvoiceDetailPage() {
 
   const [header, setHeader] = React.useState<InvoiceHeader | null>(null);
   const [lines, setLines] = React.useState<InvoiceLine[]>([]);
+  const [savedLineSnapshot, setSavedLineSnapshot] = React.useState<Record<string, { material_content: string; hs_code: string }>>({});
 
   const [receiptsLoading, setReceiptsLoading] = React.useState(false);
   const [receipts, setReceipts] = React.useState<ReceiptRow[]>([]);
@@ -607,7 +619,9 @@ export default function InvoiceDetailPage() {
       };
 
       setHeader(patchedHeader);
-      setLines((rawLines || []).filter((l) => !l?.is_deleted));
+      const aliveLines = (rawLines || []).filter((l) => !l?.is_deleted);
+      setLines(aliveLines);
+      setSavedLineSnapshot(buildLineSnapshot(aliveLines));
     } catch (e: any) {
       console.error(e);
       setErrorMsg("Failed to load invoice.");
@@ -655,6 +669,28 @@ export default function InvoiceDetailPage() {
 
   const handleSave = React.useCallback(async () => {
     if (!invoiceId || !header) return;
+
+    const overwriteTargets = (lines || []).filter((l) => {
+      const prev = savedLineSnapshot[l.id];
+      if (!prev) return false;
+
+      const prevMaterial = (prev.material_content || "").trim();
+      const prevHs = (prev.hs_code || "").trim();
+      const nextMaterial = (l.material_content || "").trim();
+      const nextHs = (l.hs_code || "").trim();
+
+      const materialChanged = prevMaterial !== "" && prevMaterial !== nextMaterial;
+      const hsChanged = prevHs !== "" && prevHs !== nextHs;
+
+      return materialChanged || hsChanged;
+    });
+
+    if (overwriteTargets.length > 0) {
+      const ok = window.confirm(
+        `Existing Material / HS Code value will be overwritten for ${overwriteTargets.length} line(s). Continue?`
+      );
+      if (!ok) return;
+    }
 
     setSaving(true);
     try {
@@ -756,7 +792,7 @@ export default function InvoiceDetailPage() {
     } finally {
       setSaving(false);
     }
-  }, [invoiceId, header, lines, recomputeTotal]);
+  }, [invoiceId, header, lines, recomputeTotal, savedLineSnapshot]);
 
   const handlePdf = React.useCallback(async (): Promise<void> => {
     if (!header) return;

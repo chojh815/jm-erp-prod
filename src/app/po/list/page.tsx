@@ -409,6 +409,102 @@ function multiSortItems(
   return arr;
 }
 
+
+type PoListQueryState = {
+  q: string;
+  status: string;
+  dateFrom: string;
+  dateTo: string;
+  vendorId: string;
+  pendingOnly: boolean;
+  lateOnly: boolean;
+  page: number;
+  s1Field: SortField;
+  s1Dir: SortDir;
+  s2Field: SortField;
+  s2Dir: SortDir;
+  s3Field: SortField;
+  s3Dir: SortDir;
+};
+
+function parseSortField(v: string | null | undefined, fallback: SortField): SortField {
+  const x = (v ?? "").toString().trim().toUpperCase();
+  const allowed: SortField[] = [
+    "NONE",
+    "REQ_SHIP_DATE",
+    "BRAND",
+    "ORDER_DATE",
+    "PO_NO",
+    "BUYER",
+    "SHIP_MODE",
+    "SUBTOTAL",
+  ];
+  return (allowed as string[]).includes(x) ? (x as SortField) : fallback;
+}
+
+function parseSortDir(v: string | null | undefined, fallback: SortDir): SortDir {
+  const x = (v ?? "").toString().trim().toUpperCase();
+  return x === "DESC" ? "DESC" : x === "ASC" ? "ASC" : fallback;
+}
+
+function parsePositiveInt(v: string | null | undefined, fallback: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const i = Math.floor(n);
+  return i > 0 ? i : fallback;
+}
+
+function parseBoolFlag(v: string | null | undefined) {
+  const x = (v ?? "").toString().trim().toLowerCase();
+  return x === "1" || x === "true" || x === "y" || x === "yes";
+}
+
+function parsePoListQuery(search: string): PoListQueryState {
+  const qs = new URLSearchParams(search);
+
+  return {
+    q: (qs.get("q") ?? "").trim(),
+    status: (qs.get("status") ?? "ALL").trim() || "ALL",
+    dateFrom: (qs.get("dateFrom") ?? "").trim(),
+    dateTo: (qs.get("dateTo") ?? "").trim(),
+    vendorId: (qs.get("vendor_id") ?? "ALL").trim() || "ALL",
+    pendingOnly: parseBoolFlag(qs.get("pending_only")),
+    lateOnly: parseBoolFlag(qs.get("late_only")),
+    page: parsePositiveInt(qs.get("page"), 1),
+    s1Field: parseSortField(qs.get("s1Field"), "REQ_SHIP_DATE"),
+    s1Dir: parseSortDir(qs.get("s1Dir"), "ASC"),
+    s2Field: parseSortField(qs.get("s2Field"), "BRAND"),
+    s2Dir: parseSortDir(qs.get("s2Dir"), "ASC"),
+    s3Field: parseSortField(qs.get("s3Field"), "ORDER_DATE"),
+    s3Dir: parseSortDir(qs.get("s3Dir"), "ASC"),
+  };
+}
+
+function buildPoListQueryString(state: PoListQueryState, pageSize: number) {
+  const params = new URLSearchParams();
+
+  params.set("page", String(state.page));
+  params.set("pageSize", String(pageSize));
+
+  if (state.q.trim()) params.set("q", state.q.trim());
+  if (state.status && state.status !== "ALL") params.set("status", state.status);
+  if (state.dateFrom) params.set("dateFrom", state.dateFrom);
+  if (state.dateTo) params.set("dateTo", state.dateTo);
+  if (state.vendorId && state.vendorId !== "ALL") params.set("vendor_id", state.vendorId);
+  if (state.pendingOnly) params.set("pending_only", "true");
+  if (state.lateOnly) params.set("late_only", "true");
+
+  params.set("s1Field", state.s1Field);
+  params.set("s1Dir", state.s1Dir);
+  params.set("s2Field", state.s2Field);
+  params.set("s2Dir", state.s2Dir);
+  params.set("s3Field", state.s3Field);
+  params.set("s3Dir", state.s3Dir);
+
+  return params.toString();
+}
+
+
 /** ------------------ ✅ Formatting helpers ------------------ */
 function fmtMoney2(v: any) {
   const n = Number(v ?? 0);
@@ -508,6 +604,8 @@ export default function PurchaseOrderListPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedLine, setSelectedLine] = useState<PoLineItem | null>(null);
 
+  const [queryReady, setQueryReady] = useState(false);
+
   // ---------- Auth ----------
   useEffect(() => {
     const init = async () => {
@@ -552,29 +650,33 @@ export default function PurchaseOrderListPage() {
   }, []);
 
   // ---------- fetch list ----------
-  const fetchList = async (newPage?: number) => {
+  const fetchList = async (
+    newPage?: number,
+    override?: Partial<PoListQueryState>
+  ) => {
     setLoading(true);
     try {
-      const p = newPage ?? page;
-      const params = new URLSearchParams();
-      params.set("page", String(p));
-      params.set("pageSize", String(pageSize));
-      if (searchText.trim()) params.set("q", searchText.trim());
-      if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
-      if (dateFrom) params.set("dateFrom", dateFrom);
-      if (dateTo) params.set("dateTo", dateTo);
-      if (vendorFilter && vendorFilter !== "ALL") params.set("vendor_id", vendorFilter);
-      if (pendingOnly) params.set("pending_only", "true");
-      if (lateOnly) params.set("late_only", "true");
+      const nextState: PoListQueryState = {
+        q: override?.q ?? searchText,
+        status: override?.status ?? statusFilter,
+        dateFrom: override?.dateFrom ?? dateFrom,
+        dateTo: override?.dateTo ?? dateTo,
+        vendorId: override?.vendorId ?? vendorFilter,
+        pendingOnly: override?.pendingOnly ?? pendingOnly,
+        lateOnly: override?.lateOnly ?? lateOnly,
+        page: override?.page ?? newPage ?? page,
+        s1Field: override?.s1Field ?? s1Field,
+        s1Dir: override?.s1Dir ?? s1Dir,
+        s2Field: override?.s2Field ?? s2Field,
+        s2Dir: override?.s2Dir ?? s2Dir,
+        s3Field: override?.s3Field ?? s3Field,
+        s3Dir: override?.s3Dir ?? s3Dir,
+      };
 
-      params.set("s1Field", s1Field);
-      params.set("s1Dir", s1Dir);
-      params.set("s2Field", s2Field);
-      params.set("s2Dir", s2Dir);
-      params.set("s3Field", s3Field);
-      params.set("s3Dir", s3Dir);
+      const queryString = buildPoListQueryString(nextState, pageSize);
+      router.replace(`/po/list?${queryString}`, { scroll: false });
 
-      const res = await fetch(`/api/orders/list?${params.toString()}`);
+      const res = await fetch(`/api/orders/list?${queryString}`);
       const json = await safeJson<any>(res);
 
       if (!res.ok) {
@@ -587,7 +689,7 @@ export default function PurchaseOrderListPage() {
 
       setItems(normalized);
       setTotal(json?.total ?? 0);
-      setPage(json?.page ?? p);
+      setPage(json?.page ?? nextState.page);
 
       const gt = json?.grandTotal;
       const gtc = json?.grandTotalsByCurrency;
@@ -608,19 +710,51 @@ export default function PurchaseOrderListPage() {
   };
 
   useEffect(() => {
-    const qs = new URLSearchParams(window.location.search);
-    const incomingVendorId = (qs.get("vendor_id") ?? "").trim();
-    if (incomingVendorId) {
-      setVendorFilter(incomingVendorId);
-    }
+    const incoming = parsePoListQuery(window.location.search);
+
+    setSearchText(incoming.q);
+    setStatusFilter(incoming.status);
+    setDateFrom(incoming.dateFrom);
+    setDateTo(incoming.dateTo);
+    setVendorFilter(incoming.vendorId);
+    setPendingOnly(incoming.pendingOnly);
+    setLateOnly(incoming.lateOnly);
+    setPage(incoming.page);
+    setS1Field(incoming.s1Field);
+    setS1Dir(incoming.s1Dir);
+    setS2Field(incoming.s2Field);
+    setS2Dir(incoming.s2Dir);
+    setS3Field(incoming.s3Field);
+    setS3Dir(incoming.s3Dir);
+
+    setQueryReady(true);
   }, []);
 
   useEffect(() => {
-    if (!authLoading && role) fetchList(1);
+    if (!authLoading && role && queryReady) {
+      const incoming = parsePoListQuery(window.location.search);
+      void fetchList(incoming.page, incoming);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, role, vendorFilter, pendingOnly, lateOnly]);
+  }, [authLoading, role, queryReady]);
 
-  const handleApply = () => fetchList(1);
+  const handleApply = () =>
+    fetchList(1, {
+      q: searchText,
+      status: statusFilter,
+      dateFrom,
+      dateTo,
+      vendorId: vendorFilter,
+      pendingOnly,
+      lateOnly,
+      page: 1,
+      s1Field,
+      s1Dir,
+      s2Field,
+      s2Dir,
+      s3Field,
+      s3Dir,
+    });
 
   const handleClearFilters = () => {
     setSearchText("");
@@ -630,7 +764,30 @@ export default function PurchaseOrderListPage() {
     setVendorFilter("ALL");
     setPendingOnly(false);
     setLateOnly(false);
-    fetchList(1);
+    setPage(1);
+    setS1Field("REQ_SHIP_DATE");
+    setS1Dir("ASC");
+    setS2Field("BRAND");
+    setS2Dir("ASC");
+    setS3Field("ORDER_DATE");
+    setS3Dir("ASC");
+
+    void fetchList(1, {
+      q: "",
+      status: "ALL",
+      dateFrom: "",
+      dateTo: "",
+      vendorId: "ALL",
+      pendingOnly: false,
+      lateOnly: false,
+      page: 1,
+      s1Field: "REQ_SHIP_DATE",
+      s1Dir: "ASC",
+      s2Field: "BRAND",
+      s2Dir: "ASC",
+      s3Field: "ORDER_DATE",
+      s3Dir: "ASC",
+    });
   };
 
   // ---------- load lines ----------

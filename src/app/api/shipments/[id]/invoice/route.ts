@@ -227,18 +227,20 @@ if (existingInvoice?.id) {
       new Set((sLines ?? []).map((l: any) => l?.po_line_id).filter(Boolean))
     ) as string[];
 
-    const poNoByPoLineId = new Map<string, string>();
+    const poMetaByPoLineId = new Map<string, { po_no: string | null; hs_code: string | null }>();
     if (poLineIds.length > 0) {
       const { data: plRows, error: plErr } = await supabaseAdmin
         .from("po_lines")
         // FK: po_lines.po_header_id -> po_headers.id
-        .select("id, po_headers ( po_no )")
+        .select("id, hs_code, po_headers ( po_no )")
         .in("id", poLineIds);
 
       if (!plErr && plRows) {
         for (const r of plRows as any[]) {
-          const poNo = r?.po_headers?.po_no;
-          if (poNo) poNoByPoLineId.set(r.id, poNo);
+          poMetaByPoLineId.set(r.id, {
+            po_no: r?.po_headers?.po_no ?? null,
+            hs_code: r?.hs_code ?? null,
+          });
         }
       }
     }
@@ -386,11 +388,16 @@ if (existingInvoice?.id) {
 
         po_header_id: l.po_header_id ?? null,
         po_line_id: l.po_line_id ?? null,
-        po_no: (poNoByPoLineId.get(l?.po_line_id) ?? l?.po_no ?? l?.poNo ?? null),
+        po_no: (poMetaByPoLineId.get(l?.po_line_id)?.po_no ?? l?.po_no ?? l?.poNo ?? null),
 
         line_no: l.line_no ?? idx + 1,
         style_no: l.style_no ?? null,
         description: l.description ?? null,
+
+        // Material은 Invoice에서만 입력
+        material_content: null,
+        // HS Code는 PO Line 원천값을 복사
+        hs_code: poMetaByPoLineId.get(l?.po_line_id)?.hs_code ?? null,
 
         // Invoice는 Amount 중심이라 color/size는 유지하되 포장정보는 null로 둠
         color: l.color ?? null,
