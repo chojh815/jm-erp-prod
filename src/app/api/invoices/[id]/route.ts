@@ -5,11 +5,21 @@ import { randomUUID } from "crypto";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function jsonNoStore(body: any, status = 200) {
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+    },
+  });
+}
 function ok(data: any = {}) {
-  return NextResponse.json({ success: true, ...data });
+  return jsonNoStore({ success: true, ...data }, 200);
 }
 function bad(message: string, status = 400, extra: any = {}) {
-  return NextResponse.json({ success: false, error: message, ...extra }, { status });
+  return jsonNoStore({ success: false, error: message, ...extra }, status);
 }
 
 const UUID_RE =
