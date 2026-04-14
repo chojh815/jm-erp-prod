@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { toast } from "sonner";
 
 type WorkSheetHeader = {
@@ -577,6 +578,12 @@ export default function WorkSheetDetailPage() {
    * 중요: masterLineId는 lines[0]처럼 매번 계산하지 않고 "상태로 고정"한다.
    */
   const [masterLineId, setMasterLineId] = React.useState<string | null>(null);
+
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [previewImages, setPreviewImages] = React.useState<string[]>([]);
+  const [previewIndex, setPreviewIndex] = React.useState(0);
+  const [previewZoom, setPreviewZoom] = React.useState(1);
+  const [previewOrigin, setPreviewOrigin] = React.useState("50% 50%");
 
   const masterLine = React.useMemo(() => {
     if (!masterLineId) return null;
@@ -1230,6 +1237,57 @@ export default function WorkSheetDetailPage() {
 
 
 
+  function openImagePreview(images: string[], startIndex: number = 0) {
+    const clean = (images ?? []).map((x) => String(x || "").trim()).filter(Boolean);
+    if (clean.length === 0) return;
+    setPreviewImages(clean);
+    setPreviewIndex(Math.max(0, Math.min(startIndex, clean.length - 1)));
+    setPreviewZoom(1);
+    setPreviewOrigin("50% 50%");
+    setPreviewOpen(true);
+  }
+
+  function closeImagePreview() {
+    setPreviewOpen(false);
+    setPreviewZoom(1);
+    setPreviewOrigin("50% 50%");
+  }
+
+  function showPrevImage() {
+    setPreviewIndex((prev) => {
+      if (!previewImages.length) return 0;
+      return (prev - 1 + previewImages.length) % previewImages.length;
+    });
+    setPreviewZoom(1);
+    setPreviewOrigin("50% 50%");
+  }
+
+  function showNextImage() {
+    setPreviewIndex((prev) => {
+      if (!previewImages.length) return 0;
+      return (prev + 1) % previewImages.length;
+    });
+    setPreviewZoom(1);
+    setPreviewOrigin("50% 50%");
+  }
+
+  function handlePreviewWheel(e: React.WheelEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setPreviewZoom((prev) => {
+      const next = e.deltaY < 0 ? prev + 0.25 : prev - 0.25;
+      const clamped = Math.max(1, Math.min(4, Number(next.toFixed(2))));
+      return clamped;
+    });
+  }
+
+  function handlePreviewMouseMove(e: React.MouseEvent<HTMLDivElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    setPreviewOrigin(`${x.toFixed(2)}% ${y.toFixed(2)}%`);
+  }
+
   const reqShipDate = fmtDate(po?.requested_ship_date ?? null);
   const deliveryDueDate = addDaysYmd(po?.requested_ship_date ?? null, -7);
   const brand = toStr(po?.buyer_brand_name ?? "").trim();
@@ -1479,7 +1537,16 @@ export default function WorkSheetDetailPage() {
                               <img
                                 src={thumb}
                                 alt={l.jm_style_no}
-                                className="h-full w-full object-cover"
+                                className="h-full w-full cursor-zoom-in object-cover transition hover:scale-105"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const imgs = [l.image_url_primary, ...safeArray(l.image_urls)]
+                                    .map((x) => String(x || "").trim())
+                                    .filter(Boolean);
+                                  const uniqueImgs = Array.from(new Set(imgs));
+                                  const startIndex = Math.max(0, uniqueImgs.indexOf(thumb));
+                                  openImagePreview(uniqueImgs, startIndex);
+                                }}
                               />
                             ) : (
                               <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
@@ -2629,6 +2696,104 @@ export default function WorkSheetDetailPage() {
           <div className="text-sm text-muted-foreground">Loading...</div>
         ) : null}
       </div>
+
+      <Dialog open={previewOpen} onOpenChange={(open) => { if (!open) closeImagePreview(); else setPreviewOpen(true); }}>
+        <DialogContent className="max-w-5xl p-3">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm text-muted-foreground">
+                {previewImages.length > 0 ? `${previewIndex + 1} / ${previewImages.length}` : ""}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPreviewZoom((z) => Math.max(1, Number((z - 0.25).toFixed(2))))}
+                  disabled={previewZoom <= 1}
+                >
+                  Zoom -
+                </Button>
+                <div className="min-w-[70px] text-center text-sm tabular-nums">
+                  {Math.round(previewZoom * 100)}%
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPreviewZoom((z) => Math.min(4, Number((z + 0.25).toFixed(2))))}
+                  disabled={previewZoom >= 4}
+                >
+                  Zoom +
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setPreviewZoom(1);
+                    setPreviewOrigin("50% 50%");
+                  }}
+                >
+                  Reset
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={showPrevImage}
+                disabled={previewImages.length <= 1}
+              >
+                ← Prev
+              </Button>
+
+              <div
+                className="relative flex-1 overflow-hidden rounded-md border bg-black/5"
+                style={{ height: "72vh" }}
+                onWheel={handlePreviewWheel}
+                onMouseMove={handlePreviewMouseMove}
+              >
+                {previewImages[previewIndex] ? (
+                  <img
+                    src={previewImages[previewIndex]}
+                    alt={`Preview ${previewIndex + 1}`}
+                    className="h-full w-full object-contain select-none"
+                    draggable={false}
+                    style={{
+                      transform: `scale(${previewZoom})`,
+                      transformOrigin: previewOrigin,
+                      transition: "transform 0.12s ease-out",
+                      cursor: previewZoom > 1 ? "zoom-out" : "zoom-in",
+                    }}
+                    onClick={() => {
+                      if (previewZoom > 1) {
+                        setPreviewZoom(1);
+                        setPreviewOrigin("50% 50%");
+                      } else {
+                        setPreviewZoom(2);
+                      }
+                    }}
+                  />
+                ) : null}
+              </div>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={showNextImage}
+                disabled={previewImages.length <= 1}
+              >
+                Next →
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }

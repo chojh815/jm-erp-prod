@@ -29,6 +29,11 @@ function fmtPct(v: any) {
   return `${(n * 100).toFixed(2)}%`;
 }
 
+function fmtInt(v: any) {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : "0";
+}
+
 function marginTone(v: any) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "secondary" as const;
@@ -166,7 +171,7 @@ export default function ExpectedProfitabilityPage() {
   return (
     <AppShell title="Expected Margin">
       <div className="mx-auto w-full max-w-[1500px] space-y-4 p-4">
-        <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <Card>
             <CardHeader><CardTitle className="text-sm">Expected Revenue</CardTitle></CardHeader>
             <CardContent className="text-2xl font-semibold">{fmtMoney(summary?.revenue_usd)}</CardContent>
@@ -182,6 +187,15 @@ export default function ExpectedProfitabilityPage() {
           <Card>
             <CardHeader><CardTitle className="text-sm">Avg Margin %</CardTitle></CardHeader>
             <CardContent className="text-2xl font-semibold">{fmtPct(summary?.margin_pct)}</CardContent>
+          </Card>
+          <Card className={(summary?.missing_count ?? 0) > 0 ? "border-amber-300 bg-amber-50/40" : ""}>
+            <CardHeader><CardTitle className="text-sm">Missing Cost Lines</CardTitle></CardHeader>
+            <CardContent>
+              <div className="text-2xl font-semibold">{fmtInt(summary?.missing_count)}</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Planned unit cost not entered yet
+              </div>
+            </CardContent>
           </Card>
         </div>
 
@@ -226,10 +240,30 @@ export default function ExpectedProfitabilityPage() {
               <Label>Max Margin %</Label>
               <Input value={marginMax} onChange={(e) => setMarginMax(e.target.value)} placeholder="e.g. 60" />
             </div>
-            <div className="flex items-end gap-2">
-              <Checkbox checked={missingOnly} onCheckedChange={(v) => setMissingOnly(Boolean(v))} />
-              <span className="text-sm">Missing planned cost only</span>
+            <div className="flex items-end">
+              <button
+                type="button"
+                onClick={() => setMissingOnly((v) => !v)}
+                className={[
+                  "flex w-full items-center gap-3 rounded-md border px-3 py-2 text-left transition",
+                  missingOnly
+                    ? "border-amber-400 bg-amber-50 text-amber-900"
+                    : "border-slate-200 bg-white hover:bg-slate-50",
+                ].join(" ")}
+              >
+                <Checkbox
+                  checked={missingOnly}
+                  onCheckedChange={(v) => setMissingOnly(Boolean(v))}
+                />
+                <div className="leading-tight">
+                  <div className="text-sm font-medium">Missing planned cost only</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Show only lines with no planned unit cost
+                  </div>
+                </div>
+              </button>
             </div>
+
             <div className="xl:col-span-8 flex gap-2">
               <Button onClick={() => void load()} disabled={loading}>{loading ? "Loading..." : "Search"}</Button>
             </div>
