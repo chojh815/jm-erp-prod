@@ -19,6 +19,12 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 // ✅ jsPDF (Client only)
 import jsPDF from "jspdf";
@@ -82,6 +88,19 @@ interface PoLineItem {
 type CreateWsOk = { success: true; work_sheet_id?: string; id?: string; data?: any };
 type CreateWsFail = { success: false; error: string };
 type CreateWsResult = CreateWsOk | CreateWsFail;
+
+type DuplicateCandidate = {
+  source_work_sheet_id: string;
+  source_work_sheet_line_id: string;
+  ws_no: string | null;
+  po_no: string | null;
+  buyer_name: string | null;
+  jm_style_no: string | null;
+  buyer_style: string | null;
+  description: string | null;
+  updated_at: string | null;
+  score?: number | null;
+};
 
 function safeJson<T>(res: Response): Promise<T | null> {
   return res
@@ -409,102 +428,6 @@ function multiSortItems(
   return arr;
 }
 
-
-type PoListQueryState = {
-  q: string;
-  status: string;
-  dateFrom: string;
-  dateTo: string;
-  vendorId: string;
-  pendingOnly: boolean;
-  lateOnly: boolean;
-  page: number;
-  s1Field: SortField;
-  s1Dir: SortDir;
-  s2Field: SortField;
-  s2Dir: SortDir;
-  s3Field: SortField;
-  s3Dir: SortDir;
-};
-
-function parseSortField(v: string | null | undefined, fallback: SortField): SortField {
-  const x = (v ?? "").toString().trim().toUpperCase();
-  const allowed: SortField[] = [
-    "NONE",
-    "REQ_SHIP_DATE",
-    "BRAND",
-    "ORDER_DATE",
-    "PO_NO",
-    "BUYER",
-    "SHIP_MODE",
-    "SUBTOTAL",
-  ];
-  return (allowed as string[]).includes(x) ? (x as SortField) : fallback;
-}
-
-function parseSortDir(v: string | null | undefined, fallback: SortDir): SortDir {
-  const x = (v ?? "").toString().trim().toUpperCase();
-  return x === "DESC" ? "DESC" : x === "ASC" ? "ASC" : fallback;
-}
-
-function parsePositiveInt(v: string | null | undefined, fallback: number) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  const i = Math.floor(n);
-  return i > 0 ? i : fallback;
-}
-
-function parseBoolFlag(v: string | null | undefined) {
-  const x = (v ?? "").toString().trim().toLowerCase();
-  return x === "1" || x === "true" || x === "y" || x === "yes";
-}
-
-function parsePoListQuery(search: string): PoListQueryState {
-  const qs = new URLSearchParams(search);
-
-  return {
-    q: (qs.get("q") ?? "").trim(),
-    status: (qs.get("status") ?? "ALL").trim() || "ALL",
-    dateFrom: (qs.get("dateFrom") ?? "").trim(),
-    dateTo: (qs.get("dateTo") ?? "").trim(),
-    vendorId: (qs.get("vendor_id") ?? "ALL").trim() || "ALL",
-    pendingOnly: parseBoolFlag(qs.get("pending_only")),
-    lateOnly: parseBoolFlag(qs.get("late_only")),
-    page: parsePositiveInt(qs.get("page"), 1),
-    s1Field: parseSortField(qs.get("s1Field"), "REQ_SHIP_DATE"),
-    s1Dir: parseSortDir(qs.get("s1Dir"), "ASC"),
-    s2Field: parseSortField(qs.get("s2Field"), "BRAND"),
-    s2Dir: parseSortDir(qs.get("s2Dir"), "ASC"),
-    s3Field: parseSortField(qs.get("s3Field"), "ORDER_DATE"),
-    s3Dir: parseSortDir(qs.get("s3Dir"), "ASC"),
-  };
-}
-
-function buildPoListQueryString(state: PoListQueryState, pageSize: number) {
-  const params = new URLSearchParams();
-
-  params.set("page", String(state.page));
-  params.set("pageSize", String(pageSize));
-
-  if (state.q.trim()) params.set("q", state.q.trim());
-  if (state.status && state.status !== "ALL") params.set("status", state.status);
-  if (state.dateFrom) params.set("dateFrom", state.dateFrom);
-  if (state.dateTo) params.set("dateTo", state.dateTo);
-  if (state.vendorId && state.vendorId !== "ALL") params.set("vendor_id", state.vendorId);
-  if (state.pendingOnly) params.set("pending_only", "true");
-  if (state.lateOnly) params.set("late_only", "true");
-
-  params.set("s1Field", state.s1Field);
-  params.set("s1Dir", state.s1Dir);
-  params.set("s2Field", state.s2Field);
-  params.set("s2Dir", state.s2Dir);
-  params.set("s3Field", state.s3Field);
-  params.set("s3Dir", state.s3Dir);
-
-  return params.toString();
-}
-
-
 /** ------------------ ✅ Formatting helpers ------------------ */
 function fmtMoney2(v: any) {
   const n = Number(v ?? 0);
@@ -603,8 +526,13 @@ export default function PurchaseOrderListPage() {
   // Line detail drawer (Row click -> Right Drawer)
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedLine, setSelectedLine] = useState<PoLineItem | null>(null);
-
-  const [queryReady, setQueryReady] = useState(false);
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [duplicateLoading, setDuplicateLoading] = useState(false);
+  const [duplicating, setDuplicating] = useState(false);
+  const [duplicateCandidates, setDuplicateCandidates] = useState<DuplicateCandidate[]>([]);
+  const [duplicateQuery, setDuplicateQuery] = useState("");
+  const [duplicateTargetPo, setDuplicateTargetPo] = useState<PoHeaderItem | null>(null);
+  const [duplicateTargetLine, setDuplicateTargetLine] = useState<PoLineItem | null>(null);
 
   // ---------- Auth ----------
   useEffect(() => {
@@ -650,33 +578,29 @@ export default function PurchaseOrderListPage() {
   }, []);
 
   // ---------- fetch list ----------
-  const fetchList = async (
-    newPage?: number,
-    override?: Partial<PoListQueryState>
-  ) => {
+  const fetchList = async (newPage?: number) => {
     setLoading(true);
     try {
-      const nextState: PoListQueryState = {
-        q: override?.q ?? searchText,
-        status: override?.status ?? statusFilter,
-        dateFrom: override?.dateFrom ?? dateFrom,
-        dateTo: override?.dateTo ?? dateTo,
-        vendorId: override?.vendorId ?? vendorFilter,
-        pendingOnly: override?.pendingOnly ?? pendingOnly,
-        lateOnly: override?.lateOnly ?? lateOnly,
-        page: override?.page ?? newPage ?? page,
-        s1Field: override?.s1Field ?? s1Field,
-        s1Dir: override?.s1Dir ?? s1Dir,
-        s2Field: override?.s2Field ?? s2Field,
-        s2Dir: override?.s2Dir ?? s2Dir,
-        s3Field: override?.s3Field ?? s3Field,
-        s3Dir: override?.s3Dir ?? s3Dir,
-      };
+      const p = newPage ?? page;
+      const params = new URLSearchParams();
+      params.set("page", String(p));
+      params.set("pageSize", String(pageSize));
+      if (searchText.trim()) params.set("q", searchText.trim());
+      if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
+      if (dateFrom) params.set("dateFrom", dateFrom);
+      if (dateTo) params.set("dateTo", dateTo);
+      if (vendorFilter && vendorFilter !== "ALL") params.set("vendor_id", vendorFilter);
+      if (pendingOnly) params.set("pending_only", "true");
+      if (lateOnly) params.set("late_only", "true");
 
-      const queryString = buildPoListQueryString(nextState, pageSize);
-      router.replace(`/po/list?${queryString}`, { scroll: false });
+      params.set("s1Field", s1Field);
+      params.set("s1Dir", s1Dir);
+      params.set("s2Field", s2Field);
+      params.set("s2Dir", s2Dir);
+      params.set("s3Field", s3Field);
+      params.set("s3Dir", s3Dir);
 
-      const res = await fetch(`/api/orders/list?${queryString}`);
+      const res = await fetch(`/api/orders/list?${params.toString()}`);
       const json = await safeJson<any>(res);
 
       if (!res.ok) {
@@ -689,7 +613,7 @@ export default function PurchaseOrderListPage() {
 
       setItems(normalized);
       setTotal(json?.total ?? 0);
-      setPage(json?.page ?? nextState.page);
+      setPage(json?.page ?? p);
 
       const gt = json?.grandTotal;
       const gtc = json?.grandTotalsByCurrency;
@@ -710,51 +634,19 @@ export default function PurchaseOrderListPage() {
   };
 
   useEffect(() => {
-    const incoming = parsePoListQuery(window.location.search);
-
-    setSearchText(incoming.q);
-    setStatusFilter(incoming.status);
-    setDateFrom(incoming.dateFrom);
-    setDateTo(incoming.dateTo);
-    setVendorFilter(incoming.vendorId);
-    setPendingOnly(incoming.pendingOnly);
-    setLateOnly(incoming.lateOnly);
-    setPage(incoming.page);
-    setS1Field(incoming.s1Field);
-    setS1Dir(incoming.s1Dir);
-    setS2Field(incoming.s2Field);
-    setS2Dir(incoming.s2Dir);
-    setS3Field(incoming.s3Field);
-    setS3Dir(incoming.s3Dir);
-
-    setQueryReady(true);
+    const qs = new URLSearchParams(window.location.search);
+    const incomingVendorId = (qs.get("vendor_id") ?? "").trim();
+    if (incomingVendorId) {
+      setVendorFilter(incomingVendorId);
+    }
   }, []);
 
   useEffect(() => {
-    if (!authLoading && role && queryReady) {
-      const incoming = parsePoListQuery(window.location.search);
-      void fetchList(incoming.page, incoming);
-    }
+    if (!authLoading && role) fetchList(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, role, queryReady]);
+  }, [authLoading, role, vendorFilter, pendingOnly, lateOnly]);
 
-  const handleApply = () =>
-    fetchList(1, {
-      q: searchText,
-      status: statusFilter,
-      dateFrom,
-      dateTo,
-      vendorId: vendorFilter,
-      pendingOnly,
-      lateOnly,
-      page: 1,
-      s1Field,
-      s1Dir,
-      s2Field,
-      s2Dir,
-      s3Field,
-      s3Dir,
-    });
+  const handleApply = () => fetchList(1);
 
   const handleClearFilters = () => {
     setSearchText("");
@@ -764,30 +656,7 @@ export default function PurchaseOrderListPage() {
     setVendorFilter("ALL");
     setPendingOnly(false);
     setLateOnly(false);
-    setPage(1);
-    setS1Field("REQ_SHIP_DATE");
-    setS1Dir("ASC");
-    setS2Field("BRAND");
-    setS2Dir("ASC");
-    setS3Field("ORDER_DATE");
-    setS3Dir("ASC");
-
-    void fetchList(1, {
-      q: "",
-      status: "ALL",
-      dateFrom: "",
-      dateTo: "",
-      vendorId: "ALL",
-      pendingOnly: false,
-      lateOnly: false,
-      page: 1,
-      s1Field: "REQ_SHIP_DATE",
-      s1Dir: "ASC",
-      s2Field: "BRAND",
-      s2Dir: "ASC",
-      s3Field: "ORDER_DATE",
-      s3Dir: "ASC",
-    });
+    fetchList(1);
   };
 
   // ---------- load lines ----------
@@ -1377,6 +1246,81 @@ export default function PurchaseOrderListPage() {
       alert(e?.message || "Work Sheet action failed");
     } finally {
       setCreatingLineId(null);
+    }
+  };
+
+
+  const loadDuplicateCandidates = async (
+    po: PoHeaderItem,
+    line: PoLineItem,
+    qOverride?: string
+  ) => {
+    setDuplicateLoading(true);
+    try {
+      const sp = new URLSearchParams();
+      sp.set("po_header_id", po.id);
+      sp.set("po_line_id", line.id);
+      const q = (qOverride ?? duplicateQuery).trim();
+      if (q) sp.set("q", q);
+
+      const res = await fetch(`/api/work-sheets/duplicate-from-existing?${sp.toString()}`, {
+        cache: "no-store",
+      });
+      const json = await safeJson<any>(res);
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error ?? "Failed to load duplicate candidates.");
+      }
+      setDuplicateCandidates(Array.isArray(json?.rows) ? json.rows : []);
+    } catch (e: any) {
+      console.error("loadDuplicateCandidates error:", e);
+      alert(e?.message || "Failed to load duplicate candidates.");
+      setDuplicateCandidates([]);
+    } finally {
+      setDuplicateLoading(false);
+    }
+  };
+
+  const openDuplicateDialog = async (po: PoHeaderItem, line: PoLineItem) => {
+    setDuplicateTargetPo(po);
+    setDuplicateTargetLine(line);
+    setDuplicateQuery("");
+    setDuplicateCandidates([]);
+    setDuplicateOpen(true);
+    await loadDuplicateCandidates(po, line, "");
+  };
+
+  const runDuplicateFromExisting = async (candidate: DuplicateCandidate) => {
+    if (!duplicateTargetPo || !duplicateTargetLine) return;
+    try {
+      setDuplicating(true);
+
+      const res = await fetch("/api/work-sheets/duplicate-from-existing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_po_header_id: duplicateTargetPo.id,
+          target_po_line_id: duplicateTargetLine.id,
+          source_work_sheet_id: candidate.source_work_sheet_id,
+          source_work_sheet_line_id: candidate.source_work_sheet_line_id,
+        }),
+      });
+
+      const json = await safeJson<any>(res);
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error ?? "Failed to duplicate from existing WS.");
+      }
+
+      const wsId = pickWsId(json);
+      if (!wsId) throw new Error("work_sheet_id missing after duplicate.");
+
+      setWsMap((prev) => ({ ...prev, [duplicateTargetLine.id]: wsId }));
+      setDuplicateOpen(false);
+      router.push(`/work-sheets/${wsId}`);
+    } catch (e: any) {
+      console.error("runDuplicateFromExisting error:", e);
+      alert(e?.message || "Copy Previous WS failed");
+    } finally {
+      setDuplicating(false);
     }
   };
 
@@ -2004,17 +1948,27 @@ export default function PurchaseOrderListPage() {
                   const existing = wsMap[selectedLine.id] || selectedLine.work_sheet_id || null;
                   const hasWs = existing && isUuid(existing);
                   return (
-                    <Button
-                      className="flex-1"
-                      onClick={() => onClickWorkSheet(selectedPo, selectedLine)}
-                      disabled={creatingLineId === selectedLine.id}
-                    >
-                      {creatingLineId === selectedLine.id
-                        ? "Working..."
-                        : hasWs
-                          ? "Open WS"
-                          : "Create WS"}
-                    </Button>
+                    <>
+                      <Button
+                        className="flex-1"
+                        onClick={() => onClickWorkSheet(selectedPo, selectedLine)}
+                        disabled={creatingLineId === selectedLine.id}
+                      >
+                        {creatingLineId === selectedLine.id
+                          ? "Working..."
+                          : hasWs
+                            ? "Open WS"
+                            : "Create WS"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="flex-1"
+                        onClick={() => openDuplicateDialog(selectedPo, selectedLine)}
+                        disabled={duplicating}
+                      >
+                        Copy Previous WS
+                      </Button>
+                    </>
                   );
                 })()}
                 <Button
@@ -2032,6 +1986,100 @@ export default function PurchaseOrderListPage() {
           </div>
         </div>
       )}
+
+      <Dialog open={duplicateOpen} onOpenChange={setDuplicateOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Duplicate from Existing WS</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="rounded-lg border bg-slate-50 p-3 text-sm">
+              <div>
+                <span className="font-semibold">Target PO:</span>{" "}
+                {duplicateTargetPo?.poNo ?? "-"} / {duplicateTargetPo?.buyerName ?? "-"}
+              </div>
+              <div className="mt-1">
+                <span className="font-semibold">Target Style:</span>{" "}
+                {duplicateTargetLine?.buyerStyleNo ?? duplicateTargetLine?.jmStyleNo ?? "-"}
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <Input
+                value={duplicateQuery}
+                onChange={(e) => setDuplicateQuery(e.target.value)}
+                placeholder="Search previous WS by WS No / PO / Buyer / Style"
+              />
+              <Button
+                onClick={() => {
+                  if (duplicateTargetPo && duplicateTargetLine) {
+                    void loadDuplicateCandidates(duplicateTargetPo, duplicateTargetLine, duplicateQuery);
+                  }
+                }}
+                disabled={duplicateLoading || !duplicateTargetPo || !duplicateTargetLine}
+              >
+                {duplicateLoading ? "Searching..." : "Search"}
+              </Button>
+            </div>
+
+            <div className="max-h-[420px] overflow-auto rounded-lg border">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50">
+                  <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+                    <th>WS No</th>
+                    <th>PO No</th>
+                    <th>Buyer</th>
+                    <th>JM No</th>
+                    <th>Buyer Style</th>
+                    <th>Updated</th>
+                    <th className="text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {duplicateLoading ? (
+                    <tr className="border-t">
+                      <td colSpan={7} className="px-3 py-6 text-center text-slate-500">
+                        Loading...
+                      </td>
+                    </tr>
+                  ) : duplicateCandidates.length === 0 ? (
+                    <tr className="border-t">
+                      <td colSpan={7} className="px-3 py-6 text-center text-slate-500">
+                        No previous WS found.
+                      </td>
+                    </tr>
+                  ) : (
+                    duplicateCandidates.map((c) => (
+                      <tr key={`${c.source_work_sheet_id}-${c.source_work_sheet_line_id}`} className="border-t">
+                        <td className="px-3 py-2 font-medium">{c.ws_no ?? "-"}</td>
+                        <td className="px-3 py-2">{c.po_no ?? "-"}</td>
+                        <td className="px-3 py-2">{c.buyer_name ?? "-"}</td>
+                        <td className="px-3 py-2">{c.jm_style_no ?? "-"}</td>
+                        <td className="px-3 py-2">{c.buyer_style ?? "-"}</td>
+                        <td className="px-3 py-2">{c.updated_at ? String(c.updated_at).slice(0, 10) : "-"}</td>
+                        <td className="px-3 py-2 text-right">
+                          <Button
+                            size="sm"
+                            onClick={() => void runDuplicateFromExisting(c)}
+                            disabled={duplicating}
+                          >
+                            {duplicating ? "Working..." : "Use This WS"}
+                          </Button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="text-xs text-slate-500">
+              * Planned notes / materials / vendor setup are copied. Actual cost / confirm / vendor delivery tracking are reset.
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }
