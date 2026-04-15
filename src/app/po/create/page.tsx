@@ -150,8 +150,8 @@ const [permLoaded, setPermLoaded] = React.useState(false);
   const [initializedFromQuery, setInitializedFromQuery] =
     React.useState(false);
 
-  // Guard buyer-default effect while loading an existing PO
-  const isHydratingPORef = React.useRef(false);
+  // Skip buyer default auto-fill once right after loading an existing PO
+  const skipNextBuyerDefaultsRef = React.useRef(false);
 
   // ----------------------
   // 초기 로그인 / 권한 체크
@@ -593,7 +593,11 @@ const hasAnyShipped = React.useMemo(() => {
   // ✅ 바이어 선택 시 companies 테이블에서 Payment Term / Ship Mode / Origin 기본값 가져오기
   React.useEffect(() => {
     if (!buyerId) return;
-    if (isHydratingPORef.current) return;
+
+    if (skipNextBuyerDefaultsRef.current) {
+      skipNextBuyerDefaultsRef.current = false;
+      return;
+    }
 
     (async () => {
       try {
@@ -1320,8 +1324,6 @@ const fetchPoList = React.useCallback(
   const loadPO = React.useCallback(
     async (targetPoNo: string, targetHeaderId?: string | null) => {
       try {
-        isHydratingPORef.current = true;
-
         let resolvedHeaderId = String(targetHeaderId || "").trim() || null;
 
         if (!resolvedHeaderId) {
@@ -1391,6 +1393,9 @@ const fetchPoList = React.useCallback(
         loadedHeaderIdRef.current = _loadedHeaderId;
         loadedPoNoRef.current = (header.po_no || targetPoNo || "").toString();
         const apiLines = (data.lines as any[]) || [];
+
+        // prevent buyer default effect from overwriting loaded PO payment term
+        skipNextBuyerDefaultsRef.current = true;
 
         setPoNo(header.po_no || "");
         setOrderType((header.order_type as OrderType) || "NEW");
@@ -1532,10 +1537,6 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
       } catch (err) {
         console.error("Load PO unexpected error:", err);
         alert("Unexpected error while loading PO.");
-      } finally {
-        setTimeout(() => {
-          isHydratingPORef.current = false;
-        }, 0);
       }
     },
     [makeEmptyLine, findPaymentTermByText]
@@ -2734,8 +2735,6 @@ const canCreateProforma =
                             value={buyerId}
                             onValueChange={(v) => {
                               setBuyerId(v);
-                              setPaymentTermId(null);
-                              setPaymentTermName("");
                               setBrand("");
                               setDept("");
                               setIncoterm("");
@@ -3762,7 +3761,7 @@ const canCreateProforma =
                             variant="outline"
                             onClick={() => {
                               setPoSearchOpen(false);
-                              loadPO(po.po_no, po.id);
+                              loadPO(po.po_no, po.id)
                             }}
                           >
                             Load
