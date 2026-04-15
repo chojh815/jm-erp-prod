@@ -151,42 +151,71 @@ async function resolveBrandName(brandId: string) {
   return safeTrim((data as any)?.brand_name ?? (data as any)?.name);
 }
 
-async function loadExistingLineByIdOrLineNo(
-  poHeaderId: string,
-  incomingLine: any,
-  fallbackLineNo: number
-) {
-  const incomingId = safeTrim(incomingLine?.id);
+type ExistingPoLine = {
+  id: string;
+  line_no: number;
+  image_url?: string | null;
+  image_urls?: string[] | null;
+  main_image_url?: string | null;
+  is_deleted?: boolean;
+  qty_cancelled?: number | null;
+  updated_at?: string | null;
+};
 
-  if (incomingId && isUuid(incomingId)) {
-    const { data, error } = await supabaseAdmin
-      .from("po_lines")
-      .select("id, line_no, image_url, image_urls, main_image_url, is_deleted, qty_cancelled")
-      .eq("id", incomingId)
-      .eq("po_header_id", poHeaderId)
-      .maybeSingle();
+function buildExistingLineMaps(existingLines: ExistingPoLine[]) {
+  const byId = new Map<string, ExistingPoLine>();
+  const byLineNo = new Map<number, ExistingPoLine[]>();
 
-    if (error) throw error;
-    if (data?.id) return data;
+  for (const row of existingLines) {
+    if (row?.id) byId.set(String(row.id), row);
+    const n = intNum(row?.line_no, 0);
+    if (!byLineNo.has(n)) byLineNo.set(n, []);
+    byLineNo.get(n)!.push(row);
   }
 
-  const lineNoRaw =
-    incomingLine?.line_no ?? incomingLine?.lineNo ?? fallbackLineNo;
-  const lineNo = intNum(lineNoRaw, fallbackLineNo);
+  for (const arr of byLineNo.values()) {
+    arr.sort((a, b) => {
+      const at = new Date(a?.updated_at || 0).getTime();
+      const bt = new Date(b?.updated_at || 0).getTime();
+      return bt - at;
+    });
+  }
 
-  const { data, error } = await supabaseAdmin
-    .from("po_lines")
-    .select(
-  "id, line_no, image_url, image_urls, main_image_url, is_deleted, qty_cancelled, updated_at"
-)
-    .eq("po_header_id", poHeaderId)
-    .eq("line_no", lineNo)
-    .eq("is_deleted", false)
-    .order("updated_at", { ascending: false })
-    .limit(1);
+  return { byId, byLineNo };
+}
 
-  if (error) throw error;
-  return Array.isArray(data) && data.length > 0 ? data[0] : null;
+function matchIncomingLinesToExisting(
+  existingLines: ExistingPoLine[],
+  incomingLines: any[],
+  resolvedLineNos: number[]
+) {
+  const { byId, byLineNo } = buildExistingLineMaps(existingLines);
+  const usedIds = new Set<string>();
+  const matches: Array<ExistingPoLine | null> = [];
+
+  for (let i = 0; i < incomingLines.length; i++) {
+    const ln = incomingLines[i] ?? {};
+    const incomingId = safeTrim(ln?.id);
+    let matched: ExistingPoLine | null = null;
+
+    if (incomingId && isUuid(incomingId)) {
+      const hit = byId.get(incomingId);
+      if (hit && !usedIds.has(hit.id)) {
+        matched = hit;
+      }
+    }
+
+    if (!matched) {
+      const targetLineNo = intNum(resolvedLineNos[i], i + 1);
+      const candidates = byLineNo.get(targetLineNo) ?? [];
+      matched = candidates.find((row) => row?.id && !usedIds.has(row.id)) ?? null;
+    }
+
+    if (matched?.id) usedIds.add(matched.id);
+    matches.push(matched);
+  }
+
+  return { matches, usedIds };
 }
 
 /**
@@ -336,6 +365,7 @@ export async function GET(
  * - 헤더 + 라인 동시 저장
  * - po_no 변경 금지
  * - payload에 없는 기존 라인은 soft-delete
+ * - overwrite 저장 시 line_no unique 충돌 방지
  */
 export async function PUT(
   req: Request,
@@ -560,7 +590,6 @@ export async function PUT(
     }
 
     const incomingLines = Array.isArray(linesIn) ? linesIn : [];
-    const keepIds: string[] = [];
 
     const parsedLineNos = incomingLines.map((ln: any, i: number) => {
       const raw = ln?.line_no ?? ln?.lineNo ?? i + 1;
@@ -568,15 +597,82 @@ export async function PUT(
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : i + 1;
     });
     const hasDupLineNo = new Set(parsedLineNos).size !== parsedLineNos.length;
-    const useSequentialLineNo = hasDupLineNo;
+    const resolvedLineNos = incomingLines.map((ln: any, i: number) =>
+      hasDupLineNo ? i + 1 : intNum(ln?.line_no ?? ln?.lineNo, i + 1)
+    );
+
+    const { data: existingActiveLines, error: existingLinesErr } = await supabaseAdmin
+      .from("po_lines")
+      .select(
+        "id, line_no, image_url, image_urls, main_image_url, is_deleted, qty_cancelled, updated_at"
+      )
+      .eq("po_header_id", poHeaderId)
+      .eq("is_deleted", false)
+      .order("line_no", { ascending: true });
+
+    if (existingLinesErr) {
+      console.error("Read Existing PO Lines Error:", existingLinesErr);
+      return NextResponse.json(
+        { success: false, error: existingLinesErr.message },
+        { status: 500 }
+      );
+    }
+
+    const activeLines = ((existingActiveLines ?? []) as ExistingPoLine[]).map((row) => ({
+      ...row,
+      line_no: intNum(row?.line_no, 0),
+    }));
+
+    const { matches, usedIds } = matchIncomingLinesToExisting(
+      activeLines,
+      incomingLines,
+      resolvedLineNos
+    );
+
+    const keepIds = Array.from(usedIds);
+    const deleteIds = activeLines
+      .filter((row) => row?.id && !usedIds.has(row.id))
+      .map((row) => row.id);
+
+    if (deleteIds.length > 0) {
+      const { error: deleteMissingErr } = await supabaseAdmin
+        .from("po_lines")
+        .update({ is_deleted: true, updated_at: now })
+        .in("id", deleteIds);
+
+      if (deleteMissingErr) {
+        console.error("Soft Delete Missing Lines Error:", deleteMissingErr);
+        return NextResponse.json(
+          { success: false, error: deleteMissingErr.message },
+          { status: 500 }
+        );
+      }
+    }
+
+    if (keepIds.length > 0) {
+      for (let i = 0; i < keepIds.length; i++) {
+        const tempLineNo = 100000 + i + 1;
+        const { error: tempMoveErr } = await supabaseAdmin
+          .from("po_lines")
+          .update({ line_no: tempLineNo, updated_at: now })
+          .eq("id", keepIds[i]);
+
+        if (tempMoveErr) {
+          console.error("Temporary Line Move Error:", tempMoveErr);
+          return NextResponse.json(
+            { success: false, error: tempMoveErr.message },
+            { status: 500 }
+          );
+        }
+      }
+    }
+
+    const savedIds: string[] = [];
 
     for (let i = 0; i < incomingLines.length; i++) {
       const ln = incomingLines[i] ?? {};
-      const lineNo = useSequentialLineNo
-        ? i + 1
-        : intNum(ln?.line_no ?? ln?.lineNo, i + 1);
-
-      const existingLine = await loadExistingLineByIdOrLineNo(poHeaderId, ln, lineNo);
+      const lineNo = intNum(resolvedLineNos[i], i + 1);
+      const existingLine = matches[i];
 
       const qty = intNum(ln?.qty, 0);
       const qtyCancelled = intNum(
@@ -665,7 +761,7 @@ export async function PUT(
             { status: 500 }
           );
         }
-        keepIds.push(existingLine.id);
+        savedIds.push(existingLine.id);
       } else {
         const { data: inserted, error: lineInErr } = await supabaseAdmin
           .from("po_lines")
@@ -680,32 +776,16 @@ export async function PUT(
             { status: 500 }
           );
         }
-        if (inserted?.id) keepIds.push(inserted.id);
+        if (inserted?.id) savedIds.push(inserted.id);
       }
     }
 
-    if (keepIds.length > 0) {
-      const idList = keepIds.map((id) => `"${id}"`).join(",");
-      const { error: delErr } = await supabaseAdmin
-        .from("po_lines")
-        .update({ is_deleted: true, updated_at: now })
-        .eq("po_header_id", poHeaderId)
-        .eq("is_deleted", false)
-        .not("id", "in", `(${idList})`);
-
-      if (delErr) {
-        console.error("Soft Delete Missing Lines Error:", delErr);
-        return NextResponse.json(
-          { success: false, error: delErr.message },
-          { status: 500 }
-        );
-      }
-    } else {
+    if (incomingLines.length === 0 && activeLines.length > 0 && deleteIds.length === 0) {
+      const allActiveIds = activeLines.map((row) => row.id);
       const { error: delAllErr } = await supabaseAdmin
         .from("po_lines")
         .update({ is_deleted: true, updated_at: now })
-        .eq("po_header_id", poHeaderId)
-        .eq("is_deleted", false);
+        .in("id", allActiveIds);
 
       if (delAllErr) {
         console.error("Soft Delete All Lines Error:", delAllErr);
@@ -736,6 +816,7 @@ export async function PUT(
       poNo: updatedHeader?.po_no ?? existingPoNo,
       lines: savedLines ?? [],
       linesReceived: incomingLines.length,
+      lineIdsSaved: savedIds,
     });
   } catch (err: any) {
     console.error("Update PO Fatal:", err);
