@@ -260,6 +260,10 @@ export default function InvoiceDetailPage() {
   const [exporting, setExporting] = React.useState(false);
 
   const [errorMsg, setErrorMsg] = React.useState<string | null>(null);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+  const [savedAt, setSavedAt] = React.useState<string | null>(null);
+  const [originalInvoiceDate, setOriginalInvoiceDate] = React.useState<string>("");
+  const [refreshing, setRefreshing] = React.useState(false);
 
   const [header, setHeader] = React.useState<InvoiceHeader | null>(null);
   const [lines, setLines] = React.useState<InvoiceLine[]>([]);
@@ -573,75 +577,98 @@ export default function InvoiceDetailPage() {
   const autoPdfRequested = (searchParams?.get("autoPdf") || "") === "1";
   const autoPdfRanRef = React.useRef(false);
 
+  const applyInvoiceState = React.useCallback((h: InvoiceHeader, rawLines: InvoiceLine[]) => {
+    const patchedHeader: InvoiceHeader = {
+      ...h,
+      invoice_date: normalizeDateInput(h.invoice_date) || "",
+      etd: normalizeDateInput(h.etd) || "",
+      eta: normalizeDateInput(h.eta) || "",
+    };
+
+    const aliveLines = (rawLines || []).filter((l) => !l?.is_deleted);
+
+    setHeader(patchedHeader);
+    setLines(aliveLines);
+    setSavedLineSnapshot(buildLineSnapshot(aliveLines));
+    setOriginalInvoiceDate(normalizeDateInput(patchedHeader.invoice_date));
+    setSaveError(null);
+
+    return { header: patchedHeader, lines: aliveLines };
+  }, []);
+
   React.useEffect(() => {
     setRole("admin");
   }, []);
 
-  const loadInvoice = React.useCallback(async () => {
-    if (!invoiceId) return;
-    setLoading(true);
-    setErrorMsg(null);
-    try {
-      const res = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
-        cache: "no-store",
-      });
-      const json = await res.json().catch(() => null);
+  const loadInvoice = React.useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!invoiceId) return null;
 
-      if (!res.ok) {
-        const msg =
-          json?.error ||
-          json?.message ||
-          `Failed to load invoice (${res.status})`;
-        setErrorMsg(msg);
-        setHeader(null);
-        setLines([]);
-        return;
-      }
+      const silent = !!opts?.silent;
+      if (silent) setRefreshing(true);
+      else setLoading(true);
 
-      const h: InvoiceHeader | null =
-        json?.header ?? json?.data?.header ?? json?.invoice?.header ?? null;
+      setErrorMsg(null);
 
-      const rawLines: InvoiceLine[] =
-        json?.lines ?? json?.data?.lines ?? json?.invoice?.lines ?? [];
+      try {
+        const res = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
+          cache: "no-store",
+        });
+        const json = await res.json().catch(() => null);
 
-      if (!h) {
+        if (!res.ok) {
+          const msg =
+            json?.error ||
+            json?.message ||
+            `Failed to load invoice (${res.status})`;
+          setErrorMsg(msg);
+          setHeader(null);
+          setLines([]);
+          return null;
+        }
+
+        const h: InvoiceHeader | null =
+          json?.header ?? json?.data?.header ?? json?.invoice?.header ?? null;
+
+        const rawLines: InvoiceLine[] =
+          json?.lines ?? json?.data?.lines ?? json?.invoice?.lines ?? [];
+
+        if (!h) {
+          setErrorMsg("Failed to load invoice.");
+          setHeader(null);
+          setLines([]);
+          return null;
+        }
+
+        return applyInvoiceState(h, rawLines);
+      } catch (e: any) {
+        console.error(e);
         setErrorMsg("Failed to load invoice.");
         setHeader(null);
         setLines([]);
-        return;
+        return null;
+      } finally {
+        if (silent) setRefreshing(false);
+        else setLoading(false);
       }
-
-      const patchedHeader: InvoiceHeader = {
-        ...h,
-        invoice_date: normalizeDateInput(h.invoice_date) || "",
-        etd: normalizeDateInput(h.etd) || "",
-        eta: normalizeDateInput(h.eta) || "",
-      };
-
-      setHeader(patchedHeader);
-      const aliveLines = (rawLines || []).filter((l) => !l?.is_deleted);
-      setLines(aliveLines);
-      setSavedLineSnapshot(buildLineSnapshot(aliveLines));
-    } catch (e: any) {
-      console.error(e);
-      setErrorMsg("Failed to load invoice.");
-      setHeader(null);
-      setLines([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [invoiceId]);
+    },
+    [invoiceId, applyInvoiceState]
+  );
 
   React.useEffect(() => {
-    loadInvoice();
+    void loadInvoice();
   }, [loadInvoice]);
 
   const currency = header?.currency || "USD";
+  const invoiceDateDirty =
+    normalizeDateInput(header?.invoice_date) !== normalizeDateInput(originalInvoiceDate);
 
   const setHeaderField = <K extends keyof InvoiceHeader>(
     key: K,
     value: InvoiceHeader[K]
   ) => {
+    setSavedAt(null);
+    setSaveError(null);
     setHeader((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
@@ -650,6 +677,8 @@ export default function InvoiceDetailPage() {
     key: K,
     value: InvoiceLine[K]
   ) => {
+    setSavedAt(null);
+    setSaveError(null);
     setLines((prev) => {
       const next = [...prev];
       const row = { ...(next[idx] as InvoiceLine) };
@@ -693,6 +722,9 @@ export default function InvoiceDetailPage() {
     }
 
     setSaving(true);
+    setSaveError(null);
+    setSavedAt(null);
+
     try {
       const safeDate = normalizeDateInput(header.invoice_date) || null;
       const payload = {
@@ -760,6 +792,7 @@ export default function InvoiceDetailPage() {
       if (!res.ok || !json?.success) {
         const msg =
           json?.error || json?.message || `Save failed (status ${res.status})`;
+        setSaveError(msg);
         alert(msg);
         return;
       }
@@ -770,29 +803,37 @@ export default function InvoiceDetailPage() {
         json?.lines ?? json?.data?.lines ?? json?.invoice?.lines ?? [];
 
       if (h) {
-        setHeader({
-          ...h,
-          invoice_date: normalizeDateInput(h.invoice_date) || "",
-          etd: normalizeDateInput(h.etd) || "",
-          eta: normalizeDateInput(h.eta) || "",
-        });
+        applyInvoiceState(h, rawLines || []);
       }
-      setLines((rawLines || []).filter((l) => !l?.is_deleted));
 
-      if (safeDate && normalizeDateInput(h?.invoice_date) !== safeDate) {
-        alert(
-          `Invoice Date save mismatch.\nRequested: ${safeDate}\nSaved: ${
-            normalizeDateInput(h?.invoice_date) || "(blank)"
-          }`
-        );
+      const refreshed = await loadInvoice({ silent: true });
+      const finalSavedDate =
+        normalizeDateInput(refreshed?.header?.invoice_date) ||
+        normalizeDateInput(h?.invoice_date);
+
+      if (safeDate && finalSavedDate !== safeDate) {
+        const msg = `Invoice Date save mismatch.\nRequested: ${safeDate}\nSaved: ${finalSavedDate || "(blank)"}`;
+        setSaveError(msg);
+        alert(msg);
+        return;
       }
+
+      setSavedAt(
+        new Date().toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        })
+      );
     } catch (e: any) {
       console.error(e);
+      setSaveError("Save failed.");
       alert("Save failed.");
     } finally {
       setSaving(false);
     }
-  }, [invoiceId, header, lines, recomputeTotal, savedLineSnapshot]);
+  }, [invoiceId, header, lines, recomputeTotal, savedLineSnapshot, applyInvoiceState, loadInvoice]);
 
   const handlePdf = React.useCallback(async (): Promise<void> => {
     if (!header) return;
@@ -1118,17 +1159,29 @@ ${shipperAddress}` : `${shipperName}`,
     <AppShell role={role}>
       <div className="flex items-center justify-between gap-2 mb-4">
         <h1 className="text-2xl font-bold">Invoice Detail</h1>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {invoiceDateDirty ? (
+            <span className="text-xs font-medium text-amber-600">Invoice Date changed</span>
+          ) : null}
+          {saveError ? (
+            <span className="text-xs font-medium text-red-600">{saveError}</span>
+          ) : savedAt ? (
+            <span className="text-xs font-medium text-emerald-600">Saved {savedAt}</span>
+          ) : null}
           <Button variant="outline" onClick={() => router.push("/invoices")}>
             Back
           </Button>
-          <Button variant="outline" onClick={loadInvoice} disabled={loading || saving}>
-            Refresh
+          <Button
+            variant="outline"
+            onClick={() => void loadInvoice({ silent: true })}
+            disabled={loading || saving || refreshing}
+          >
+            {refreshing ? "Refreshing..." : "Refresh"}
           </Button>
-          <Button onClick={handlePdf} disabled={exporting}>
+          <Button onClick={handlePdf} disabled={exporting || saving}>
             {exporting ? "PDF..." : "PDF / Print"}
           </Button>
-          <Button onClick={handleSave} disabled={saving}>
+          <Button onClick={handleSave} disabled={saving || loading}>
             {saving ? "Saving..." : "Save"}
           </Button>
         </div>
