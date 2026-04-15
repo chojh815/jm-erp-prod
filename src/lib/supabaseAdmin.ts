@@ -4,10 +4,11 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 /**
  * Server-only Supabase admin client.
  *
- * Fix:
- * - Force all Supabase REST requests from server to use cache: "no-store"
+ * Fixes:
  * - Keep server env first: SUPABASE_URL -> NEXT_PUBLIC_SUPABASE_URL
  * - Keep service key first: SUPABASE_SERVICE_ROLE_KEY -> SUPABASE_SERVICE_KEY
+ * - Safe debug logs for resolved project
+ * - Force server-side requests to no-store WITHOUT dropping Supabase auth headers
  */
 
 function parseProjectRef(url: string) {
@@ -86,9 +87,7 @@ if (!g.__SUPABASE_ADMIN_ENV_LOGGED__) {
     serverParsed.ref !== publicParsed.ref
   ) {
     console.warn("======================================");
-    console.warn(
-      "[supabaseAdmin] WARNING: SUPABASE_URL and NEXT_PUBLIC_SUPABASE_URL point to different projects."
-    );
+    console.warn("[supabaseAdmin] WARNING: SUPABASE_URL and NEXT_PUBLIC_SUPABASE_URL point to different projects.");
     console.warn("[supabaseAdmin] Server project:", serverParsed.ref);
     console.warn("[supabaseAdmin] Public project:", publicParsed.ref);
     console.warn("[supabaseAdmin] The server API will use SUPABASE_URL.");
@@ -102,15 +101,14 @@ export const supabaseAdmin = createSupabaseClient(supabaseUrl, serviceRoleKey, {
     persistSession: false,
   },
   global: {
-    fetch: (input, init) => {
+    fetch: async (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+      headers.set("Pragma", "no-cache");
       return fetch(input, {
         ...init,
         cache: "no-store",
-        headers: {
-          ...(init?.headers || {}),
-          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-          Pragma: "no-cache",
-        },
+        headers,
       });
     },
   },
