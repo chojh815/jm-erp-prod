@@ -1104,13 +1104,23 @@ const hasAnyShipped = React.useMemo(() => {
   };
 
   const handleDeleteImage = async (lineId: string, url: string) => {
-    
     if (!canManage) {
       alert("You do not have permission to delete images.");
       return;
     }
-const line = lines.find((l) => l.id === lineId);
-    const jmStyleNo = line?.jmStyleNo || "";
+
+    const safeUrl = String(url ?? "").trim();
+    const line = lines.find((l) => l.id === lineId);
+    const jmStyleNo = String(line?.jmStyleNo || "").trim();
+
+    if (!safeUrl) {
+      console.warn("handleDeleteImage called without url", {
+        lineId,
+        line,
+      });
+      alert("Image URL is missing, so this thumbnail cannot be deleted.");
+      return;
+    }
 
     if (
       !window.confirm(
@@ -1124,7 +1134,11 @@ const line = lines.find((l) => l.id === lineId);
       const res = await fetch("/api/orders/poline/delete-image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageUrl: url, jmStyleNo }),
+        body: JSON.stringify({
+          url: safeUrl,
+          imageUrl: safeUrl,
+          jmStyleNo,
+        }),
       });
       const data = await res.json().catch(() => null);
 
@@ -1140,10 +1154,10 @@ const line = lines.find((l) => l.id === lineId);
         prev.map((l) => {
           if (l.id !== lineId) return l;
           const remaining = (l.images || []).filter(
-            (img) => img !== url
+            (img) => String(img || "").trim() !== safeUrl
           );
           let nextMain = l.imageUrl;
-          if (l.imageUrl === url) {
+          if (String(l.imageUrl || "").trim() === safeUrl) {
             nextMain =
               remaining.length > 0 ? remaining[0] : undefined;
           }
@@ -3499,12 +3513,14 @@ const canCreateProforma =
                                       <button
                                         type="button"
                                         className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-white text-[10px] border border-slate-300 flex items-center justify-center text-slate-600 hover:bg-red-50 hover:text-red-600"
-                                        onClick={() =>
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
                                           handleDeleteImage(
                                             line.id,
                                             url
-                                          )
-                                        }
+                                          );
+                                        }}
                                       >
                                         ×
                                       </button>

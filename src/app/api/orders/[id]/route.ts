@@ -223,6 +223,69 @@ function matchIncomingLinesToExisting(
  * - PO 헤더/라인 조회 (소프트삭제 제외)
  * - shipped_qty / remaining_qty 포함
  */
+
+async function syncToProductDevelopment(line: any) {
+  const jmStyleNo = String(line?.jm_style_no ?? "").trim();
+  if (!jmStyleNo) return;
+
+  const imageUrls = Array.isArray(line?.image_urls)
+    ? line.image_urls
+        .map((v: any) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean)
+    : [];
+
+  const imageUrl =
+    typeof line?.image_url === "string" && line.image_url.trim()
+      ? line.image_url.trim()
+      : null;
+
+  const mainImageUrl =
+    typeof line?.main_image_url === "string" && line.main_image_url.trim()
+      ? line.main_image_url.trim()
+      : null;
+
+  const merged = [...new Set([
+    ...(mainImageUrl ? [mainImageUrl] : []),
+    ...(imageUrl ? [imageUrl] : []),
+    ...imageUrls,
+  ])];
+
+  if (merged.length === 0) return;
+
+  const { data: dev, error: devErr } = await supabaseAdmin
+    .from("product_development_headers")
+    .select("id, image_urls")
+    .eq("style_no", jmStyleNo)
+    .maybeSingle();
+
+  if (devErr) {
+    console.warn("syncToProductDevelopment lookup error:", devErr.message);
+    return;
+  }
+
+  if (!dev?.id) return;
+
+  const current = Array.isArray((dev as any).image_urls)
+    ? (dev as any).image_urls
+        .map((v: any) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean)
+    : [];
+
+  if (current.length > 0) return;
+
+  const { error: updateErr } = await supabaseAdmin
+    .from("product_development_headers")
+    .update({
+      image_urls: merged,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", (dev as any).id);
+
+  if (updateErr) {
+    console.warn("syncToProductDevelopment update error:", updateErr.message);
+  }
+}
+
 export async function GET(
   _req: Request,
   { params }: { params: { id: string } }
@@ -778,6 +841,8 @@ export async function PUT(
         }
         if (inserted?.id) savedIds.push(inserted.id);
       }
+
+      await syncToProductDevelopment(base);
     }
 
     if (incomingLines.length === 0 && activeLines.length > 0 && deleteIds.length === 0) {

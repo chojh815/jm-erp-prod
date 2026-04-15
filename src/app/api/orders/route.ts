@@ -145,6 +145,69 @@ function normalizeImageUrls(input: any): string[] | null | undefined {
   return null;
 }
 
+
+async function syncToProductDevelopment(line: any) {
+  const jmStyleNo = String(line?.jm_style_no ?? "").trim();
+  if (!jmStyleNo) return;
+
+  const imageUrls = Array.isArray(line?.image_urls)
+    ? line.image_urls
+        .map((v: any) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean)
+    : [];
+
+  const imageUrl =
+    typeof line?.image_url === "string" && line.image_url.trim()
+      ? line.image_url.trim()
+      : null;
+
+  const mainImageUrl =
+    typeof line?.main_image_url === "string" && line.main_image_url.trim()
+      ? line.main_image_url.trim()
+      : null;
+
+  const merged = [...new Set([
+    ...(mainImageUrl ? [mainImageUrl] : []),
+    ...(imageUrl ? [imageUrl] : []),
+    ...imageUrls,
+  ])];
+
+  if (merged.length === 0) return;
+
+  const { data: dev, error: devErr } = await supabaseAdmin
+    .from("product_development_headers")
+    .select("id, image_urls")
+    .eq("style_no", jmStyleNo)
+    .maybeSingle();
+
+  if (devErr) {
+    console.warn("syncToProductDevelopment lookup error:", devErr.message);
+    return;
+  }
+
+  if (!dev?.id) return;
+
+  const current = Array.isArray((dev as any).image_urls)
+    ? (dev as any).image_urls
+        .map((v: any) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean)
+    : [];
+
+  if (current.length > 0) return;
+
+  const { error: updateErr } = await supabaseAdmin
+    .from("product_development_headers")
+    .update({
+      image_urls: merged,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", (dev as any).id);
+
+  if (updateErr) {
+    console.warn("syncToProductDevelopment update error:", updateErr.message);
+  }
+}
+
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -528,6 +591,8 @@ const useSequentialLineNo = hasDupLineNo;
         if (inErr) return bad(inErr.message || "Failed to insert PO line", 500);
         if (ins?.id) keepIds.push(ins.id);
       }
+
+      await syncToProductDevelopment(base);
     }
 
     // Soft-delete lines missing from payload (ACTIVE only)
