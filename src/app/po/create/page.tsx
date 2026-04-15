@@ -150,6 +150,9 @@ const [permLoaded, setPermLoaded] = React.useState(false);
   const [initializedFromQuery, setInitializedFromQuery] =
     React.useState(false);
 
+  // Guard buyer-default effect while loading an existing PO
+  const isHydratingPORef = React.useRef(false);
+
   // ----------------------
   // 초기 로그인 / 권한 체크
   // ----------------------
@@ -590,6 +593,7 @@ const hasAnyShipped = React.useMemo(() => {
   // ✅ 바이어 선택 시 companies 테이블에서 Payment Term / Ship Mode / Origin 기본값 가져오기
   React.useEffect(() => {
     if (!buyerId) return;
+    if (isHydratingPORef.current) return;
 
     (async () => {
       try {
@@ -642,9 +646,6 @@ const hasAnyShipped = React.useMemo(() => {
               setPaymentTermName(opt.label);
               return [opt, ...prev];
             });
-          } else {
-            setPaymentTermId(null);
-            setPaymentTermName("");
           }
         }
 
@@ -686,7 +687,7 @@ const hasAnyShipped = React.useMemo(() => {
         );
       }
     })();
-  }, [buyerId, supabase, paymentTermId, paymentTermName, paymentTerms, findPaymentTermByText]);
+  }, [buyerId, supabase]);
 
   // 바이어별 Dept/Brand 로딩 (companies.buyer_brand / buyer_dept 에서)
   React.useEffect(() => {
@@ -1317,10 +1318,59 @@ const fetchPoList = React.useCallback(
   // 📥 기존 PO 불러오기
   // ----------------------
   const loadPO = React.useCallback(
-    async (targetPoNo: string) => {
+    async (targetPoNo: string, targetHeaderId?: string | null) => {
       try {
+        isHydratingPORef.current = true;
+
+        let resolvedHeaderId = String(targetHeaderId || "").trim() || null;
+
+        if (!resolvedHeaderId) {
+          const qs = new URLSearchParams();
+          qs.set("q", String(targetPoNo || "").trim());
+          qs.set("page", "1");
+          qs.set("pageSize", "20");
+
+          const listRes = await fetch(`/api/orders/list?${qs.toString()}`, {
+            cache: "no-store",
+          });
+          const listJson = await listRes.json().catch(() => null);
+
+          if (!listRes.ok) {
+            console.error("Resolve PO id error:", listJson);
+            alert(
+              (listJson && (listJson.error || listJson.message)) ||
+                `Failed to find PO (status ${listRes.status}).`
+            );
+            return;
+          }
+
+          const rawItems = (listJson?.items ?? listJson?.results ?? []) as any[];
+          const normalizedTargetPoNo = String(targetPoNo || "").trim().toUpperCase();
+
+          const exact =
+            rawItems.find(
+              (row: any) =>
+                String(row?.po_no ?? "").trim().toUpperCase() === normalizedTargetPoNo
+            ) || null;
+
+          const candidate = exact || rawItems[0] || null;
+          resolvedHeaderId = candidate?.id
+            ? String(candidate.id)
+            : candidate?.header_id
+            ? String(candidate.header_id)
+            : candidate?.po_header_id
+            ? String(candidate.po_header_id)
+            : null;
+
+          if (!resolvedHeaderId) {
+            alert(`PO not found: ${targetPoNo}`);
+            return;
+          }
+        }
+
         const res = await fetch(
-          `/api/orders?poNo=${encodeURIComponent(targetPoNo)}`
+          `/api/orders/${encodeURIComponent(resolvedHeaderId)}`,
+          { cache: "no-store" }
         );
         const data = await res.json().catch(() => null);
 
@@ -1336,10 +1386,10 @@ const fetchPoList = React.useCallback(
         const header = data.header as any;
         
         // keep header id for UPDATE
-        const _loadedHeaderId = header?.id ? String(header.id) : null;
+        const _loadedHeaderId = header?.id ? String(header.id) : resolvedHeaderId;
         setPoHeaderId(_loadedHeaderId);
         loadedHeaderIdRef.current = _loadedHeaderId;
-        loadedPoNoRef.current = (header.po_no || "").toString();
+        loadedPoNoRef.current = (header.po_no || targetPoNo || "").toString();
         const apiLines = (data.lines as any[]) || [];
 
         setPoNo(header.po_no || "");
@@ -1482,6 +1532,10 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
       } catch (err) {
         console.error("Load PO unexpected error:", err);
         alert("Unexpected error while loading PO.");
+      } finally {
+        setTimeout(() => {
+          isHydratingPORef.current = false;
+        }, 0);
       }
     },
     [makeEmptyLine, findPaymentTermByText]
@@ -3708,7 +3762,7 @@ const canCreateProforma =
                             variant="outline"
                             onClick={() => {
                               setPoSearchOpen(false);
-                              loadPO(po.po_no);
+                              loadPO(po.po_no, po.id);
                             }}
                           >
                             Load
