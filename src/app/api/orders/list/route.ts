@@ -1,4 +1,3 @@
-// src/app/api/orders/list/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -22,16 +21,18 @@ type SortField =
   | "SUBTOTAL";
 
 type SortDir = "ASC" | "DESC";
-type ComputedPoStatus = "OPEN" | "PARTIAL" | "ALLOCATED" | "SHIPPED";
+type ComputedPoStatus = "OPEN" | "PARTIAL" | "ALLOCATED" | "SHIPPED" | "CANCELLED";
 
 const COMPUTED_STATUS_SET = new Set<ComputedPoStatus>([
   "OPEN",
   "PARTIAL",
   "ALLOCATED",
   "SHIPPED",
+  "CANCELLED",
 ]);
 
 const EXCLUDED_SHIPMENT_STATUSES = new Set(["CANCELLED", "CANCELED", "DELETED"]);
+const CANCELLED_PO_STATUSES = new Set(["CANCELLED", "CANCELED"]);
 
 /**
  * IMPORTANT:
@@ -237,6 +238,14 @@ function pickLineImages(line: any, preferred: string[] | undefined): string[] {
   return uniq(out);
 }
 
+function normalizePoHeaderStatus(v: any): string {
+  return asText(v).trim().toUpperCase();
+}
+
+function isCancelledPoStatus(v: any): boolean {
+  return CANCELLED_PO_STATUSES.has(normalizePoHeaderStatus(v));
+}
+
 /** ---- row types (casting only) ---- */
 type PoHeaderRow = {
   id: string;
@@ -328,7 +337,7 @@ function classifyPoStatus(args: {
   totalOrderQty: number;
   totalAllocatedQty: number;
   totalShippedQty: number;
-}): ComputedPoStatus {
+}): Exclude<ComputedPoStatus, "CANCELLED"> {
   const orderQty = n(args.totalOrderQty, 0);
   const allocatedQty = n(args.totalAllocatedQty, 0);
   const shippedQty = n(args.totalShippedQty, 0);
@@ -600,12 +609,6 @@ export async function GET(req: Request) {
       q = q.lte("order_date", dateTo);
     }
 
-    // NOTE:
-    // Search by Buyer Style No / JM Style No cannot be handled reliably here
-    // with the current po_headers-only query builder.
-    // We load the alive headers first (already filtered by date/status),
-    // then apply the keyword filter after po_lines summary is collected below.
-
     const listRes = await q.order("order_date", { ascending: false, nullsFirst: false });
 
     if (listRes.error) return bad(listRes.error.message || "Failed to load PO list", 500);
@@ -861,6 +864,11 @@ export async function GET(req: Request) {
         totalShippedQty: shippedQty,
       });
 
+      const rawHeaderStatus = h.status ?? null;
+      const finalStatus: ComputedPoStatus = isCancelledPoStatus(rawHeaderStatus)
+        ? "CANCELLED"
+        : computedStatus;
+
       return {
         id: h.id,
         poNo: h.po_no,
@@ -878,8 +886,8 @@ export async function GET(req: Request) {
         subtotal: computedSubtotal,
         amount: computedSubtotal,
 
-        status: computedStatus,
-        rawHeaderStatus: h.status ?? null,
+        status: finalStatus,
+        rawHeaderStatus,
 
         shipMode: h.ship_mode ?? fl?.ship_mode ?? null,
         destination: h.destination,
@@ -914,14 +922,16 @@ export async function GET(req: Request) {
     }
 
     if (pendingOnly) {
-      itemsBase = itemsBase.filter(
-  (it) => n(it.totals.orderQty, 0) - n(it.totals.shippedQty, 0) > 0
-);
+      itemsBase = itemsBase.filter((it) => {
+        if (isCancelledPoStatus(it.rawHeaderStatus)) return false;
+        return n(it.totals.orderQty, 0) - n(it.totals.shippedQty, 0) > 0;
+      });
     }
 
     if (lateOnly) {
       const today = new Date().toISOString().slice(0, 10);
       itemsBase = itemsBase.filter((it) => {
+        if (isCancelledPoStatus(it.rawHeaderStatus)) return false;
         const pendingQty = n(it.totals.orderQty, 0) - n(it.totals.shippedQty, 0);
         const reqShipDate = asText(it.reqShipDate).trim().slice(0, 10);
         return pendingQty > 0 && !!reqShipDate && reqShipDate < today;
@@ -967,6 +977,7 @@ export async function GET(req: Request) {
 
     const pageTotalsByCurrencyCents: Record<string, number> = {};
     for (const it of items) {
+      if (isCancelledPoStatus(it.rawHeaderStatus)) continue;
       const cur = asText(it.currency).trim() || "";
       const vCents = toCents((it as any).subtotal);
       pageTotalsByCurrencyCents[cur] = (pageTotalsByCurrencyCents[cur] ?? 0) + vCents;
@@ -979,6 +990,7 @@ export async function GET(req: Request) {
 
     const grandTotalsByCurrencyCents: Record<string, number> = {};
     for (const it of itemsFiltered) {
+      if (isCancelledPoStatus(it.rawHeaderStatus)) continue;
       const cur = asText(it.currency).trim() || "";
       grandTotalsByCurrencyCents[cur] = (grandTotalsByCurrencyCents[cur] ?? 0) + toCents(it.subtotal);
     }
@@ -1003,6 +1015,7 @@ export async function GET(req: Request) {
       appliedPendingOnly: pendingOnly,
       appliedLateOnly: lateOnly,
       statusLogic: {
+        cancelled: "PO header status CANCELLED/CANCELED always overrides computed shipment status",
         open: "No non-cancelled shipment allocation exists",
         partial: "Allocated qty > 0 but allocated qty < order qty",
         allocated: "Allocated qty >= order qty but shipped-complete qty < order qty",
