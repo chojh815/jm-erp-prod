@@ -397,8 +397,11 @@ export async function POST(req: NextRequest) {
         writeoff_amount: round2(toNum(x?.writeoff_amount)),
       }))
       .filter(
-        (x) => x.invoice_id && (Math.abs(x.applied_amount) > 0 || Math.abs(x.writeoff_amount) > 0)
-      );
+  (x: any) =>
+    x.invoice_id &&
+    (Math.abs(Number(x.applied_amount || 0)) > 0 ||
+      Math.abs(Number(x.writeoff_amount || 0)) > 0)
+);
 
     if (allocations.length === 0) {
       return NextResponse.json(
@@ -419,7 +422,7 @@ export async function POST(req: NextRequest) {
       claim_deduction_amount,
     });
 
-    const invoiceIds = allocations.map((x) => x.invoice_id);
+    const invoiceIds = allocations.map((x: any) => x.invoice_id);
 
     const { data: buyer } = await supabaseAdmin
       .from("companies")
@@ -454,7 +457,7 @@ export async function POST(req: NextRequest) {
 
     if (hErr) throw hErr;
 
-    const lineRows = allocations.map((x) => ({
+    const lineRows = allocations.map((x: any) => ({
       receipt_header_id: header.id,
       invoice_id: x.invoice_id,
       applied_amount: x.applied_amount,

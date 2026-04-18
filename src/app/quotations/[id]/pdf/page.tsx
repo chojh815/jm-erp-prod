@@ -82,7 +82,6 @@ async function fetchQuotationAll(id: string) {
     .eq("id", id)
     .maybeSingle();
 
-  // Current API uses legacy naming: quotation_items + quotation_item_tiers
   const itemsQ = supabase
     .from("quotation_items")
     .select("*")
@@ -94,11 +93,11 @@ async function fetchQuotationAll(id: string) {
   if (headerR.error) throw headerR.error;
   if (itemsR.error) throw itemsR.error;
 
-  const header = (headerR.data ?? null) as AnyRow | null;
-  const items = (itemsR.data ?? []) as AnyRow[];
+  const header = (headerR.data ?? null) as Record<string, any> | null;
+  const items = (itemsR.data ?? []) as Record<string, any>[];
 
   const itemIds = items.map((x) => x?.id).filter(Boolean);
-  let tiers: AnyRow[] = [];
+  let tiers: Record<string, any>[] = [];
   if (itemIds.length) {
     const tiersR = await supabase
       .from("quotation_item_tiers")
@@ -107,11 +106,10 @@ async function fetchQuotationAll(id: string) {
       .order("qty", { ascending: true });
 
     if (!tiersR.error && Array.isArray(tiersR.data)) {
-      tiers = tiersR.data as AnyRow[];
+      tiers = tiersR.data as Record<string, any>[];
     }
   }
 
-  // Buyer display
   let buyerName = safeText(header?.buyer_name || header?.buyer || "");
   if (!buyerName && header?.buyer_id) {
     const buyerR = await supabase
@@ -128,8 +126,7 @@ async function fetchQuotationAll(id: string) {
     }
   }
 
-  // Costing image fallback
-  let costingImages: AnyRow[] = [];
+  let costingImages: Record<string, any>[] = [];
   const costingId =
     header?.costing_id ||
     header?.source_costing_id ||
@@ -144,7 +141,7 @@ async function fetchQuotationAll(id: string) {
       .order("sort_order", { ascending: true });
 
     if (!imgR.error && Array.isArray(imgR.data)) {
-      costingImages = imgR.data as AnyRow[];
+      costingImages = imgR.data as Record<string, any>[];
     }
   }
 
@@ -157,17 +154,17 @@ async function fetchQuotationAll(id: string) {
   };
 }
 
-function pickPrimaryImage(costingImages: AnyRow[]) {
+function pickPrimaryImage(costingImages: Record<string, any>[]) {
   if (!Array.isArray(costingImages) || costingImages.length === 0) return null;
   return costingImages.find((x) => !!x?.is_primary) || costingImages[0] || null;
 }
 
 async function buildPdf(payload: {
-  header: AnyRow | null;
+  header: Record<string, any> | null;
   buyerName: string;
-  items: AnyRow[];
-  tiers: AnyRow[];
-  costingImages: AnyRow[];
+  items: Record<string, any>[];
+  tiers: Record<string, any>[];
+  costingImages: Record<string, any>[];
 }) {
   const { header, buyerName, items, tiers, costingImages } = payload;
 
@@ -192,25 +189,6 @@ async function buildPdf(payload: {
     doc.line(margin, yPos, pageW - margin, yPos);
   };
 
-  const drawCellText = (
-    text: string,
-    x: number,
-    yPos: number,
-    width: number,
-    align: "left" | "center" | "right" = "left"
-  ) => {
-    const t = doc.splitTextToSize(text || "", width);
-    if (align === "right") {
-      doc.text(t, x + width, yPos, { align: "right" });
-    } else if (align === "center") {
-      doc.text(t, x + width / 2, yPos, { align: "center" });
-    } else {
-      doc.text(t, x, yPos);
-    }
-    return t.length;
-  };
-
-  // ===== Top Header =====
   doc.setFont("helvetica", "bold");
   doc.setFontSize(22);
   doc.text("QUOTATION", margin, y);
@@ -231,10 +209,8 @@ async function buildPdf(payload: {
   line(y);
   y += 18;
 
-  // Header info boxes
   const leftX = margin;
   const rightX = pageW / 2 + 8;
-  const infoW = pageW / 2 - margin - 12;
 
   doc.setFont("helvetica", "bold");
   doc.setFontSize(10);
@@ -288,26 +264,26 @@ async function buildPdf(payload: {
     y
   );
 
-  // Primary image at top-right
   const primaryImg = pickPrimaryImage(costingImages);
   if (primaryImg?.image_url) {
     const dataUrl = await fetchImageAsDataUrl(String(primaryImg.image_url));
+
     if (dataUrl) {
       const imgW = 112;
       const imgH = 112;
       const x = pageW - margin - imgW;
       const imgY = 84;
+
       try {
         doc.addImage(dataUrl, extFromDataUrl(dataUrl), x, imgY, imgW, imgH);
-      } catch {
-        # pass
+      } catch (e) {
+        console.warn("image add fail", e);
       }
     }
   }
 
   y += 30;
 
-  // Remarks
   const remarks = safeText(header?.remarks || "");
   if (remarks) {
     ensure(48);
@@ -327,7 +303,6 @@ async function buildPdf(payload: {
   line(y);
   y += 18;
 
-  // ===== Item Table =====
   doc.setFont("helvetica", "bold");
   doc.setFontSize(12);
   doc.text("Items", margin, y);
@@ -412,7 +387,6 @@ async function buildPdf(payload: {
     line(y);
     y += 10;
 
-    // Tier subtable
     const myTiers = tiers.filter((t) => String(t?.quotation_item_id || "") === String(ln?.id || ""));
     if (myTiers.length) {
       ensure(40);
@@ -441,7 +415,6 @@ async function buildPdf(payload: {
     }
   }
 
-  // Total box
   ensure(70);
   y += 8;
   const totalBoxW = 180;
@@ -463,7 +436,6 @@ async function buildPdf(payload: {
 
   y += 70;
 
-  // Footer note
   ensure(60);
   line(y);
   y += 16;

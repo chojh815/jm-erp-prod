@@ -226,8 +226,11 @@ export async function PUT(
         writeoff_amount: round2(toNum(x?.writeoff_amount)),
       }))
       .filter(
-        (x) => x.invoice_id && (Math.abs(x.applied_amount) > 0 || Math.abs(x.writeoff_amount) > 0)
-      );
+        (x: any) =>
+    x.invoice_id &&
+    (Math.abs(Number(x.applied_amount || 0)) > 0 ||
+      Math.abs(Number(x.writeoff_amount || 0)) > 0)
+);
 
     if (filteredAllocations.length === 0) {
       return NextResponse.json({ success: false, error: "No non-zero allocations" }, { status: 400 });
