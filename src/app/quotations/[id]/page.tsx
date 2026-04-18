@@ -1,263 +1,411 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import * as React from "react";
 import { useParams, useRouter } from "next/navigation";
 
-// ✅ 실제 파일이 존재하는 RED 탭 경로로 고정
-import MatrixTab from "@/app/red/quotations/[id]/tabs/matrix";
-import CompareDiffTab from "@/app/red/quotations/[id]/tabs/compare-diff";
+type AnyRow = Record<string, any>;
 
-type VersionRow = {
-  id: string;
-  version_no: number;
-  status: string;
-  revision_of_version_id: string | null;
-  change_summary: string | null;
-  updated_at: string;
-};
+function safeText(v: any) {
+  if (v === null || v === undefined) return "";
+  return String(v);
+}
 
-type Quotation = {
-  id: string;
-  red_quotation_no: string | null;
-  title: string | null;
-  buyer_name: string | null;
-  style_no: string | null;
-  ship_from_code: string | null;
-  thumbnail_url?: string | null;
-  thumbnail_path?: string | null;
-  currency: string;
-  incoterm: string | null;
-  status: string;
-};
+function fmtDate(v: any) {
+  const s = safeText(v);
+  if (!s) return "";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toISOString().slice(0, 10);
+}
 
-const MOQ_LIST = [1000, 3000, 5000];
+function fmtMoney(v: any, decimals = 2) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "";
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
 
-export default function RedQuotationDetailPage() {
+async function safeJson(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
+}
+
+export default function QuotationDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const id = params.id;
+  const id = params?.id as string;
 
-  const [q, setQ] = useState<Quotation | null>(null);
-  const [versions, setVersions] = useState<VersionRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
-  const [tab, setTab] = useState<"matrix" | "compare">("compare");
-
-  // ✅ Cost states (누락돼서 setXXX 에러가 났던 것들)
-  const [unitPrice, setUnitPrice] = useState<string>("");
-  const [unitCurrency, setUnitCurrency] = useState<string>("USD");
-
-  const [packagingCostsByMoq, setPackagingCostsByMoq] = useState<Record<number, string>>({});
-  const [fobByMoq, setFobByMoq] = useState<Record<number, string>>({});
-  const [fobCurrency, setFobCurrency] = useState<string>("USD");
+  const [header, setHeader] = React.useState<AnyRow | null>(null);
+  const [lines, setLines] = React.useState<AnyRow[]>([]);
+  const [variants, setVariants] = React.useState<AnyRow[]>([]);
+  const [variantLines, setVariantLines] = React.useState<AnyRow[]>([]);
 
   async function load() {
+    if (!id) return;
     setLoading(true);
-    setErr(null);
+    setError(null);
     try {
-      const r = await fetch(`/api/red/quotations/${id}/versions`, { cache: "no-store" });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "Failed");
-      setQ(j.data.quotation);
-      setVersions(j.data.versions || []);
+      const [hRes, lRes, vRes, vlRes] = await Promise.all([
+        fetch(`/api/quotations/${id}`, { cache: "no-store" }),
+        fetch(`/api/quotations/${id}/lines`, { cache: "no-store" }),
+        fetch(`/api/quotations/${id}/variants`, { cache: "no-store" }),
+        fetch(`/api/quotations/${id}/variant-lines`, { cache: "no-store" }),
+      ]);
+
+      const [hJson, lJson, vJson, vlJson] = await Promise.all([
+        safeJson(hRes),
+        safeJson(lRes),
+        safeJson(vRes),
+        safeJson(vlRes),
+      ]);
+
+      if (!hRes.ok) throw new Error(hJson?.error || hJson?.message || `Header load failed (${hRes.status})`);
+      if (!lRes.ok) throw new Error(lJson?.error || lJson?.message || `Lines load failed (${lRes.status})`);
+      if (!vRes.ok) throw new Error(vJson?.error || vJson?.message || `Variants load failed (${vRes.status})`);
+      if (!vlRes.ok) throw new Error(vlJson?.error || vlJson?.message || `Variant lines load failed (${vlRes.status})`);
+
+      setHeader(hJson?.data || hJson?.row || hJson?.header || hJson || null);
+      setLines(lJson?.rows || lJson?.data || []);
+      setVariants(vJson?.rows || vJson?.data || []);
+      setVariantLines(vlJson?.rows || vlJson?.data || []);
     } catch (e: any) {
-      setErr(e?.message || "Failed");
+      setError(e?.message || "Failed to load quotation");
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => {
-    if (!id) return;
+  React.useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const title = useMemo(() => {
-    return q?.red_quotation_no ? `${q.red_quotation_no}` : "RED Quotation";
-  }, [q?.red_quotation_no]);
-
-  // (선택) 최신 버전 1개 기준으로 cost 자동 로드하고 싶으면 사용
-  const latestVersionId = useMemo(() => {
-    if (!versions?.length) return null;
-    // 최신 updated_at 기준
-    const sorted = [...versions].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
-    return sorted[0]?.id || null;
-  }, [versions]);
-
-  async function loadCosts(versionId: string) {
+  async function saveHeader() {
+    if (!id || !header) return;
+    setSaving(true);
+    setError(null);
     try {
-      const r = await fetch(`/api/red/quotation-versions/${versionId}/costs?package=A`, { cache: "no-store" });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "Failed to load costs");
-
-      const ci = j?.data?.cost_inputs || null;
-      if (ci) {
-        setUnitPrice(ci.unit_price_per_piece == null ? "" : String(ci.unit_price_per_piece));
-        setUnitCurrency(ci.unit_price_currency || "USD");
-      }
-
-      const map: Record<number, string> = {};
-      for (const row of (j?.data?.packaging_costs || [])) {
-        map[Number(row.moq_packages)] =
-          row.packaging_cost_per_pkg == null ? "" : String(row.packaging_cost_per_pkg);
-      }
-      setPackagingCostsByMoq(map);
-
-      const fmap: Record<number, string> = {};
-      for (const row of (j?.data?.fob_prices || [])) {
-        fmap[Number(row.moq_packages)] = row.fob_per_pkg == null ? "" : String(row.fob_per_pkg);
-        if (row.currency) setFobCurrency(String(row.currency).toUpperCase());
-      }
-      setFobByMoq(fmap);
+      const res = await fetch(`/api/quotations/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(header),
+      });
+      const j = await safeJson(res);
+      if (!res.ok) throw new Error(j?.error || j?.message || `Save failed (${res.status})`);
+      await load();
     } catch (e: any) {
-      // non-fatal
-      console.warn(e?.message || e);
+      setError(e?.message || "Failed to save quotation");
+    } finally {
+      setSaving(false);
     }
   }
 
-  async function saveCosts(versionId: string) {
-    const payload = {
-      package_code: "A",
-      cost_inputs: {
-        unit_price_per_piece: unitPrice === "" ? null : Number(unitPrice),
-        unit_price_currency: unitCurrency,
-      },
-      fob_prices: MOQ_LIST.map((moq) => ({
-        moq_packages: moq,
-        fob_per_pkg: fobByMoq?.[moq] === "" || fobByMoq?.[moq] == null ? null : Number(fobByMoq?.[moq]),
-        currency: fobCurrency,
-      })),
-      packaging_costs: MOQ_LIST.map((moq) => ({
-        moq_packages: moq,
-        packaging_cost_per_pkg:
-          packagingCostsByMoq?.[moq] === "" || packagingCostsByMoq?.[moq] == null
-            ? null
-            : Number(packagingCostsByMoq?.[moq]),
-      })),
-    };
+  const lineById = React.useMemo(() => {
+    const map = new Map<string, AnyRow>();
+    for (const ln of lines) {
+      if (ln?.id) map.set(String(ln.id), ln);
+    }
+    return map;
+  }, [lines]);
 
-    const r = await fetch(`/api/red/quotation-versions/${versionId}/costs`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+  const groupedVariants = React.useMemo(() => {
+    return (variants || []).map((v) => {
+      const rows = (variantLines || []).filter(
+        (x) => String(x?.quotation_variant_id || "") === String(v?.id || "")
+      );
+      const total = rows.reduce((sum, r) => {
+        const qty = Number(r?.qty || 0);
+        const offer = Number(r?.offer_price || 0);
+        return sum + (Number.isFinite(qty) ? qty : 0) * (Number.isFinite(offer) ? offer : 0);
+      }, 0);
+      return { variant: v, rows, total };
     });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j?.error || "Failed to save costs");
-    return j;
-  }
-
-  // 최신 버전 비용 자동 로드(원하면 유지, 싫으면 이 useEffect 삭제)
-  useEffect(() => {
-    if (!latestVersionId) return;
-    loadCosts(latestVersionId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latestVersionId]);
+  }, [variants, variantLines]);
 
   return (
-    <div className="p-6 space-y-4">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div className="space-y-1">
-          <div className="text-xs text-muted-foreground">RED Quotation</div>
-          <h1 className="text-2xl font-semibold">{title}</h1>
-          <div className="text-sm text-muted-foreground">
-            Buyer: <span className="text-foreground">{q?.buyer_name || "-"}</span> · Style:{" "}
-            <span className="text-foreground">{q?.style_no || "-"}</span> · Ship From:{" "}
-            <span className="text-foreground">{q?.ship_from_code || "-"}</span>
+    <div className="p-4 space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-xs text-muted-foreground">Quotation</div>
+          <div className="text-3xl font-semibold">
+            {safeText(
+              header?.quotation_no ||
+              header?.quote_no ||
+              header?.subject ||
+              "Quotation"
+            )}
+          </div>
+          <div className="mt-1 text-sm text-muted-foreground">
+            ID: {id}
           </div>
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
-            className="border rounded px-3 py-1.5 text-sm hover:bg-muted"
-            onClick={() => router.push("/red/quotations")}
+            className="px-3 py-2 rounded-md border text-sm"
+            onClick={() => router.push("/quotations")}
           >
             Back
           </button>
+
           <button
-            className="border rounded px-3 py-1.5 text-sm hover:bg-muted"
-            onClick={load}
-            disabled={loading}
+            className="px-3 py-2 rounded-md border text-sm"
+            onClick={() => load()}
+            disabled={loading || saving}
           >
             Refresh
           </button>
-        </div>
-      </div>
 
-      {err ? <div className="text-sm text-red-600">{err}</div> : null}
-
-      <div className="border rounded-lg overflow-hidden">
-        <div className="flex gap-2 border-b p-2 bg-muted/40">
           <button
-            className={`px-3 py-1.5 text-sm rounded ${tab === "matrix" ? "bg-background border" : "hover:bg-muted"}`}
-            onClick={() => setTab("matrix")}
+            className="px-3 py-2 rounded-md border text-sm"
+            onClick={() => router.push(`/quotations/${id}/pdf`)}
           >
-            Matrix
+            PDF
           </button>
+
           <button
-            className={`px-3 py-1.5 text-sm rounded ${tab === "compare" ? "bg-background border" : "hover:bg-muted"}`}
-            onClick={() => setTab("compare")}
+            className="px-3 py-2 rounded-md bg-blue-600 text-white text-sm font-semibold disabled:opacity-60"
+            onClick={() => saveHeader()}
+            disabled={loading || saving}
           >
-            Compare / Diff
+            {saving ? "Saving..." : "Save"}
           </button>
         </div>
+      </div>
 
-        <div className="p-4">
-          {tab === "matrix" ? (
-            <MatrixTab quotationId={id} versions={versions} onChanged={load} />
-          ) : (
-            <CompareDiffTab quotationId={id} versions={versions} onChanged={load} />
-          )}
+      {error ? (
+        <div className="rounded-md border border-red-200 bg-red-50 text-red-700 px-3 py-2 text-sm">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="rounded-xl border bg-white p-4">
+        <div className="text-lg font-semibold mb-3">Header</div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Status</div>
+            <input
+              className="w-full h-10 rounded-md border px-3"
+              value={safeText(header?.status || "DRAFT")}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), status: e.target.value }))}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Quotation No</div>
+            <input
+              className="w-full h-10 rounded-md border px-3"
+              value={safeText(header?.quotation_no || header?.quote_no)}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), quotation_no: e.target.value }))}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Buyer</div>
+            <input
+              className="w-full h-10 rounded-md border px-3"
+              value={safeText(header?.buyer_name || header?.buyer)}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), buyer_name: e.target.value }))}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Brand</div>
+            <input
+              className="w-full h-10 rounded-md border px-3"
+              value={safeText(header?.brand_name || header?.brand || header?.buyer_brand_name)}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), brand_name: e.target.value }))}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Style No</div>
+            <input
+              className="w-full h-10 rounded-md border px-3"
+              value={safeText(header?.style_no)}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), style_no: e.target.value }))}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Currency</div>
+            <input
+              className="w-full h-10 rounded-md border px-3"
+              value={safeText(header?.currency || "USD")}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), currency: e.target.value }))}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Incoterm</div>
+            <input
+              className="w-full h-10 rounded-md border px-3"
+              value={safeText(header?.incoterm)}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), incoterm: e.target.value }))}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-sm text-muted-foreground">Updated</div>
+            <input
+              className="w-full h-10 rounded-md border px-3 bg-slate-50"
+              value={fmtDate(header?.updated_at)}
+              readOnly
+            />
+          </div>
+
+          <div className="space-y-1 md:col-span-2 xl:col-span-4">
+            <div className="text-sm text-muted-foreground">Remarks</div>
+            <textarea
+              className="w-full min-h-[88px] rounded-md border px-3 py-2"
+              value={safeText(header?.remarks || header?.notes)}
+              onChange={(e) => setHeader((h) => ({ ...(h || {}), remarks: e.target.value }))}
+            />
+          </div>
         </div>
       </div>
 
-      {/* (옵션) costs 저장을 여기서 바로 테스트하고 싶으면 아래 같은 버튼을 붙여도 됨
-      <div className="flex gap-2">
-        <button
-          className="border rounded px-3 py-2 text-sm"
-          onClick={async () => {
-            if (!latestVersionId) return;
-            await saveCosts(latestVersionId);
-            await loadCosts(latestVersionId);
-            alert("Saved");
-          }}
-        >
-          Save Costs (Latest)
-        </button>
+      <div className="rounded-xl border bg-white p-4">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+          <div className="text-lg font-semibold">Lines</div>
+          <div className="text-sm text-muted-foreground">{lines.length} rows</div>
+        </div>
+
+        <div className="overflow-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-slate-50 text-slate-600">
+                <th className="text-left p-2 border-b">#</th>
+                <th className="text-left p-2 border-b">Style</th>
+                <th className="text-left p-2 border-b">Description</th>
+                <th className="text-right p-2 border-b">Qty</th>
+                <th className="text-right p-2 border-b">Target</th>
+                <th className="text-right p-2 border-b">Offer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((ln, idx) => (
+                <tr key={String(ln?.id || idx)} className="border-b">
+                  <td className="p-2">{idx + 1}</td>
+                  <td className="p-2">
+                    {safeText(ln?.style_no || ln?.buyer_style_no || ln?.jm_style_no) || "-"}
+                  </td>
+                  <td className="p-2">
+                    {safeText(ln?.description || ln?.item_description || ln?.name) || "-"}
+                  </td>
+                  <td className="p-2 text-right">{safeText(ln?.qty) || "-"}</td>
+                  <td className="p-2 text-right">{fmtMoney(ln?.target_price)}</td>
+                  <td className="p-2 text-right">{fmtMoney(ln?.offer_price)}</td>
+                </tr>
+              ))}
+              {!loading && lines.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-3 text-slate-500">
+                    No lines.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
       </div>
-      */}
+
+      <div className="rounded-xl border bg-white p-4">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+          <div className="text-lg font-semibold">Variants</div>
+          <div className="text-sm text-muted-foreground">{variants.length} variants</div>
+        </div>
+
+        <div className="space-y-4">
+          {groupedVariants.map(({ variant, rows, total }, idx) => (
+            <div key={String(variant?.id || idx)} className="rounded-lg border overflow-hidden">
+              <div className="bg-slate-50 px-3 py-2 flex items-center justify-between gap-2 flex-wrap">
+                <div className="font-semibold">
+                  {safeText(variant?.label || variant?.name || `Variant ${idx + 1}`)}
+                </div>
+                <div className="text-sm text-slate-600">
+                  {[
+                    safeText(variant?.incoterm || header?.incoterm),
+                    safeText(variant?.currency || header?.currency || "USD"),
+                    safeText(variant?.ship_from_display || variant?.ship_from),
+                  ]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </div>
+              </div>
+
+              <div className="overflow-auto">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="text-slate-600">
+                      <th className="text-left p-2 border-b">Style</th>
+                      <th className="text-right p-2 border-b">MOQ</th>
+                      <th className="text-right p-2 border-b">Qty</th>
+                      <th className="text-right p-2 border-b">Target</th>
+                      <th className="text-right p-2 border-b">Offer</th>
+                      <th className="text-left p-2 border-b">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, rIdx) => {
+                      const ln = r?.quotation_line_id ? lineById.get(String(r.quotation_line_id)) : null;
+                      return (
+                        <tr key={String(r?.id || rIdx)} className="border-b">
+                          <td className="p-2">
+                            {safeText(
+                              ln?.style_no ||
+                              ln?.buyer_style_no ||
+                              ln?.jm_style_no ||
+                              r?.style_no
+                            ) || "-"}
+                          </td>
+                          <td className="p-2 text-right">{safeText(r?.moq) || "-"}</td>
+                          <td className="p-2 text-right">{safeText(r?.qty) || "-"}</td>
+                          <td className="p-2 text-right">{fmtMoney(r?.target_price)}</td>
+                          <td className="p-2 text-right">{fmtMoney(r?.offer_price)}</td>
+                          <td className="p-2">{safeText(r?.notes) || "-"}</td>
+                        </tr>
+                      );
+                    })}
+                    {rows.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-3 text-slate-500">
+                          No variant rows.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-50">
+                      <td colSpan={4} className="p-2 text-right font-semibold">
+                        Total
+                      </td>
+                      <td className="p-2 text-right font-semibold">{fmtMoney(total)}</td>
+                      <td className="p-2"></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          ))}
+
+          {!loading && groupedVariants.length === 0 ? (
+            <div className="text-sm text-slate-500">No variants.</div>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
-}
-
-// (현재 파일에서 실제로 쓰진 않지만, 필요하면 사용)
-async function resizeImageFile(file: File, maxDim = 800, quality = 0.82): Promise<File> {
-  const img = document.createElement("img");
-  const url = URL.createObjectURL(file);
-  img.src = url;
-  await new Promise<void>((res, rej) => {
-    img.onload = () => res();
-    img.onerror = () => rej(new Error("image load failed"));
-  });
-
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  const scale = Math.min(1, maxDim / Math.max(w, h));
-  const nw = Math.max(1, Math.round(w * scale));
-  const nh = Math.max(1, Math.round(h * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = nw;
-  canvas.height = nh;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("canvas not supported");
-  ctx.drawImage(img, 0, 0, nw, nh);
-
-  const blob: Blob = await new Promise((resolve) =>
-    canvas.toBlob((b) => resolve(b as Blob), "image/jpeg", quality)
-  );
-
-  URL.revokeObjectURL(url);
-  return new File([blob], "thumbnail.jpg", { type: "image/jpeg" });
 }

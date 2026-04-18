@@ -157,6 +157,15 @@ function fmtMoney2(v: any) {
   });
 }
 
+function shortId(v?: string | null) {
+  const x = s(v);
+  if (!x) return "";
+  return x.length <= 12 ? x : `${x.slice(0, 8)}-${x.slice(-4)}`;
+}
+function displayReceiptLabel(r: { receipt_no?: string | null; reference_no?: string | null; receipt_id?: string | null }) {
+  return s(r.receipt_no) || s(r.reference_no) || shortId(r.receipt_id) || "-";
+}
+
 function fmtQty0(v: any) {
   const n = Number(v || 0);
   const isInt = Number.isFinite(n) && Math.abs(n - Math.round(n)) < 1e-9;
@@ -1364,7 +1373,18 @@ ${shipperAddress}` : `${shipperName}`,
                 </div>
               </div>
               <div className="w-full overflow-auto">
-                <table className="w-full text-sm table-fixed">
+                <table className="w-full text-sm">
+                  <colgroup>
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "140px" }} />
+                    <col style={{ width: "120px" }} />
+                    <col style={{ width: "120px" }} />
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "120px" }} />
+                    <col style={{ width: "180px" }} />
+                  </colgroup>
                   <thead className="bg-muted/20">
                     <tr className="[&>th]:px-3 [&>th]:py-0 [&>th]:h-14 [&>th]:text-left [&>th]:align-middle">
                       <th className="min-w-[110px]">Date</th>
@@ -1394,14 +1414,9 @@ ${shipperAddress}` : `${shipperName}`,
                               type="button"
                               className="text-left font-medium text-blue-600 hover:underline"
                               onClick={() => openReceiptDetail(r.receipt_id)}
+                              title={r.receipt_id}
                             >
-                              <button
-                              type="button"
-                              className="text-left font-medium text-blue-600 hover:underline"
-                              onClick={() => openReceiptDetail(r.receipt_id)}
-                            >
-                              {r.receipt_no || r.receipt_id}
-                            </button>
+                              {displayReceiptLabel(r)}
                             </button>
                           </td>
                           <td className="text-right whitespace-nowrap">{fmtMoney2(r.gross_amount)}</td>
@@ -1420,7 +1435,21 @@ ${shipperAddress}` : `${shipperName}`,
             </div>
 
             <div className="w-full overflow-auto rounded-md border">
-              <table className="w-full text-sm table-fixed">
+              <table className="w-full text-sm">
+                <colgroup>
+                  <col style={{ width: "150px" }} />
+                  <col style={{ width: "120px" }} />
+                  <col style={{ width: "240px" }} />
+                  {showMatHsUI ? (
+                    <>
+                      <col style={{ width: "220px" }} />
+                      <col style={{ width: "140px" }} />
+                    </>
+                  ) : null}
+                  <col style={{ width: "100px" }} />
+                  <col style={{ width: "110px" }} />
+                  <col style={{ width: "120px" }} />
+                </colgroup>
                 <thead className="bg-muted/40">
                   <tr className="[&>th]:px-3 [&>th]:py-0 [&>th]:h-14 [&>th]:text-left [&>th]:align-middle">
                     <th className="min-w-[150px]">PO No</th>
@@ -1705,6 +1734,17 @@ ${shipperAddress}` : `${shipperName}`,
               </div>
               <div className="w-full overflow-auto">
                 <table className="w-full text-sm">
+                  <colgroup>
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "140px" }} />
+                    <col style={{ width: "120px" }} />
+                    <col style={{ width: "120px" }} />
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "110px" }} />
+                    <col style={{ width: "120px" }} />
+                    <col style={{ width: "180px" }} />
+                  </colgroup>
                   <thead className="bg-muted/20">
                     <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
                       <th className="min-w-[110px]">Date</th>
@@ -1729,7 +1769,7 @@ ${shipperAddress}` : `${shipperName}`,
                       (traceSummary?.rows || []).map((r) => (
                         <tr key={`${r.receipt_id}-${r.receipt_date || ""}`} className="border-t [&>td]:px-3 [&>td]:py-0 [&>td]:h-16 [&>td]:align-middle">
                           <td>{fmtDate10(r.receipt_date)}</td>
-                          <td>{r.receipt_no || r.receipt_id}</td>
+                          <td>{displayReceiptLabel(r)}</td>
                           <td className="text-right">{fmtMoney2(r.gross_amount)}</td>
                           <td className="text-right font-semibold text-blue-600">{fmtMoney2(r.applied_amount)}</td>
                           <td className="text-right">{fmtMoney2(r.our_fee_amount)}</td>
@@ -1904,7 +1944,7 @@ ${shipperAddress}` : `${shipperName}`,
                 <div className="text-lg font-semibold">Receipt Detail</div>
                 {receiptDetailLoading ? <div className="text-xs text-muted-foreground">Loading...</div> : null}
                 <div className="text-sm text-muted-foreground">
-                  {selectedReceipt.reference_no || selectedReceipt.id || "—"}
+                  {displayReceiptLabel({ receipt_no: selectedReceipt.receipt_no, reference_no: selectedReceipt.reference_no, receipt_id: selectedReceipt.id })}
                 </div>
               </div>
               <Button variant="outline" onClick={closeReceiptDetail}>Close</Button>
@@ -1995,7 +2035,7 @@ ${shipperAddress}` : `${shipperName}`,
                 <div className="text-lg font-semibold">Receipt Detail</div>
                 {receiptDetailLoading ? <div className="text-xs text-muted-foreground">Loading...</div> : null}
                 <div className="text-sm text-muted-foreground">
-                  {selectedReceipt.reference_no || selectedReceipt.id || "—"}
+                  {displayReceiptLabel({ receipt_no: selectedReceipt.receipt_no, reference_no: selectedReceipt.reference_no, receipt_id: selectedReceipt.id })}
                 </div>
               </div>
               <Button variant="outline" onClick={closeReceiptDetail}>Close</Button>

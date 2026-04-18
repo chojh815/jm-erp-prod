@@ -160,7 +160,9 @@ export async function GET(req: NextRequest) {
         );
 
         const explicitPaid = num(r?.paid_amount);
-        const explicitBalance = num(r?.balance_amount);
+        const explicitBalanceRaw = r?.balance_amount;
+        const explicitBalanceExists = explicitBalanceRaw !== null && explicitBalanceRaw !== undefined && explicitBalanceRaw !== "";
+        const explicitBalance = num(explicitBalanceRaw);
 
         const invId = String(r?.id ?? "").trim();
         const invNo = String(r?.invoice_no ?? "").trim();
@@ -171,10 +173,7 @@ export async function GET(req: NextRequest) {
 
         const fallbackBalance = Math.max(0, total - applied);
 
-        const balance =
-          explicitBalance > 0
-            ? explicitBalance
-            : fallbackBalance;
+        const balance = explicitBalanceExists ? explicitBalance : fallbackBalance;
 
         return {
           invoice_id: r.id,

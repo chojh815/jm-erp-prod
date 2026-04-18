@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { recalcInvoiceTotals } from "@/lib/receipts/recalc";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,9 +10,11 @@ function toNum(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
+
 function round2(n: number) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
+
 function safe(v: any) {
   return (v ?? "").toString().trim();
 }
@@ -45,15 +46,19 @@ async function getInvoicesByIds(ids: string[]) {
     .select("id, invoice_no, buyer_id, buyer_name, buyer_code, currency, total_amount, balance_amount, paid_amount, status, is_deleted")
     .in("id", ids)
     .eq("is_deleted", false);
+
   if (error) throw error;
   return data ?? [];
 }
 
 function proportionalSplit(total: number, allocations: AllocationOut[]) {
   if (!allocations.length) return [] as Array<{ invoice_id: string; value: number }>;
+
   const base = round2(allocations.reduce((s, r) => s + r.apply_amount, 0));
   const out = allocations.map((a) => ({ invoice_id: a.invoice_id, value: 0 }));
+
   if (total === 0 || base === 0) return out;
+
   let running = 0;
   for (let i = 0; i < allocations.length; i++) {
     if (i === allocations.length - 1) {
@@ -65,6 +70,135 @@ function proportionalSplit(total: number, allocations: AllocationOut[]) {
     }
   }
   return out;
+}
+
+/**
+ * IMPORTANT:
+ * paid_amount = actual cash/net applied to invoice
+ * balance_amount = total_amount - effective_settlement
+ * effective_settlement = applied + our_fee + buyer_fee + claim + writeoff
+ *
+ * So if Total=3344, Applied=3324, Our Fee=20 => balance must be 0, not 20.
+ */
+async function recalcInvoicesWithSettlement(invoiceIds: string[]) {
+  const ids = Array.from(new Set((invoiceIds || []).map((x) => safe(x)).filter(Boolean)));
+  if (!ids.length) return { rows: [] as any[] };
+
+  const { data: invoices, error: invErr } = await supabaseAdmin
+    .from("invoice_headers")
+    .select("id, invoice_no, total_amount")
+    .in("id", ids)
+    .eq("is_deleted", false);
+
+  if (invErr) throw invErr;
+  if (!invoices?.length) return { rows: [] as any[] };
+
+  const { data: lines, error: lineErr } = await supabaseAdmin
+    .from("receipt_lines")
+    .select("id, receipt_header_id, invoice_id, applied_amount, writeoff_amount, is_deleted")
+    .in("invoice_id", ids)
+    .eq("is_deleted", false);
+
+  if (lineErr) throw lineErr;
+
+  const headerIds = Array.from(
+    new Set((lines || []).map((x: any) => safe(x.receipt_header_id)).filter(Boolean))
+  );
+
+  const { data: headers, error: hdrErr } = headerIds.length
+    ? await supabaseAdmin
+        .from("receipt_headers")
+        .select("id, bank_fee_amount, buyer_bank_fee_amount, claim_deduction_amount, buyer_wire_fee_writeoff_amount, is_deleted")
+        .in("id", headerIds)
+        .eq("is_deleted", false)
+    : { data: [], error: null as any };
+
+  if (hdrErr) throw hdrErr;
+
+  const headerById = new Map<string, any>();
+  for (const h of headers || []) headerById.set(String((h as any).id), h);
+
+  const sumAppliedByHeader = new Map<string, number>();
+  for (const l of lines || []) {
+    const key = safe((l as any).receipt_header_id);
+    sumAppliedByHeader.set(
+      key,
+      round2((sumAppliedByHeader.get(key) || 0) + toNum((l as any).applied_amount))
+    );
+  }
+
+  const totalsByInvoice = new Map<
+    string,
+    { applied: number; effective: number }
+  >();
+
+  for (const l of lines || []) {
+    const invoiceId = safe((l as any).invoice_id);
+    if (!invoiceId) continue;
+
+    const headerId = safe((l as any).receipt_header_id);
+    const header = headerById.get(headerId);
+    const totalAppliedForHeader = round2(sumAppliedByHeader.get(headerId) || 0);
+    const applied = round2(toNum((l as any).applied_amount));
+    const directWriteoff = round2(toNum((l as any).writeoff_amount));
+    const ratio = totalAppliedForHeader > 0 ? applied / totalAppliedForHeader : 0;
+
+    const ourFee = round2(ratio * toNum(header?.bank_fee_amount));
+    const buyerFee = round2(ratio * toNum(header?.buyer_bank_fee_amount));
+    const claim = round2(ratio * toNum(header?.claim_deduction_amount));
+    const headerWriteoff = round2(ratio * toNum(header?.buyer_wire_fee_writeoff_amount));
+
+    const effectiveContribution = round2(
+      applied + directWriteoff + headerWriteoff + ourFee + buyerFee + claim
+    );
+
+    const prev = totalsByInvoice.get(invoiceId) || { applied: 0, effective: 0 };
+    prev.applied = round2(prev.applied + applied);
+    prev.effective = round2(prev.effective + effectiveContribution);
+    totalsByInvoice.set(invoiceId, prev);
+  }
+
+  const rows: any[] = [];
+
+  for (const inv of invoices || []) {
+    const t = totalsByInvoice.get(String((inv as any).id)) || { applied: 0, effective: 0 };
+    const totalAmount = round2(toNum((inv as any).total_amount));
+    const paidAmount = round2(t.applied);
+    const effectivePaid = round2(t.effective);
+    const balanceAmount = round2(Math.max(0, totalAmount - effectivePaid));
+    const tol = 0.01;
+
+    const nextStatus =
+      balanceAmount <= tol || (totalAmount > 0 && effectivePaid >= totalAmount - tol)
+        ? "PAID"
+        : effectivePaid > tol
+          ? "PARTIALLY_PAID"
+          : "UNPAID";
+
+    const { error: updErr } = await supabaseAdmin
+      .from("invoice_headers")
+      .update({
+        paid_amount: paidAmount,
+        balance_amount: balanceAmount,
+        status: nextStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", (inv as any).id);
+
+    if (updErr) throw updErr;
+
+    rows.push({
+      id: (inv as any).id,
+      invoice_no: (inv as any).invoice_no,
+      total_amount: totalAmount,
+      paid_amount: paidAmount,
+      effective_paid_amount: effectivePaid,
+      balance_amount: balanceAmount,
+      status: nextStatus,
+    });
+  }
+
+  return { rows };
 }
 
 export async function POST(req: Request) {
@@ -90,22 +224,36 @@ export async function POST(req: Request) {
     const note = safe(body?.note) || null;
     const allocationsIn: AllocationIn[] = Array.isArray(body?.allocations) ? body.allocations : [];
 
-    if (!buyer_id) return NextResponse.json({ success: false, error: "buyer_id required" }, { status: 400 });
-    if (!deposit_date) return NextResponse.json({ success: false, error: "deposit_date required" }, { status: 400 });
-    if (!allocationsIn.length) return NextResponse.json({ success: false, error: "allocations required" }, { status: 400 });
-    if (total_received < 0) return NextResponse.json({ success: false, error: "total_received must be >= 0" }, { status: 400 });
+    if (!buyer_id) {
+      return NextResponse.json({ success: false, error: "buyer_id required" }, { status: 400 });
+    }
+    if (!deposit_date) {
+      return NextResponse.json({ success: false, error: "deposit_date required" }, { status: 400 });
+    }
+    if (!allocationsIn.length) {
+      return NextResponse.json({ success: false, error: "allocations required" }, { status: 400 });
+    }
+    if (total_received < 0) {
+      return NextResponse.json({ success: false, error: "total_received must be >= 0" }, { status: 400 });
+    }
     if (bank_fee_amount < 0 || buyer_bank_fee_amount < 0 || claim_deduction_amount < 0 || buyer_wire_fee_writeoff_amount < 0) {
       return NextResponse.json({ success: false, error: "fee/deduction/writeoff must be >= 0" }, { status: 400 });
     }
 
     const computed_net = round2(total_received - bank_fee_amount - buyer_bank_fee_amount - claim_deduction_amount);
-    const computed_settlement = round2(computed_net + bank_fee_amount + buyer_wire_fee_writeoff_amount);
+    const computed_settlement = round2(
+      computed_net + bank_fee_amount + buyer_bank_fee_amount + claim_deduction_amount + buyer_wire_fee_writeoff_amount
+    );
+
     if (computed_net < 0) {
       return NextResponse.json({ success: false, error: "Net received cannot be negative" }, { status: 400 });
     }
 
     const allocationsOut: AllocationOut[] = allocationsIn
-      .map((a) => ({ invoice_id: safe(a.invoice_id), apply_amount: round2(toNum(a.apply_amount)) }))
+      .map((a) => ({
+        invoice_id: safe(a.invoice_id),
+        apply_amount: round2(toNum(a.apply_amount)),
+      }))
       .filter((a) => a.invoice_id && a.apply_amount > 0);
 
     if (!allocationsOut.length) {
@@ -132,10 +280,12 @@ export async function POST(req: Request) {
       if (String(inv.buyer_id || "") !== buyer_id) {
         return NextResponse.json({ success: false, error: `Buyer mismatch: ${inv.invoice_no || a.invoice_id}` }, { status: 400 });
       }
+
       const total = round2(toNum(inv.total_amount));
-      const paid = round2(toNum(inv.paid_amount));
       const balance = round2(toNum(inv.balance_amount));
+      const paid = round2(toNum(inv.paid_amount));
       const remaining = balance > 0 ? balance : Math.max(0, total - paid);
+
       if (a.apply_amount - remaining > 0.01) {
         return NextResponse.json(
           {
@@ -163,6 +313,7 @@ export async function POST(req: Request) {
 
     for (const a of allocationsOut) {
       const inv = invMap.get(a.invoice_id);
+
       const headerPayload = {
         invoice_id: a.invoice_id,
         invoice_no: safe(inv?.invoice_no) || null,
@@ -209,13 +360,15 @@ export async function POST(req: Request) {
 
       createdHeaderIds.push(String(header.id));
 
-      const { error: lineErr } = await supabaseAdmin.from("receipt_lines").insert({
-        receipt_header_id: String(header.id),
-        invoice_id: a.invoice_id,
-        applied_amount: a.apply_amount,
-        writeoff_amount: 0,
-        created_by_email: user.email ?? null,
-      });
+      const { error: lineErr } = await supabaseAdmin
+        .from("receipt_lines")
+        .insert({
+          receipt_header_id: String(header.id),
+          invoice_id: a.invoice_id,
+          applied_amount: a.apply_amount,
+          writeoff_amount: 0,
+          created_by_email: user.email ?? null,
+        });
 
       if (lineErr) {
         return NextResponse.json(
@@ -231,7 +384,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const recalc = await recalcInvoiceTotals(invoiceIds);
+    const recalc = await recalcInvoicesWithSettlement(invoiceIds);
 
     return NextResponse.json({
       success: true,
@@ -242,6 +395,9 @@ export async function POST(req: Request) {
       invoice_recalc: recalc.rows,
     });
   } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message ?? "Server error", detail: e }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: e?.message ?? "Server error", detail: e },
+      { status: 500 }
+    );
   }
 }

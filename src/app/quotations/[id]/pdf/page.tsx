@@ -13,79 +13,16 @@ import { createClient } from "@/lib/supabase/client";
 
 type AnyRow = Record<string, any>;
 
-function isUuidLike(s?: string | null) {
-  if (!s) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    String(s).trim()
-  );
-}
-
 function safeText(v: any) {
   if (v === null || v === undefined) return "";
   if (typeof v === "string") return v;
   return String(v);
 }
 
-// Ship-From label should match the UI logic (A안):
-// code(site_code/origin_code) + site_name(name) + city/country
-function shipFromLabelFromRow(site: AnyRow | null | undefined) {
-  if (!site) return "";
-  const s = (x: any) => safeText(x).trim();
-
-  // Prefer stable code + concise human-readable place.
-  const code = s(site.code) || s(site.site_code) || s(site.shipping_site_code);
-
-  const name =
-    s(site.name) ||
-    s(site.site_name) ||
-    s(site.display_name) ||
-    s(site.company_name);
-
-  const city = s(site.city) || s(site.address_city) || s(site.site_city);
-  const state = s(site.state) || s(site.address_state) || s(site.site_state);
-
-  const country =
-    s(site.country) ||
-    s(site.country_name) ||
-    s(site.address_country) ||
-    s(site.site_country);
-
-  const placeParts = [city, state, country].filter(Boolean);
-  const place = placeParts.join(", ");
-
-  const norm = (t: string) => t.toLowerCase().replace(/\s+/g, " ").trim();
-  const nName = norm(name);
-  const nCity = norm(city);
-  const nPlace = norm(place);
-
-  // Only include `name` when it adds information (not just the city repeated).
-  const includeName = !!name && (!city || nName !== nCity) && (!place || !nPlace.includes(nName));
-
-  if (code && place) {
-    return includeName ? `${code} — ${name} — ${place}` : `${code} — ${place}`;
-  }
-  if (code && includeName) return `${code} — ${name}`;
-  if (code) return code;
-  if (place) return includeName ? `${name} — ${place}` : place;
-  return name;
-}
-
 function safeNum(v: any) {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
-}
-
-function fmtMoney(v: any, decimals = 2) {
-  const n = safeNum(v);
-  if (n === null) return "";
-  return n.toFixed(decimals);
-}
-
-function fmtInt(v: any) {
-  const n = safeNum(v);
-  if (n === null) return "";
-  return String(Math.trunc(n));
 }
 
 function fmtDate(v: any) {
@@ -99,6 +36,43 @@ function fmtDate(v: any) {
   return `${yy}-${mm}-${dd}`;
 }
 
+function money(v: any, decimals = 2) {
+  const n = safeNum(v);
+  if (n === null) return "";
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fetchImageAsDataUrl(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await blobToDataUrl(blob);
+  } catch {
+    return null;
+  }
+}
+
+function extFromDataUrl(dataUrl: string) {
+  const m = /^data:image\/([a-zA-Z0-9+.-]+);base64,/.exec(dataUrl);
+  const ext = (m?.[1] || "").toLowerCase();
+  if (ext.includes("png")) return "PNG";
+  if (ext.includes("webp")) return "WEBP";
+  return "JPEG";
+}
+
 async function fetchQuotationAll(id: string) {
   const supabase = createClient();
 
@@ -108,343 +82,405 @@ async function fetchQuotationAll(id: string) {
     .eq("id", id)
     .maybeSingle();
 
-  const linesQ = supabase
-    .from("quotation_lines")
+  // Current API uses legacy naming: quotation_items + quotation_item_tiers
+  const itemsQ = supabase
+    .from("quotation_items")
     .select("*")
     .eq("quotation_id", id)
-    .eq("is_deleted", false)
-    .order("line_no", { ascending: true });
-
-  const variantsQ = supabase
-    .from("quotation_variants")
-    .select("*")
-    .eq("quotation_id", id)
-    .eq("is_deleted", false)
     .order("created_at", { ascending: true });
 
-  const [headerR, linesR, variantsR] = await Promise.all([headerQ, linesQ, variantsQ]);
+  const [headerR, itemsR] = await Promise.all([headerQ, itemsQ]);
 
   if (headerR.error) throw headerR.error;
-  if (linesR.error) throw linesR.error;
-  if (variantsR.error) throw variantsR.error;
+  if (itemsR.error) throw itemsR.error;
 
-  const variants = (variantsR.data ?? []) as AnyRow[];
+  const header = (headerR.data ?? null) as AnyRow | null;
+  const items = (itemsR.data ?? []) as AnyRow[];
 
-  // ✅ Ship-From label map (A안): show FOB location in PDF
-  // We store display text on each variant as `ship_from_display`.
-  try {
-    const uuidLike = (s: string) =>
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-        String(s || "").trim()
-      );
+  const itemIds = items.map((x) => x?.id).filter(Boolean);
+  let tiers: AnyRow[] = [];
+  if (itemIds.length) {
+    const tiersR = await supabase
+      .from("quotation_item_tiers")
+      .select("*")
+      .in("quotation_item_id", itemIds)
+      .order("qty", { ascending: true });
 
-    const siteIds = Array.from(
-      new Set(
-        (variantsR.data ?? [])
-          .map((v: any) => {
-            const sid = v?.ship_from_site_id ? String(v.ship_from_site_id) : "";
-            if (sid) return sid;
-            const sf = v?.ship_from ? String(v.ship_from) : "";
-            return uuidLike(sf) ? sf : "";
-          })
-          .filter(Boolean)
-      )
-    );
-    if (siteIds.length > 0) {
-      // NOTE:
-      // Some environments store `is_deleted` as NULL for active rows.
-      // Also, some older schemas may not have `is_deleted` on company_sites.
-      // We therefore try an inclusive filter first, then fall back to no filter.
-      // Use '*' to be resilient to column-name variations across deployments.
-      // shipFromLabelFromRow() will pick the best available fields.
-      const baseSelect = "*";
-
-      let sitesR = await supabase
-        .from("company_sites")
-        // keep this aligned with the UI's shipFromLabel() logic
-        .select(baseSelect)
-        .in("id", siteIds)
-        .or("is_deleted.is.null,is_deleted.eq.false");
-
-      if (sitesR.error) {
-        // Fall back (schema mismatch): try again without is_deleted filtering.
-        sitesR = await supabase
-          .from("company_sites")
-          .select(baseSelect)
-          .in("id", siteIds);
-      }
-
-      const sites = (sitesR.data ?? []) as AnyRow[];
-
-      const labelOf = (s: AnyRow) => shipFromLabelFromRow(s);
-
-      const map: Record<string, string> = {};
-      for (const s of sites) {
-        const sid = String((s as any).id);
-        map[sid] = labelOf(s);
-      }
-
-      // If the lookup above can't build a meaningful label, try resolving from `companies`.
-      // (Some builds store ship_from_site_id as `companies.id` for our Shipping Site company.)
-      const unresolved = siteIds.filter((sid) => {
-        const v = map[sid];
-        return !v || v === sid;
-      });
-      if (unresolved.length) {
-        const companiesR = await supabase
-          .from("companies")
-          .select("id, code, name, city, state, country, country_code, is_deleted")
-          .in("id", unresolved)
-          .limit(1000);
-        if (!companiesR.error && Array.isArray(companiesR.data)) {
-          for (const c of companiesR.data as any[]) {
-            const sid = String(c?.id || "");
-            if (!sid) continue;
-            const lbl = shipFromLabelFromRow(c);
-            if (lbl && lbl !== sid) map[sid] = lbl;
-          }
-        }
-      }
-
-      // Attach to variants rows (A option: prefer stored ship_from text; otherwise map id -> label)
-      (variantsR.data ?? []).forEach((v: any) => {
-        const rawSf = v?.ship_from ? String(v.ship_from) : "";
-        const sid = v?.ship_from_site_id
-          ? String(v.ship_from_site_id)
-          : uuidLike(rawSf)
-            ? rawSf
-            : "";
-
-        const shipFromDisplay =
-          rawSf && !uuidLike(rawSf)
-            ? rawSf
-            : sid
-              ? (map[sid] || "")
-              : "";
-
-        v.ship_from_display = shipFromDisplay;
-      });
-    } else {
-      (variantsR.data ?? []).forEach((v: any) => (v.ship_from_display = ""));
+    if (!tiersR.error && Array.isArray(tiersR.data)) {
+      tiers = tiersR.data as AnyRow[];
     }
-  } catch (e) {
-    // non-fatal
-    (variantsR.data ?? []).forEach((v: any) => (v.ship_from_display = ""));
   }
 
+  // Buyer display
+  let buyerName = safeText(header?.buyer_name || header?.buyer || "");
+  if (!buyerName && header?.buyer_id) {
+    const buyerR = await supabase
+      .from("companies")
+      .select("company_name, code, name")
+      .eq("id", header.buyer_id)
+      .maybeSingle();
 
-  const variantIds = variants.map((v) => v.id).filter(Boolean);
+    if (!buyerR.error && buyerR.data) {
+      buyerName =
+        safeText((buyerR.data as any).company_name) ||
+        safeText((buyerR.data as any).name) ||
+        safeText((buyerR.data as any).code);
+    }
+  }
 
-  let variantLines: AnyRow[] = [];
-  if (variantIds.length > 0) {
-    // Schema (confirmed): quotation_variant_lines.quotation_variant_id (FK) + quotation_line_id
-    const vLinesR = await supabase
-      .from("quotation_variant_lines")
+  // Costing image fallback
+  let costingImages: AnyRow[] = [];
+  const costingId =
+    header?.costing_id ||
+    header?.source_costing_id ||
+    header?.costing_header_id ||
+    null;
+
+  if (costingId) {
+    const imgR = await supabase
+      .from("costing_images")
       .select("*")
-      .in("quotation_variant_id", variantIds)
-      .eq("is_deleted", false)
-      .order("created_at", { ascending: true });
+      .eq("costing_id", costingId)
+      .order("sort_order", { ascending: true });
 
-    if (vLinesR.error) throw vLinesR.error;
-    variantLines = (vLinesR.data ?? []) as AnyRow[];
+    if (!imgR.error && Array.isArray(imgR.data)) {
+      costingImages = imgR.data as AnyRow[];
+    }
   }
 
   return {
-    header: headerR.data as AnyRow | null,
-    lines: (linesR.data ?? []) as AnyRow[],
-    variants,
-    variantLines,
+    header,
+    buyerName,
+    items,
+    tiers,
+    costingImages,
   };
 }
 
-function buildPdf(payload: {
+function pickPrimaryImage(costingImages: AnyRow[]) {
+  if (!Array.isArray(costingImages) || costingImages.length === 0) return null;
+  return costingImages.find((x) => !!x?.is_primary) || costingImages[0] || null;
+}
+
+async function buildPdf(payload: {
   header: AnyRow | null;
-  lines: AnyRow[];
-  variants: AnyRow[];
-  variantLines: AnyRow[];
+  buyerName: string;
+  items: AnyRow[];
+  tiers: AnyRow[];
+  costingImages: AnyRow[];
 }) {
-  const { header, lines, variants, variantLines } = payload;
+  const { header, buyerName, items, tiers, costingImages } = payload;
 
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin = 36;
+  const margin = 40;
 
-  let y = 48;
+  let y = 40;
 
-  const ensurePage = (extra: number) => {
-    if (y + extra > pageH - margin) {
-      doc.addPage();
-      y = margin;
-    }
+  const addPage = () => {
+    doc.addPage();
+    y = 40;
   };
 
-  // ===== Header =====
-  doc.setFontSize(18);
-  doc.text("QUOTATION", pageW / 2, y, { align: "center" });
-  y += 26;
+  const ensure = (h: number) => {
+    if (y + h > pageH - 40) addPage();
+  };
 
+  const line = (yPos: number) => {
+    doc.setDrawColor(220, 226, 232);
+    doc.line(margin, yPos, pageW - margin, yPos);
+  };
+
+  const drawCellText = (
+    text: string,
+    x: number,
+    yPos: number,
+    width: number,
+    align: "left" | "center" | "right" = "left"
+  ) => {
+    const t = doc.splitTextToSize(text || "", width);
+    if (align === "right") {
+      doc.text(t, x + width, yPos, { align: "right" });
+    } else if (align === "center") {
+      doc.text(t, x + width / 2, yPos, { align: "center" });
+    } else {
+      doc.text(t, x, yPos);
+    }
+    return t.length;
+  };
+
+  // ===== Top Header =====
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(22);
+  doc.text("QUOTATION", margin, y);
+
+  doc.setFont("helvetica", "normal");
   doc.setFontSize(10);
+  doc.text(fmtDate(header?.received_date || header?.created_at || new Date().toISOString()), pageW - margin, y - 2, {
+    align: "right",
+  });
 
-  const qNo = safeText(header?.quotation_no || header?.quote_no);
-  const buyer = safeText(header?.buyer_name) || safeText(header?.buyer_code) || safeText(header?.buyer);
-  const brand =
-    safeText(header?.brand_name) ||
-    safeText(header?.brand) ||
-    safeText(header?.buyer_brand_name) ||
-    safeText(header?.buyer_brand);
-  const rcvd = fmtDate(header?.received_date || header?.created_at);
+  y += 18;
+  doc.setFontSize(11);
+  doc.setTextColor(90, 102, 118);
+  doc.text("Fashion Jewelry / Buyer Proposal", margin, y);
+  doc.setTextColor(0, 0, 0);
 
-  const left = margin;
-  const right = pageW / 2 + 8;
-
-  doc.text(`Quotation No: ${qNo}`, left, y);
-  doc.text(`Received: ${rcvd}`, right, y);
-  y += 14;
-  doc.text(`Buyer: ${buyer}`, left, y);
-  doc.text(`Brand: ${brand}`, right, y);
+  y += 18;
+  line(y);
   y += 18;
 
-  const notes = safeText(header?.remarks || header?.notes);
-  if (notes) {
-    doc.setFontSize(9);
-    doc.text("Remarks:", left, y);
-    y += 12;
-    const wrapped = doc.splitTextToSize(notes, pageW - margin * 2);
-    doc.text(wrapped, left, y);
-    y += wrapped.length * 10 + 10;
+  // Header info boxes
+  const leftX = margin;
+  const rightX = pageW / 2 + 8;
+  const infoW = pageW / 2 - margin - 12;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.text("Quotation No", leftX, y);
+  doc.text("Buyer", rightX, y);
+  y += 14;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  doc.text(safeText(header?.quotation_no || header?.quote_no || "DRAFT"), leftX, y);
+  doc.text(buyerName || "-", rightX, y);
+  y += 18;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.text("Brand", leftX, y);
+  doc.text("Currency / Incoterm", rightX, y);
+  y += 14;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  doc.text(
+    safeText(header?.brand_name || header?.brand || header?.buyer_brand_name || "-"),
+    leftX,
+    y
+  );
+  doc.text(
+    `${safeText(header?.currency || "USD")}${safeText(header?.incoterm ? ` / ${header.incoterm}` : "")}`,
+    rightX,
+    y
+  );
+  y += 18;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.text("Subject / Style", leftX, y);
+  y += 14;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  doc.text(
+    safeText(
+      header?.subject ||
+      header?.style_no ||
+      items?.[0]?.style_no ||
+      items?.[0]?.buyer_style_no ||
+      items?.[0]?.jm_style_no ||
+      "-"
+    ),
+    leftX,
+    y
+  );
+
+  // Primary image at top-right
+  const primaryImg = pickPrimaryImage(costingImages);
+  if (primaryImg?.image_url) {
+    const dataUrl = await fetchImageAsDataUrl(String(primaryImg.image_url));
+    if (dataUrl) {
+      const imgW = 112;
+      const imgH = 112;
+      const x = pageW - margin - imgW;
+      const imgY = 84;
+      try {
+        doc.addImage(dataUrl, extFromDataUrl(dataUrl), x, imgY, imgW, imgH);
+      } catch {
+        # pass
+      }
+    }
   }
 
-  // Build line lookup for joins
-  const lineById = new Map<string, AnyRow>();
-  for (const ln of lines) {
-    if (ln?.id) lineById.set(String(ln.id), ln);
-  }
+  y += 30;
 
-  // ===== Variant Sections =====
-  doc.setFontSize(12);
-  doc.text("Variants", left, y);
-  y += 12;
-
-  // Column positions for variant table
-  const c1 = left;          // Style
-  const c2 = left + 90;     // MOQ
-  const c3 = left + 145;    // Qty
-  const c4 = left + 200;    // Target
-  const c5 = left + 280;    // Offer
-  const c6 = left + 360;    // Notes (wrap)
-  const cEnd = pageW - margin;
-
-  const drawVariantHeaderRow = () => {
-    doc.setFontSize(9);
-    doc.text("Style", c1, y);
-    doc.text("MOQ", c2, y);
-    doc.text("Qty", c3, y);
-    doc.text("Target", c4, y);
-    doc.text("Offer", c5, y);
-    doc.text("Notes", c6, y);
-    y += 8;
-    doc.line(left, y, cEnd, y);
-    y += 10;
-  };
-
-  const drawSectionTitle = (title: string) => {
-    ensurePage(40);
+  // Remarks
+  const remarks = safeText(header?.remarks || "");
+  if (remarks) {
+    ensure(48);
+    doc.setFont("helvetica", "bold");
     doc.setFontSize(10);
-    doc.text(title, left, y);
-    y += 10;
-    drawVariantHeaderRow();
-  };
+    doc.text("Remarks", margin, y);
+    y += 14;
 
-  const sumAmount = (rows: AnyRow[]) => {
-    let total = 0;
-    for (const r of rows) {
-      const qty = safeNum(r.qty);
-      const offer = safeNum(r.offer_price);
-      if (qty !== null && offer !== null) total += qty * offer;
-    }
-    return total;
-  };
-
-  for (const v of variants) {
-    const vId = String(v.id || "");
-    const label = safeText(v.label ?? v.name ?? `Variant`);
-    const incoterm = safeText(v.incoterm ?? "");
-    const currency = safeText(v.currency ?? "USD");
-    const shipFromPretty = safeText(
-      v.ship_from_display ??
-        v.ship_from_site_display ??
-        v.ship_from_site_name ??
-        v.ship_from_site ??
-        v.ship_from ??
-        v.ship_from_code ??
-        v.ship_from_site_code ??
-        v.ship_from_name ??
-        ""
-    ).trim();
-
-    // A option: ship_from_display should already be a human-readable label.
-    // Do NOT show raw UUIDs in the PDF.
-    const shipFrom = shipFromPretty;
-    const titleParts = [
-      label || "Variant",
-      incoterm ? incoterm : "",
-      currency ? currency : "",
-      shipFrom ? `Ship From: ${shipFrom}` : "",
-    ].filter(Boolean);
-    drawSectionTitle(titleParts.join(" / "));
-
-    const related = variantLines.filter((vl) => String(vl.quotation_variant_id) === vId);
-    if (!related.length) {
-      doc.setFontSize(9);
-      doc.text("(no items)", left, y);
-      y += 12;
-      continue;
-    }
-
-    // rows
-    doc.setFontSize(9);
-    for (const vl of related) {
-      ensurePage(34);
-
-      const ln = vl.quotation_line_id ? lineById.get(String(vl.quotation_line_id)) : null;
-
-      const style =
-        safeText(ln?.style_no) ||
-        safeText(ln?.buyer_style_no) ||
-        safeText(ln?.jm_style_no) ||
-        safeText(vl.style_no);
-
-      const moq = fmtInt(vl.moq);
-      const qty = fmtInt(vl.qty);
-      const target = fmtMoney(vl.target_price, 2);
-      const offer = fmtMoney(vl.offer_price, 2);
-      const note = safeText(vl.notes);
-
-      doc.text(style, c1, y);
-      doc.text(moq, c2, y);
-      doc.text(qty, c3, y);
-      doc.text(target, c4, y);
-      doc.text(offer, c5, y);
-
-      const noteW = cEnd - c6;
-      const wrapped = note ? doc.splitTextToSize(note, noteW) : [""];
-      doc.text(wrapped, c6, y);
-
-      y += Math.max(12, wrapped.length * 10) + 4;
-    }
-
-    // totals
-    ensurePage(24);
-    doc.line(left, y, cEnd, y);
-    y += 10;
-    doc.setFontSize(9);
-    const total = sumAmount(related);
-    doc.text(`Total Amount (${currency}): ${fmtMoney(total, 2)}`, c5 - 30, y);
-    y += 16;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    const wrapped = doc.splitTextToSize(remarks, pageW - margin * 2);
+    doc.text(wrapped, margin, y);
+    y += wrapped.length * 12 + 8;
   }
 
-  const filename = qNo ? `Quotation-${qNo}.pdf` : `Quotation-${safeText(header?.id || "")}.pdf`;
+  y += 6;
+  line(y);
+  y += 18;
+
+  // ===== Item Table =====
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.text("Items", margin, y);
+  y += 16;
+
+  const cols = {
+    style: margin,
+    desc: margin + 92,
+    qty: margin + 312,
+    cost: margin + 378,
+    offer: margin + 454,
+    marginPct: margin + 530,
+  };
+
+  const widths = {
+    style: 84,
+    desc: 210,
+    qty: 54,
+    cost: 64,
+    offer: 64,
+    marginPct: 44,
+  };
+
+  const drawTableHeader = () => {
+    ensure(28);
+    doc.setFillColor(246, 248, 250);
+    doc.rect(margin, y, pageW - margin * 2, 24, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.text("STYLE", cols.style, y + 15);
+    doc.text("DESCRIPTION", cols.desc, y + 15);
+    doc.text("QTY", cols.qty + widths.qty, y + 15, { align: "right" });
+    doc.text("COST", cols.cost + widths.cost, y + 15, { align: "right" });
+    doc.text("OFFER", cols.offer + widths.offer, y + 15, { align: "right" });
+    doc.text("M%", cols.marginPct + widths.marginPct, y + 15, { align: "right" });
+    y += 24;
+    line(y);
+    y += 12;
+  };
+
+  drawTableHeader();
+
+  let grandTotal = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const ln = items[i] || {};
+    const qty = safeNum(ln.qty ?? ln.quantity) ?? 0;
+    const cost = safeNum(ln.cost_usd ?? ln.total_cost_usd ?? ln.cost_cny ?? ln.total_cost_cny) ?? 0;
+    const offer = safeNum(ln.offer_price_usd ?? ln.offer_usd ?? ln.price_usd ?? ln.unit_price ?? ln.offer_price) ?? 0;
+    const marginPct =
+      safeNum(ln.margin_pct ?? ln.margin_percent) ??
+      (offer > 0 ? ((offer - cost) / offer) * 100 : 0);
+
+    const amount = qty * offer;
+    grandTotal += amount;
+
+    const style =
+      safeText(ln.style_no || ln.buyer_style_no || ln.jm_style_no || `ITEM ${i + 1}`) || "-";
+    const desc =
+      safeText(ln.description || ln.style_name || ln.item_name || header?.subject || "-") || "-";
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+
+    const styleLines = doc.splitTextToSize(style, widths.style);
+    const descLines = doc.splitTextToSize(desc, widths.desc);
+    const rowLines = Math.max(styleLines.length, descLines.length);
+    const rowH = Math.max(18, rowLines * 11 + 2);
+    ensure(rowH + 8);
+    if (y + rowH + 8 > pageH - 40) {
+      drawTableHeader();
+    }
+
+    doc.text(styleLines, cols.style, y);
+    doc.text(descLines, cols.desc, y);
+    doc.text(money(qty, 0), cols.qty + widths.qty, y, { align: "right" });
+    doc.text(money(cost, 2), cols.cost + widths.cost, y, { align: "right" });
+    doc.text(money(offer, 2), cols.offer + widths.offer, y, { align: "right" });
+    doc.text(money(marginPct, 1), cols.marginPct + widths.marginPct, y, { align: "right" });
+
+    y += rowH;
+    line(y);
+    y += 10;
+
+    // Tier subtable
+    const myTiers = tiers.filter((t) => String(t?.quotation_item_id || "") === String(ln?.id || ""));
+    if (myTiers.length) {
+      ensure(40);
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(8);
+      doc.text("Price Tiers", cols.desc, y);
+      y += 10;
+
+      let tx = cols.desc;
+      for (const tier of myTiers) {
+        const qtyTxt = safeText(tier?.qty || tier?.moq || "");
+        const priceTxt = money(tier?.unit_price ?? tier?.unit_price_usd, 2);
+        const badge = `${qtyTxt}: ${priceTxt}`;
+        doc.setDrawColor(224, 229, 235);
+        doc.roundedRect(tx, y - 8, 70, 18, 4, 4);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8);
+        doc.text(badge, tx + 35, y + 4, { align: "center" });
+        tx += 76;
+        if (tx > pageW - margin - 70) {
+          tx = cols.desc;
+          y += 22;
+        }
+      }
+      y += 16;
+    }
+  }
+
+  // Total box
+  ensure(70);
+  y += 8;
+  const totalBoxW = 180;
+  const totalBoxX = pageW - margin - totalBoxW;
+  doc.setFillColor(248, 249, 251);
+  doc.roundedRect(totalBoxX, y, totalBoxW, 50, 8, 8, "F");
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.text("TOTAL AMOUNT", totalBoxX + 14, y + 18);
+
+  doc.setFontSize(16);
+  doc.text(
+    `${safeText(header?.currency || "USD")} ${money(grandTotal, 2)}`,
+    totalBoxX + totalBoxW - 14,
+    y + 36,
+    { align: "right" }
+  );
+
+  y += 70;
+
+  // Footer note
+  ensure(60);
+  line(y);
+  y += 16;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(95, 105, 118);
+  const footer = [
+    "This quotation is for buyer review only.",
+    "Final pricing, shipment schedule, and product details are subject to confirmation.",
+  ].join(" ");
+  const footerLines = doc.splitTextToSize(footer, pageW - margin * 2);
+  doc.text(footerLines, margin, y);
+  doc.setTextColor(0, 0, 0);
+
+  const filename =
+    safeText(header?.quotation_no || header?.quote_no || "quotation").replace(/[^\w.-]+/g, "_") + ".pdf";
+
   doc.save(filename);
 }
 
@@ -462,7 +498,7 @@ export default function QuotationPdfPage() {
     setError(null);
     try {
       const payload = await fetchQuotationAll(id);
-      buildPdf(payload);
+      await buildPdf(payload);
     } catch (e: any) {
       setError(e?.message || "Failed to generate PDF");
     } finally {
@@ -475,7 +511,7 @@ export default function QuotationPdfPage() {
       <div className="p-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-2">
-            <CardTitle>Quotation PDF (jsPDF)</CardTitle>
+            <CardTitle>Quotation PDF</CardTitle>
             <div className="flex items-center gap-2">
               <Button variant="outline" onClick={() => router.back()}>
                 Back
@@ -487,16 +523,13 @@ export default function QuotationPdfPage() {
           </CardHeader>
           <CardContent>
             <div className="text-sm text-muted-foreground">
-              Quotation ID: <span className="font-mono">{id || "(missing)"}</span>
+              Buyer-friendly quotation PDF with image, pricing table, tier badges, and total amount.
             </div>
             {error ? (
               <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
                 {error}
               </div>
             ) : null}
-            <div className="mt-3 text-xs text-muted-foreground">
-              Note: This route is client-only. If you need a server-rendered PDF later, we should switch to a server PDF renderer.
-            </div>
           </CardContent>
         </Card>
       </div>
