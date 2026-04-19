@@ -52,13 +52,9 @@ function safe(v: any) {
   return (v ?? "").toString().trim();
 }
 
-/**
- * 에러 수정 부분: map 함수의 인자 x에 명시적 타입을 지정했습니다.
- */
 function asArray(v: unknown): string[] {
   if (v === null || v === undefined) return [];
-  
-  // 이미 배열인 경우 처리
+
   if (Array.isArray(v)) {
     return (v as unknown[]).map((x: unknown) => safe(x)).filter(Boolean);
   }
@@ -66,7 +62,6 @@ function asArray(v: unknown): string[] {
   const s = safe(v);
   if (!s) return [];
 
-  // JSON 배열 형태인 경우 처리 (예: '["A","B"]')
   try {
     const j: unknown = JSON.parse(s);
     if (Array.isArray(j)) {
@@ -74,7 +69,6 @@ function asArray(v: unknown): string[] {
     }
   } catch {}
 
-  // 콤마나 공백으로 구분된 문자열 처리
   return s.split(/[,\s]+/g).map((x: string) => x.trim()).filter(Boolean);
 }
 
@@ -105,40 +99,65 @@ export default function ShipmentsListPage() {
   const [error, setError] = React.useState<string | null>(null);
   const [items, setItems] = React.useState<ShipmentListItem[]>([]);
 
-  const [qShipmentNo, setQShipmentNo] = React.useState(sp.get("shipment_no") ?? "");
-  const [qPoNo, setQPoNo] = React.useState(sp.get("po_no") ?? "");
-  const [qBuyer, setQBuyer] = React.useState(sp.get("buyer") ?? "");
-  const [qStatus, setQStatus] = React.useState(sp.get("status") ?? "ALL");
+  const [qShipmentNo, setQShipmentNo] = React.useState("");
+  const [qPoNo, setQPoNo] = React.useState("");
+  const [qBuyer, setQBuyer] = React.useState("");
+  const [qStatus, setQStatus] = React.useState<string>("ALL");
 
-  async function load(next?: {
-    shipment_no?: string;
-    po_no?: string;
-    buyer?: string;
-    status?: string;
-  }) {
-    setLoading(true);
-    setError(null);
-    try {
+  const hydrateFromSearchParams = React.useCallback(() => {
+    setQShipmentNo(sp.get("shipment_no") ?? "");
+    setQPoNo(sp.get("po_no") ?? "");
+    setQBuyer(sp.get("buyer") ?? "");
+    setQStatus(sp.get("status") ?? "ALL");
+  }, [sp]);
+
+  const buildParams = React.useCallback(
+    (next?: {
+      shipment_no?: string;
+      po_no?: string;
+      buyer?: string;
+      status?: string;
+    }) => {
       const params = new URLSearchParams();
-      const shipment_no = (next?.shipment_no ?? qShipmentNo).trim();
-      const po_no = (next?.po_no ?? qPoNo).trim();
-      const buyer = (next?.buyer ?? qBuyer).trim();
-      const status = (next?.status ?? qStatus).trim();
+
+      const shipment_no = safe(next?.shipment_no ?? qShipmentNo);
+      const po_no = safe(next?.po_no ?? qPoNo);
+      const buyer = safe(next?.buyer ?? qBuyer);
+      const status = safe(next?.status ?? qStatus);
 
       if (shipment_no) params.set("shipment_no", shipment_no);
       if (po_no) params.set("po_no", po_no);
       if (buyer) params.set("buyer", buyer);
       if (status && status !== "ALL") params.set("status", status);
 
-      const qs = params.toString();
-      router.replace(qs ? `/shipments?${qs}` : "/shipments");
+      return params;
+    },
+    [qShipmentNo, qPoNo, qBuyer, qStatus]
+  );
+
+  const load = React.useCallback(async (next?: {
+    shipment_no?: string;
+    po_no?: string;
+    buyer?: string;
+    status?: string;
+    syncUrl?: boolean;
+  }) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = buildParams(next);
+
+      if (next?.syncUrl !== false) {
+        const qs = params.toString();
+        router.replace(qs ? `/shipments?${qs}` : "/shipments");
+      }
 
       const res = await fetch(`/api/shipments/list?${params.toString()}`, { cache: "no-store" });
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j?.success === false) {
         throw new Error(j?.error || `Failed to load shipments (HTTP ${res.status})`);
       }
-      
+
       const list = (j?.items ?? j?.data ?? j?.rows ?? []) as any[];
       const normalized: ShipmentListItem[] = (Array.isArray(list) ? list : []).map((r) => ({
         id: safe(r?.id),
@@ -167,12 +186,43 @@ export default function ShipmentsListPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [buildParams, router]);
 
   React.useEffect(() => {
-    load();
+    hydrateFromSearchParams();
+  }, [hydrateFromSearchParams]);
+
+  React.useEffect(() => {
+    // URL 기준으로 항상 복원
+    load(
+      {
+        shipment_no: sp.get("shipment_no") ?? "",
+        po_no: sp.get("po_no") ?? "",
+        buyer: sp.get("buyer") ?? "",
+        status: sp.get("status") ?? "ALL",
+        syncUrl: false,
+      }
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sp]);
+
+  function handleSearch() {
+    load({
+      shipment_no: qShipmentNo,
+      po_no: qPoNo,
+      buyer: qBuyer,
+      status: qStatus,
+      syncUrl: true,
+    });
+  }
+
+  function handleClear() {
+    setQShipmentNo("");
+    setQPoNo("");
+    setQBuyer("");
+    setQStatus("ALL");
+    router.replace("/shipments");
+  }
 
   function openDetail(id: string) {
     router.push(`/shipments/${id}`);
@@ -185,7 +235,7 @@ export default function ShipmentsListPage() {
           <CardHeader className="flex flex-row items-center justify-between gap-3">
             <CardTitle>Shipment List</CardTitle>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={() => load()} disabled={loading}>
+              <Button variant="outline" onClick={() => load({ syncUrl: false })} disabled={loading}>
                 {loading ? "Loading..." : "Refresh"}
               </Button>
               <Button onClick={() => router.push("/shipments/create-from-po")}>
@@ -199,16 +249,25 @@ export default function ShipmentsListPage() {
                 value={qShipmentNo}
                 onChange={(e) => setQShipmentNo(e.target.value)}
                 placeholder="Shipment No"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSearch();
+                }}
               />
               <Input
                 value={qPoNo}
                 onChange={(e) => setQPoNo(e.target.value)}
                 placeholder="PO No"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSearch();
+                }}
               />
               <Input
                 value={qBuyer}
                 onChange={(e) => setQBuyer(e.target.value)}
                 placeholder="Buyer"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSearch();
+                }}
               />
               <Select value={qStatus} onValueChange={setQStatus}>
                 <SelectTrigger>
@@ -226,30 +285,10 @@ export default function ShipmentsListPage() {
             </div>
 
             <div className="mt-3 flex items-center gap-2">
-              <Button
-                onClick={() =>
-                  load({
-                    shipment_no: qShipmentNo,
-                    po_no: qPoNo,
-                    buyer: qBuyer,
-                    status: qStatus,
-                  })
-                }
-                disabled={loading}
-              >
+              <Button onClick={handleSearch} disabled={loading}>
                 Search
               </Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setQShipmentNo("");
-                  setQPoNo("");
-                  setQBuyer("");
-                  setQStatus("ALL");
-                  load({ shipment_no: "", po_no: "", buyer: "", status: "ALL" });
-                }}
-                disabled={loading}
-              >
+              <Button variant="outline" onClick={handleClear} disabled={loading}>
                 Clear
               </Button>
 

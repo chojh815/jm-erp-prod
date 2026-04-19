@@ -89,6 +89,23 @@ type CreateWsOk = { success: true; work_sheet_id?: string; id?: string; data?: a
 type CreateWsFail = { success: false; error: string };
 type CreateWsResult = CreateWsOk | CreateWsFail;
 
+type ListStateSnapshot = {
+  q: string;
+  status: string;
+  vendorId: string;
+  dateFrom: string;
+  dateTo: string;
+  pendingOnly: boolean;
+  lateOnly: boolean;
+  s1Field: SortField;
+  s1Dir: SortDir;
+  s2Field: SortField;
+  s2Dir: SortDir;
+  s3Field: SortField;
+  s3Dir: SortDir;
+  page: number;
+};
+
 type DuplicateCandidate = {
   source_work_sheet_id: string;
   source_work_sheet_line_id: string;
@@ -534,6 +551,115 @@ export default function PurchaseOrderListPage() {
   const [duplicateTargetPo, setDuplicateTargetPo] = useState<PoHeaderItem | null>(null);
   const [duplicateTargetLine, setDuplicateTargetLine] = useState<PoLineItem | null>(null);
 
+  const [urlReady, setUrlReady] = useState(false);
+  const [initialSnapshot, setInitialSnapshot] = useState<ListStateSnapshot | null>(null);
+
+  const defaultListSnapshot = React.useCallback((): ListStateSnapshot => ({
+    q: "",
+    status: "ALL",
+    vendorId: "ALL",
+    dateFrom: "",
+    dateTo: "",
+    pendingOnly: false,
+    lateOnly: false,
+    s1Field: "REQ_SHIP_DATE",
+    s1Dir: "ASC",
+    s2Field: "BRAND",
+    s2Dir: "ASC",
+    s3Field: "ORDER_DATE",
+    s3Dir: "ASC",
+    page: 1,
+  }), []);
+
+  const parseSnapshotFromUrl = React.useCallback((): ListStateSnapshot => {
+    if (typeof window === "undefined") return defaultListSnapshot();
+    const qs = new URLSearchParams(window.location.search);
+    const pageNum = Number(qs.get("page") ?? "1");
+    return {
+      q: qs.get("q") ?? "",
+      status: qs.get("status") ?? "ALL",
+      vendorId: qs.get("vendor_id") ?? "ALL",
+      dateFrom: qs.get("dateFrom") ?? "",
+      dateTo: qs.get("dateTo") ?? "",
+      pendingOnly: qs.get("pending_only") === "true",
+      lateOnly: qs.get("late_only") === "true",
+      s1Field: ((qs.get("s1Field") as SortField) ?? "REQ_SHIP_DATE"),
+      s1Dir: ((qs.get("s1Dir") as SortDir) ?? "ASC"),
+      s2Field: ((qs.get("s2Field") as SortField) ?? "BRAND"),
+      s2Dir: ((qs.get("s2Dir") as SortDir) ?? "ASC"),
+      s3Field: ((qs.get("s3Field") as SortField) ?? "ORDER_DATE"),
+      s3Dir: ((qs.get("s3Dir") as SortDir) ?? "ASC"),
+      page: Number.isFinite(pageNum) && pageNum > 0 ? pageNum : 1,
+    };
+  }, [defaultListSnapshot]);
+
+  const applySnapshotToState = React.useCallback((snap: ListStateSnapshot) => {
+    setSearchText(snap.q);
+    setStatusFilter(snap.status || "ALL");
+    setVendorFilter(snap.vendorId || "ALL");
+    setDateFrom(snap.dateFrom || "");
+    setDateTo(snap.dateTo || "");
+    setPendingOnly(!!snap.pendingOnly);
+    setLateOnly(!!snap.lateOnly);
+    setS1Field(snap.s1Field || "REQ_SHIP_DATE");
+    setS1Dir(snap.s1Dir || "ASC");
+    setS2Field(snap.s2Field || "BRAND");
+    setS2Dir(snap.s2Dir || "ASC");
+    setS3Field(snap.s3Field || "ORDER_DATE");
+    setS3Dir(snap.s3Dir || "ASC");
+    setPage(snap.page || 1);
+  }, []);
+
+  const getSnapshotFromState = React.useCallback((pageOverride?: number): ListStateSnapshot => ({
+    q: searchText.trim(),
+    status: statusFilter || "ALL",
+    vendorId: vendorFilter || "ALL",
+    dateFrom,
+    dateTo,
+    pendingOnly,
+    lateOnly,
+    s1Field,
+    s1Dir,
+    s2Field,
+    s2Dir,
+    s3Field,
+    s3Dir,
+    page: pageOverride ?? page ?? 1,
+  }), [searchText, statusFilter, vendorFilter, dateFrom, dateTo, pendingOnly, lateOnly, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir, page]);
+
+  const buildListUrl = React.useCallback((
+    snap: ListStateSnapshot,
+    extras?: { selectedPoId?: string | null; selectedLineId?: string | null; drawer?: boolean }
+  ) => {
+    const params = new URLSearchParams();
+    if (snap.page && snap.page > 1) params.set("page", String(snap.page));
+    if (snap.q) params.set("q", snap.q);
+    if (snap.status && snap.status !== "ALL") params.set("status", snap.status);
+    if (snap.vendorId && snap.vendorId !== "ALL") params.set("vendor_id", snap.vendorId);
+    if (snap.dateFrom) params.set("dateFrom", snap.dateFrom);
+    if (snap.dateTo) params.set("dateTo", snap.dateTo);
+    if (snap.pendingOnly) params.set("pending_only", "true");
+    if (snap.lateOnly) params.set("late_only", "true");
+    params.set("s1Field", snap.s1Field);
+    params.set("s1Dir", snap.s1Dir);
+    params.set("s2Field", snap.s2Field);
+    params.set("s2Dir", snap.s2Dir);
+    params.set("s3Field", snap.s3Field);
+    params.set("s3Dir", snap.s3Dir);
+    if (extras?.selectedPoId) params.set("selected_po_id", extras.selectedPoId);
+    if (extras?.selectedLineId) params.set("selected_line_id", extras.selectedLineId);
+    if (extras?.drawer) params.set("drawer", "1");
+    const qs = params.toString();
+    return qs ? `/po/list?${qs}` : "/po/list";
+  }, []);
+
+  const replaceListUrl = React.useCallback((
+    snap: ListStateSnapshot,
+    extras?: { selectedPoId?: string | null; selectedLineId?: string | null; drawer?: boolean }
+  ) => {
+    router.replace(buildListUrl(snap, extras));
+  }, [router, buildListUrl]);
+
   // ---------- Auth ----------
   useEffect(() => {
     const init = async () => {
@@ -578,27 +704,35 @@ export default function PurchaseOrderListPage() {
   }, []);
 
   // ---------- fetch list ----------
-  const fetchList = async (newPage?: number) => {
+  const fetchList = async (
+    snapshotOrPage?: ListStateSnapshot | number,
+    opts?: { restoreSelection?: boolean }
+  ) => {
     setLoading(true);
     try {
-      const p = newPage ?? page;
+      const snapshot: ListStateSnapshot =
+        typeof snapshotOrPage === "number"
+          ? { ...getSnapshotFromState(snapshotOrPage), page: snapshotOrPage }
+          : snapshotOrPage ?? getSnapshotFromState();
+
+      const p = snapshot.page || 1;
       const params = new URLSearchParams();
       params.set("page", String(p));
       params.set("pageSize", String(pageSize));
-      if (searchText.trim()) params.set("q", searchText.trim());
-      if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
-      if (dateFrom) params.set("dateFrom", dateFrom);
-      if (dateTo) params.set("dateTo", dateTo);
-      if (vendorFilter && vendorFilter !== "ALL") params.set("vendor_id", vendorFilter);
-      if (pendingOnly) params.set("pending_only", "true");
-      if (lateOnly) params.set("late_only", "true");
+      if (snapshot.q.trim()) params.set("q", snapshot.q.trim());
+      if (snapshot.status && snapshot.status !== "ALL") params.set("status", snapshot.status);
+      if (snapshot.dateFrom) params.set("dateFrom", snapshot.dateFrom);
+      if (snapshot.dateTo) params.set("dateTo", snapshot.dateTo);
+      if (snapshot.vendorId && snapshot.vendorId !== "ALL") params.set("vendor_id", snapshot.vendorId);
+      if (snapshot.pendingOnly) params.set("pending_only", "true");
+      if (snapshot.lateOnly) params.set("late_only", "true");
 
-      params.set("s1Field", s1Field);
-      params.set("s1Dir", s1Dir);
-      params.set("s2Field", s2Field);
-      params.set("s2Dir", s2Dir);
-      params.set("s3Field", s3Field);
-      params.set("s3Dir", s3Dir);
+      params.set("s1Field", snapshot.s1Field);
+      params.set("s1Dir", snapshot.s1Dir);
+      params.set("s2Field", snapshot.s2Field);
+      params.set("s2Dir", snapshot.s2Dir);
+      params.set("s3Field", snapshot.s3Field);
+      params.set("s3Dir", snapshot.s3Dir);
 
       const res = await fetch(`/api/orders/list?${params.toString()}`);
       const json = await safeJson<any>(res);
@@ -622,9 +756,30 @@ export default function PurchaseOrderListPage() {
       setGrandTotalsByCurrency(gtc && typeof gtc === "object" ? gtc : null);
       setPageTotalsByCurrency(ptc && typeof ptc === "object" ? ptc : null);
 
+      if (opts?.restoreSelection && typeof window !== "undefined") {
+        const qs = new URLSearchParams(window.location.search);
+        const selectedPoId = (qs.get("selected_po_id") ?? "").trim();
+        const selectedLineId = (qs.get("selected_line_id") ?? "").trim();
+        const shouldOpenDrawer = qs.get("drawer") === "1";
+
+        if (selectedPoId) {
+          const matched = normalized.find((x) => x.id === selectedPoId) ?? null;
+          if (matched) {
+            await loadLinesForPo(matched, {
+              syncUrl: false,
+              restoreLineId: selectedLineId || null,
+              openDrawer: shouldOpenDrawer,
+            });
+            return;
+          }
+        }
+      }
+
       setSelectedPo(null);
       setLines([]);
       setWsMap({});
+      setSelectedLine(null);
+      setDrawerOpen(false);
     } catch (err: any) {
       console.error("fetchList error:", err);
       alert(err?.message ?? "Unexpected error while loading list.");
@@ -634,21 +789,27 @@ export default function PurchaseOrderListPage() {
   };
 
   useEffect(() => {
-    const qs = new URLSearchParams(window.location.search);
-    const incomingVendorId = (qs.get("vendor_id") ?? "").trim();
-    if (incomingVendorId) {
-      setVendorFilter(incomingVendorId);
-    }
-  }, []);
+    const snap = parseSnapshotFromUrl();
+    applySnapshotToState(snap);
+    setInitialSnapshot(snap);
+    setUrlReady(true);
+  }, [applySnapshotToState, parseSnapshotFromUrl]);
 
   useEffect(() => {
-    if (!authLoading && role) fetchList(1);
+    if (!authLoading && role && urlReady && initialSnapshot) {
+      void fetchList(initialSnapshot, { restoreSelection: true });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, role, vendorFilter, pendingOnly, lateOnly]);
+  }, [authLoading, role, urlReady, initialSnapshot]);
 
-  const handleApply = () => fetchList(1);
+  const handleApply = () => {
+    const snapshot = getSnapshotFromState(1);
+    replaceListUrl(snapshot, { selectedPoId: null, selectedLineId: null, drawer: false });
+    void fetchList(snapshot, { restoreSelection: false });
+  };
 
   const handleClearFilters = () => {
+    const snapshot = defaultListSnapshot();
     setSearchText("");
     setStatusFilter("ALL");
     setDateFrom("");
@@ -656,11 +817,25 @@ export default function PurchaseOrderListPage() {
     setVendorFilter("ALL");
     setPendingOnly(false);
     setLateOnly(false);
-    fetchList(1);
+    setS1Field("REQ_SHIP_DATE");
+    setS1Dir("ASC");
+    setS2Field("BRAND");
+    setS2Dir("ASC");
+    setS3Field("ORDER_DATE");
+    setS3Dir("ASC");
+    replaceListUrl(snapshot, { selectedPoId: null, selectedLineId: null, drawer: false });
+    void fetchList(snapshot, { restoreSelection: false });
   };
 
   // ---------- load lines ----------
-  const loadLinesForPo = async (po: PoHeaderItem) => {
+  const loadLinesForPo = async (
+    po: PoHeaderItem,
+    options?: { syncUrl?: boolean; restoreLineId?: string | null; openDrawer?: boolean }
+  ) => {
+    const syncUrl = options?.syncUrl !== false;
+    const restoreLineId = options?.restoreLineId ?? null;
+    const openDrawer = !!options?.openDrawer;
+
     setSelectedPo(po);
     setLines([]);
     setWsMap({});
@@ -684,6 +859,7 @@ export default function PurchaseOrderListPage() {
       setLines(loadedLines);
 
       const lineIds = loadedLines.map((l) => l.id).filter(isUuid);
+      let nextWsMap: Record<string, string> = {};
       if (lineIds.length > 0) {
         const { data, error } = await supabase
           .from("work_sheet_headers")
@@ -698,8 +874,38 @@ export default function PurchaseOrderListPage() {
             const wsId = row?.id;
             if (isUuid(poLineId) && isUuid(wsId)) m[poLineId] = wsId;
           }
+          nextWsMap = m;
           setWsMap(m);
         }
+      }
+
+      let restoredLine: PoLineItem | null = null;
+      if (restoreLineId) {
+        restoredLine =
+          loadedLines.find((ln) => ln.id === restoreLineId) ?? null;
+      }
+
+      if (restoredLine && openDrawer) {
+        const existing = nextWsMap[restoredLine.id] || restoredLine.work_sheet_id || null;
+        const hasWs = existing && isUuid(existing);
+        const merged = {
+          ...restoredLine,
+          work_sheet_id: hasWs ? (existing as any) : restoredLine.work_sheet_id,
+        } as PoLineItem;
+        setSelectedLine(merged);
+        setDrawerOpen(true);
+      } else {
+        setSelectedLine(null);
+        setDrawerOpen(false);
+      }
+
+      if (syncUrl) {
+        const snapshot = getSnapshotFromState();
+        replaceListUrl(snapshot, {
+          selectedPoId: po.id,
+          selectedLineId: restoredLine?.id ?? null,
+          drawer: !!(restoredLine && openDrawer),
+        });
       }
     } catch (err: any) {
       console.error("loadLinesForPo error:", err);
@@ -711,8 +917,26 @@ export default function PurchaseOrderListPage() {
 
   // ---------- pagination ----------
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const handlePrev = () => page > 1 && fetchList(page - 1);
-  const handleNext = () => page < totalPages && fetchList(page + 1);
+  const handlePrev = () => {
+    if (page <= 1) return;
+    const snapshot = getSnapshotFromState(page - 1);
+    replaceListUrl(snapshot, {
+      selectedPoId: selectedPo?.id ?? null,
+      selectedLineId: selectedLine?.id ?? null,
+      drawer: drawerOpen,
+    });
+    void fetchList(snapshot, { restoreSelection: true });
+  };
+  const handleNext = () => {
+    if (page >= totalPages) return;
+    const snapshot = getSnapshotFromState(page + 1);
+    replaceListUrl(snapshot, {
+      selectedPoId: selectedPo?.id ?? null,
+      selectedLineId: selectedLine?.id ?? null,
+      drawer: drawerOpen,
+    });
+    void fetchList(snapshot, { restoreSelection: true });
+  };
 
   const sortedItems = useMemo(() => items, [items]);
 
@@ -1400,7 +1624,7 @@ export default function PurchaseOrderListPage() {
               <Button type="button" variant="outline" onClick={() => router.push("/po/create")}>
                 New PO
               </Button>
-              <Button type="button" onClick={() => fetchList(page)} disabled={loading}>
+              <Button type="button" onClick={() => { const snapshot = getSnapshotFromState(page); replaceListUrl(snapshot, { selectedPoId: selectedPo?.id ?? null, selectedLineId: selectedLine?.id ?? null, drawer: drawerOpen }); void fetchList(snapshot, { restoreSelection: true }); }} disabled={loading}>
                 {loading ? "Refreshing..." : "Refresh"}
               </Button>
             </div>
@@ -1596,7 +1820,7 @@ export default function PurchaseOrderListPage() {
                         <tr
                           key={it.id}
                           className={`border-t hover:bg-sky-50 cursor-pointer ${isSelected ? "bg-sky-50" : ""}`}
-                          onClick={() => loadLinesForPo(it)}
+                          onClick={() => void loadLinesForPo(it)}
                         >
                           <td className="px-4 py-2">{it.poNo}</td>
                           <td className="px-4 py-2">{it.buyerName ?? "-"}</td>
@@ -1779,8 +2003,15 @@ export default function PurchaseOrderListPage() {
                                   key={ln.id}
                                   className="border-t hover:bg-sky-50 cursor-pointer"
                                   onClick={() => {
-                                    setSelectedLine({ ...ln, work_sheet_id: hasWs ? (existing as any) : ln.work_sheet_id });
+                                    const nextLine = { ...ln, work_sheet_id: hasWs ? (existing as any) : ln.work_sheet_id };
+                                    setSelectedLine(nextLine);
                                     setDrawerOpen(true);
+                                    const snapshot = getSnapshotFromState();
+                                    replaceListUrl(snapshot, {
+                                      selectedPoId: selectedPo?.id ?? null,
+                                      selectedLineId: ln.id,
+                                      drawer: true,
+                                    });
                                   }}
                                 >
                                   <td className="px-3 py-2">{ln.lineNo ?? "-"}</td>
@@ -1792,8 +2023,15 @@ export default function PurchaseOrderListPage() {
                                       className="w-10 h-10 rounded-md border bg-white overflow-hidden flex items-center justify-center hover:ring-2 hover:ring-sky-200"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        setSelectedLine({ ...ln, work_sheet_id: hasWs ? (existing as any) : ln.work_sheet_id });
+                                        const nextLine = { ...ln, work_sheet_id: hasWs ? (existing as any) : ln.work_sheet_id };
+                                        setSelectedLine(nextLine);
                                         setDrawerOpen(true);
+                                        const snapshot = getSnapshotFromState();
+                                        replaceListUrl(snapshot, {
+                                          selectedPoId: selectedPo?.id ?? null,
+                                          selectedLineId: ln.id,
+                                          drawer: true,
+                                        });
                                       }}
                                       title={imgSrc ? imgSrc : "Open detail"}
                                     >
@@ -1859,6 +2097,8 @@ export default function PurchaseOrderListPage() {
             onClick={() => {
               setDrawerOpen(false);
               setSelectedLine(null);
+              const snapshot = getSnapshotFromState();
+              replaceListUrl(snapshot, { selectedPoId: selectedPo?.id ?? null, selectedLineId: null, drawer: false });
             }}
           />
 
@@ -1876,6 +2116,8 @@ export default function PurchaseOrderListPage() {
                 onClick={() => {
                   setDrawerOpen(false);
                   setSelectedLine(null);
+                  const snapshot = getSnapshotFromState();
+                  replaceListUrl(snapshot, { selectedPoId: selectedPo?.id ?? null, selectedLineId: null, drawer: false });
                 }}
               >
                 Close

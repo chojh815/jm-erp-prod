@@ -2,7 +2,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import AppShell from "@/components/layout/AppShell";
 import type { AppRole } from "@/config/menuConfig";
@@ -134,8 +134,33 @@ function uniqSorted(values: (string | null | undefined)[]) {
   return Array.from(s).sort((a, b) => a.localeCompare(b));
 }
 
+function buildInvoicesPageUrl(params: {
+  tab: "invoices" | "packing";
+  invQ: string;
+  invBuyer: string;
+  invStatus: string;
+  plQ: string;
+  plBuyer: string;
+  plStatus: string;
+}) {
+  const sp = new URLSearchParams();
+  sp.set("tab", params.tab);
+
+  if (params.invQ.trim()) sp.set("inv_q", params.invQ.trim());
+  if (params.invBuyer.trim()) sp.set("inv_buyer", params.invBuyer.trim());
+  if (params.invStatus.trim()) sp.set("inv_status", params.invStatus.trim());
+
+  if (params.plQ.trim()) sp.set("pl_q", params.plQ.trim());
+  if (params.plBuyer.trim()) sp.set("pl_buyer", params.plBuyer.trim());
+  if (params.plStatus.trim()) sp.set("pl_status", params.plStatus.trim());
+
+  const qs = sp.toString();
+  return qs ? `/invoices?${qs}` : "/invoices";
+}
+
 export default function InvoicesPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [role, setRole] = React.useState<DevRole>("viewer");
   const [loading, setLoading] = React.useState(true);
@@ -159,6 +184,19 @@ export default function InvoicesPage() {
     // 프로젝트 공통 role 로딩 로직이 있으면 여기를 교체
     setRole("admin");
   }, []);
+
+  React.useEffect(() => {
+    const tabParam = searchParams.get("tab");
+    setTab(tabParam === "packing" ? "packing" : "invoices");
+
+    setInvQ(searchParams.get("inv_q") ?? "");
+    setInvBuyer(searchParams.get("inv_buyer") ?? "");
+    setInvStatus(searchParams.get("inv_status") ?? "");
+
+    setPlQ(searchParams.get("pl_q") ?? "");
+    setPlBuyer(searchParams.get("pl_buyer") ?? "");
+    setPlStatus(searchParams.get("pl_status") ?? "");
+  }, [searchParams]);
 
   // ✅ keyword/buyer/status를 받아 서버 검색 가능하게
   const loadInvoiceList = React.useCallback(
@@ -244,12 +282,20 @@ export default function InvoicesPage() {
     []
   );
 
-  // ✅ 탭 전환 시: 현재 필터 값 기준으로 로드
+  // ✅ URL 기준으로 탭/검색 상태 복원 + 뒤로가기 대응
   React.useEffect(() => {
-    if (tab === "invoices") loadInvoiceList(invQ, invBuyer, invStatus);
-    else loadPackingList(plQ, plBuyer, plStatus);
+    const activeTab = searchParams.get("tab") === "packing" ? "packing" : "invoices";
+    const nextInvQ = searchParams.get("inv_q") ?? "";
+    const nextInvBuyer = searchParams.get("inv_buyer") ?? "";
+    const nextInvStatus = searchParams.get("inv_status") ?? "";
+    const nextPlQ = searchParams.get("pl_q") ?? "";
+    const nextPlBuyer = searchParams.get("pl_buyer") ?? "";
+    const nextPlStatus = searchParams.get("pl_status") ?? "";
+
+    if (activeTab === "invoices") loadInvoiceList(nextInvQ, nextInvBuyer, nextInvStatus);
+    else loadPackingList(nextPlQ, nextPlBuyer, nextPlStatus);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [searchParams, loadInvoiceList, loadPackingList]);
 
   // ✅ 드롭다운 옵션(현재 rows 기준)
   const invBuyerOptions = React.useMemo(
@@ -485,13 +531,56 @@ export default function InvoicesPage() {
   }, []);
 
   const doRefresh = React.useCallback(() => {
-    if (tab === "invoices") loadInvoiceList(invQ, invBuyer, invStatus);
-    else loadPackingList(plQ, plBuyer, plStatus);
+    if (tab === "invoices") applyInvoiceSearch();
+    else applyPackingSearch();
   }, [tab, invQ, invBuyer, invStatus, plQ, plBuyer, plStatus, loadInvoiceList, loadPackingList]);
+
+  const applyInvoiceSearch = React.useCallback(() => {
+    router.replace(
+      buildInvoicesPageUrl({
+        tab: "invoices",
+        invQ,
+        invBuyer,
+        invStatus,
+        plQ,
+        plBuyer,
+        plStatus,
+      })
+    );
+  }, [router, invQ, invBuyer, invStatus, plQ, plBuyer, plStatus]);
+
+  const applyPackingSearch = React.useCallback(() => {
+    router.replace(
+      buildInvoicesPageUrl({
+        tab: "packing",
+        invQ,
+        invBuyer,
+        invStatus,
+        plQ,
+        plBuyer,
+        plStatus,
+      })
+    );
+  }, [router, invQ, invBuyer, invStatus, plQ, plBuyer, plStatus]);
+
+  const handleTabChange = React.useCallback((nextTab: "invoices" | "packing") => {
+    setTab(nextTab);
+    router.replace(
+      buildInvoicesPageUrl({
+        tab: nextTab,
+        invQ,
+        invBuyer,
+        invStatus,
+        plQ,
+        plBuyer,
+        plStatus,
+      })
+    );
+  }, [router, invQ, invBuyer, invStatus, plQ, plBuyer, plStatus]);
 
   return (
     <AppShell role={role}>
-      <Tabs value={tab} onValueChange={(v: any) => setTab(v)}>
+      <Tabs value={tab} onValueChange={(v: any) => handleTabChange(v)}>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <div className="flex items-center gap-4">
@@ -565,7 +654,7 @@ export default function InvoicesPage() {
 
                     <Button
                       variant="outline"
-                      onClick={() => loadInvoiceList(invQ, invBuyer, invStatus)}
+                      onClick={applyInvoiceSearch}
                       disabled={loading}
                       className="shrink-0"
                     >
@@ -693,7 +782,7 @@ export default function InvoicesPage() {
 
                     <Button
                       variant="outline"
-                      onClick={() => loadPackingList(plQ, plBuyer, plStatus)}
+                      onClick={applyPackingSearch}
                       disabled={loading}
                       className="shrink-0"
                     >

@@ -469,6 +469,55 @@ async function safeUpdateHeader(workSheetId: string, patch: any) {
   }
 }
 
+
+async function safeInsertMaterialSpec(row: any) {
+  const p: any = { ...(row ?? {}) };
+  if (!("created_at" in p)) p.created_at = new Date().toISOString();
+  if (!("updated_at" in p)) p.updated_at = new Date().toISOString();
+
+  let tries = 0;
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("work_sheet_material_specs")
+      .insert(p)
+      .select("*")
+      .maybeSingle();
+
+    if (!error) return { ok: true, data };
+
+    const miss = isSchemaCacheMissingColumn(error);
+    if (miss.ok && miss.col && (miss.col in p) && tries < 20) {
+      delete p[miss.col];
+      tries++;
+      continue;
+    }
+
+    return { ok: false, error };
+  }
+}
+
+async function findExistingMaterialSnapshot(lineId: string, s: any) {
+  const materialName = safeText((s as any)?.material_name);
+  const materialType = safeText((s as any)?.material_type);
+  const sortOrder = Number((s as any)?.sort_order ?? 0) || 0;
+
+  let q = supabaseAdmin
+    .from("work_sheet_material_specs")
+    .select("*")
+    .eq("work_sheet_line_id", lineId)
+    .eq("is_deleted", false)
+    .eq("sort_order", sortOrder)
+    .limit(5);
+
+  if (!isBlank(materialName)) q = q.eq("material_name", materialName);
+  if (!isBlank(materialType)) q = q.eq("material_type", materialType);
+
+  const { data, error } = await q;
+  if (error) return null;
+  if (Array.isArray(data) && data.length > 0) return data[0] as any;
+  return null;
+}
+
 async function loadAll(workSheetId: string) {
   // 0) header
   const { data: headerRaw, error: hErr } = await supabaseAdmin
@@ -549,6 +598,8 @@ async function loadAll(workSheetId: string) {
     const fxr = pickFirst(line0, ["fx_rate"]);
     const fxa = pickFirst(line0, ["fx_as_of"]);
     const fxm = pickFirst(line0, ["fx_mode"]);
+    const ot = pickFirst(line0, ["outsourcing_type"]);
+    const im = pickFirst(line0, ["internal_material_cost"]);
 
     (header as any).work_notes = w ?? "";
     (header as any).work_note = w ?? "";
@@ -565,6 +616,9 @@ async function loadAll(workSheetId: string) {
     (header as any).fx_rate = fxr ?? (header as any).fx_rate ?? null;
     (header as any).fx_as_of = fxa ?? (header as any).fx_as_of ?? null;
     (header as any).fx_mode = fxm ?? (header as any).fx_mode ?? null;
+    (header as any).outsourcing_type = ot ?? (header as any).outsourcing_type ?? null;
+    (header as any).internal_material_cost =
+      im ?? (header as any).internal_material_cost ?? null;
   } else {
     (header as any).work_notes = (header as any).work_notes ?? (header as any).work_note ?? "";
     (header as any).work_note = (header as any).work_note ?? (header as any).work_notes ?? "";
@@ -579,6 +633,8 @@ async function loadAll(workSheetId: string) {
     (header as any).fx_rate = (header as any).fx_rate ?? null;
     (header as any).fx_as_of = (header as any).fx_as_of ?? null;
     (header as any).fx_mode = (header as any).fx_mode ?? null;
+    (header as any).outsourcing_type = (header as any).outsourcing_type ?? null;
+    (header as any).internal_material_cost = (header as any).internal_material_cost ?? null;
   }
 
   // 2) materials snapshot
@@ -956,6 +1012,10 @@ const allowed = [
           "fx_rate",
           "fx_as_of",
 
+          // ✅ outsourcing split fields
+          "outsourcing_type",
+          "internal_material_cost",
+
           // ✅ vendor delivery tracking
           "vendor_ready_date",
           "vendor_delivery_status",
@@ -972,6 +1032,7 @@ const allowed = [
           "actual_cost_confirmed_by",
           "actual_cost_notes",
           "actual_unit",
+          "actual_qty",
           "actual_amt",
         ];
 
@@ -995,6 +1056,19 @@ const allowed = [
             patch.vendor_delay_days === null || patch.vendor_delay_days === undefined || patch.vendor_delay_days === ""
               ? null
               : Number(patch.vendor_delay_days);
+        }
+        if ("internal_material_cost" in patch) {
+          patch.internal_material_cost =
+            patch.internal_material_cost === null ||
+            patch.internal_material_cost === undefined ||
+            patch.internal_material_cost === ""
+              ? null
+              : Number(patch.internal_material_cost);
+        }
+        if ("outsourcing_type" in patch) {
+          patch.outsourcing_type = isBlank(patch.outsourcing_type)
+            ? null
+            : safeText(patch.outsourcing_type).toUpperCase();
         }
 
         patch.updated_at = new Date().toISOString();
@@ -1209,38 +1283,61 @@ const allowed = [
     if (materialsPatch) {
       // Flatten incoming spec updates
       const updates: any[] = [];
-      for (const [lineId, arr] of Object.entries(materialsPatch as any)) {
+      const creates: any[] = [];
+
+      for (const [lineIdRaw, arr] of Object.entries(materialsPatch as any)) {
         if (!Array.isArray(arr)) continue;
+        const fallbackLineId = isUuid(lineIdRaw) ? lineIdRaw : null;
+
         for (const s of arr as any[]) {
           if (!s || typeof s !== "object") continue;
-          if (!isUuid(s.id)) continue;
-          const u: any = {
-            id: s.id,
-            work_sheet_line_id: isUuid(s.work_sheet_line_id) ? s.work_sheet_line_id : lineId,
-            actual_qty: s.actual_qty ?? null,
-            actual_unit_cost: s.actual_unit_cost ?? null,
-            actual_note: s.actual_note ?? null,
+          const resolvedLineId = isUuid((s as any).work_sheet_line_id)
+            ? (s as any).work_sheet_line_id
+            : fallbackLineId;
+          if (!isUuid(resolvedLineId)) continue;
+
+          const hasActual =
+            (s as any).actual_qty !== null && (s as any).actual_qty !== undefined ||
+            (s as any).actual_unit_cost !== null && (s as any).actual_unit_cost !== undefined ||
+            !isBlank((s as any).actual_note);
+          if (!hasActual) continue;
+
+          const base: any = {
+            work_sheet_line_id: resolvedLineId,
+            actual_qty: (s as any).actual_qty ?? null,
+            actual_unit_cost: (s as any).actual_unit_cost ?? null,
+            actual_note: (s as any).actual_note ?? null,
+            material_type: (s as any).material_type ?? null,
+            material_name: safeText((s as any).material_name ?? ""),
+            spec_text: (s as any).spec_text ?? (s as any).color_text ?? null,
+            color_text: (s as any).color_text ?? (s as any).color ?? null,
+            source_policy: (s as any).source_policy ?? "PREFERRED",
+            source_vendor_id: (s as any).source_vendor_id ?? null,
+            source_vendor_text: (s as any).source_vendor_text ?? null,
+            note: (s as any).note ?? null,
+            sort_order: Number((s as any).sort_order ?? 0) || 0,
+            is_deleted: false,
           };
 
-          // Only apply when at least one actual field is present
-          if (
-            u.actual_qty !== null ||
-            u.actual_unit_cost !== null ||
-            !isBlank(u.actual_note)
-          ) {
-            updates.push(u);
+          if (isUuid((s as any).id)) {
+            base.id = (s as any).id;
+            updates.push(base);
+          } else {
+            creates.push(base);
           }
         }
       }
 
-      if (updates.length > 0) {
-        const lineIds = Array.from(new Set(updates.map((u) => u.work_sheet_line_id).filter(isUuid)));
+      const allLineIds = Array.from(
+        new Set([...updates, ...creates].map((u) => u.work_sheet_line_id).filter(isUuid))
+      );
 
+      if (allLineIds.length > 0) {
         // Lock policy: if a line is confirmed, block any actual edits
         const { data: locked, error: lockErr } = await supabaseAdmin
           .from("work_sheet_lines")
           .select("id, actual_cost_confirmed")
-          .in("id", lineIds);
+          .in("id", allLineIds);
 
         if (lockErr) throw new Error(lockErr.message);
 
@@ -1250,34 +1347,67 @@ const allowed = [
             .map((r: any) => r.id)
         );
 
-        for (const u of updates) {
+        for (const u of [...updates, ...creates]) {
           if (lockedSet.has(u.work_sheet_line_id)) {
             return bad("Actual cost is CONFIRMED. Use revision flow.", 409);
           }
         }
+      }
 
-        // ✅ UPDATE-ONLY: never insert new rows here.
-// Some rows may have NOT NULL columns (e.g., material_name) that are not present in the payload,
-// so an UPSERT would try to INSERT and fail. We only update existing ids.
-for (const u of updates) {
-  const patch: any = {
-    updated_at: new Date().toISOString(),
-  };
+      // Existing snapshot rows: update by UUID
+      for (const u of updates) {
+        const patch: any = { updated_at: new Date().toISOString() };
+        if (u.actual_qty !== undefined) patch.actual_qty = u.actual_qty;
+        if (u.actual_unit_cost !== undefined) patch.actual_unit_cost = u.actual_unit_cost;
+        if (u.actual_note !== undefined) patch.actual_note = isBlank(u.actual_note) ? null : safeText(u.actual_note);
 
-  // Only send fields that are explicitly provided (avoid overwriting with null unless intended)
-  if (u.actual_qty !== undefined) patch.actual_qty = u.actual_qty;
-  if (u.actual_unit_cost !== undefined) patch.actual_unit_cost = u.actual_unit_cost;
-  if (u.actual_note !== undefined)
-    patch.actual_note = isBlank(u.actual_note) ? null : safeText(u.actual_note);
+        const { error: upErr } = await supabaseAdmin
+          .from("work_sheet_material_specs")
+          .update(patch)
+          .eq("id", u.id)
+          .eq("work_sheet_line_id", u.work_sheet_line_id);
 
-  const { error: upErr } = await supabaseAdmin
-    .from("work_sheet_material_specs")
-    .update(patch)
-    .eq("id", u.id)
-    .eq("work_sheet_line_id", u.work_sheet_line_id);
+        if (upErr) throw new Error(upErr.message);
+      }
 
-  if (upErr) throw new Error(upErr.message);
-}
+      // DEV fallback rows: material snapshot may not exist yet, so create real DB rows first.
+      for (const c of creates) {
+        const existing = await findExistingMaterialSnapshot(c.work_sheet_line_id, c);
+        if (existing?.id) {
+          const patch: any = { updated_at: new Date().toISOString() };
+          if (c.actual_qty !== undefined) patch.actual_qty = c.actual_qty;
+          if (c.actual_unit_cost !== undefined) patch.actual_unit_cost = c.actual_unit_cost;
+          if (c.actual_note !== undefined) patch.actual_note = isBlank(c.actual_note) ? null : safeText(c.actual_note);
+
+          const { error: exUpErr } = await supabaseAdmin
+            .from("work_sheet_material_specs")
+            .update(patch)
+            .eq("id", existing.id)
+            .eq("work_sheet_line_id", c.work_sheet_line_id);
+
+          if (exUpErr) throw new Error(exUpErr.message);
+          continue;
+        }
+
+        const row: any = {
+          work_sheet_line_id: c.work_sheet_line_id,
+          material_type: isBlank(c.material_type) ? null : safeText(c.material_type),
+          material_name: safeText(c.material_name),
+          spec_text: isBlank(c.spec_text) ? null : safeText(c.spec_text),
+          color_text: isBlank(c.color_text) ? null : safeText(c.color_text),
+          source_policy: isBlank(c.source_policy) ? "PREFERRED" : safeText(c.source_policy),
+          source_vendor_id: c.source_vendor_id ?? null,
+          source_vendor_text: isBlank(c.source_vendor_text) ? null : safeText(c.source_vendor_text),
+          note: isBlank(c.note) ? null : safeText(c.note),
+          sort_order: Number(c.sort_order ?? 0) || 0,
+          is_deleted: false,
+          actual_qty: c.actual_qty ?? null,
+          actual_unit_cost: c.actual_unit_cost ?? null,
+          actual_note: isBlank(c.actual_note) ? null : safeText(c.actual_note),
+        };
+
+        const ins = await safeInsertMaterialSpec(row);
+        if (!ins.ok) throw new Error((ins as any).error?.message ?? "Failed to insert material snapshot");
       }
     }
 

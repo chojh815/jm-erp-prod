@@ -1,4 +1,3 @@
-// src/app/api/shipments/list/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -60,14 +59,11 @@ export async function GET(req: NextRequest) {
 
     if (status && status !== "ALL") qb = qb.eq("status", status);
     if (shipmentNo) qb = qb.ilike("shipment_no", `%${shipmentNo}%`);
+
+    // buyer_code 컬럼은 shipments 테이블에 없으므로 참조하지 않음
+    // 현재 구조에서는 buyer_name 기준 검색이 가장 안전함.
     if (buyer) {
-      qb = qb.or(
-        [
-          `buyer_name.ilike.%${buyer}%`,
-          `buyer_code.ilike.%${buyer}%`,
-          `buyer_id.ilike.%${buyer}%`,
-        ].join(",")
-      );
+      qb = qb.ilike("buyer_name", `%${buyer}%`);
     }
 
     qb = qb.order("created_at", { ascending: false }).order("shipment_no", { ascending: false });
