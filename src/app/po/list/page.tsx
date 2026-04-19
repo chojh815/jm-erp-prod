@@ -763,7 +763,7 @@ export default function PurchaseOrderListPage() {
         const shouldOpenDrawer = qs.get("drawer") === "1";
 
         if (selectedPoId) {
-          const matched = normalized.find((x) => x.id === selectedPoId) ?? null;
+          const matched = normalized.find((x: PoHeaderItem) => x.id === selectedPoId) ?? null;
           if (matched) {
             await loadLinesForPo(matched, {
               syncUrl: false,
