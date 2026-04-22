@@ -8,6 +8,11 @@ function toNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(num) ? num : fallback
 }
 
+function isMissingPurposeColumn(error: any) {
+  const message = String(error?.message || '')
+  return message.includes('purpose_code') || message.includes('purpose_group')
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url)
@@ -40,7 +45,28 @@ export async function GET(req: NextRequest) {
     const { data, error } = await query
     if (error) throw error
 
-    return NextResponse.json({ ok: true, items: data || [] })
+    let items = data || []
+    const ids = items.map((row: any) => row.id).filter(Boolean)
+
+    if (ids.length > 0) {
+      const { data: purposeRows, error: purposeError } = await supabaseAdmin
+        .from('cash_transactions')
+        .select('id, purpose_code, purpose_group')
+        .in('id', ids)
+
+      if (purposeError && !isMissingPurposeColumn(purposeError)) throw purposeError
+
+      if (purposeRows) {
+        const purposeMap = new Map(purposeRows.map((row: any) => [row.id, row]))
+        items = items.map((row: any) => ({
+          ...row,
+          purpose_code: purposeMap.get(row.id)?.purpose_code || null,
+          purpose_group: purposeMap.get(row.id)?.purpose_group || null,
+        }))
+      }
+    }
+
+    return NextResponse.json({ ok: true, items })
   } catch (error: any) {
     return NextResponse.json(
       { ok: false, error: error?.message || 'Failed to load cash ledger' },
@@ -99,6 +125,8 @@ export async function POST(req: NextRequest) {
       currency: account.currency,
       fx_rate_to_usd: body.fx_rate_to_usd ? toNumber(body.fx_rate_to_usd, 0) : null,
       transfer_group_id: body.transfer_group_id || null,
+      purpose_code: body.purpose_code?.trim() || null,
+      purpose_group: body.purpose_group?.trim() || null,
       created_by: body.created_by || null,
       created_by_email: body.created_by_email || null,
       updated_by: body.created_by || null,
@@ -110,6 +138,10 @@ export async function POST(req: NextRequest) {
       .insert(payload)
       .select('*')
       .single()
+
+    if (error && isMissingPurposeColumn(error)) {
+      throw new Error('cash_transactions purpose columns are missing. Run the latest Supabase migration first.')
+    }
 
     if (error) throw error
 

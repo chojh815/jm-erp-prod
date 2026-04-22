@@ -194,6 +194,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: ["dashboard.profitability", "dashboard.finance"],
       },
       {
+        label: "Expense Dashboard",
+        href: "/finance/expense-dashboard",
+        perm: ["receipts.view", "dashboard.finance", "dashboard.profitability"],
+      },
+      {
       label: "A/R Aging",
       href: "/dashboards/ar-aging",
       perm: "receipts.view",
@@ -205,6 +210,7 @@ export const MENU_SECTIONS: MenuSection[] = [
     label: "Finance",
     items: [
       { label: "Cashbook", href: "/finance/cashbook", perm: "receipts.view" },
+      { label: "Expense Dashboard", href: "/finance/expense-dashboard", perm: "receipts.view" },
       { label: "Bank Accounts", href: "/bank-accounts", perm: "receipts.view" },
       { label: "Receipts", href: "/receipts", perm: "receipts.view" },
       { label: "Expenses", href: "/finance/expenses", perm: "receipts.view" },

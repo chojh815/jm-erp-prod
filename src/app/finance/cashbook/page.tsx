@@ -6,6 +6,7 @@ type Currency = 'USD' | 'KRW' | 'CNY' | 'VND'
 type EntryMode = 'DEPOSIT' | 'WITHDRAW' | 'TRANSFER' | 'FX' | 'ADJUST'
 type InOut = 'IN' | 'OUT'
 type OutputLang = 'en' | 'zh'
+type PurposeGroup = 'Revenue' | 'Direct Cost' | 'Overhead' | 'Financial Cost' | 'Tax' | 'Owner / Equity' | 'Other'
 
 type CashAccount = {
   account_id?: string
@@ -53,6 +54,8 @@ type LedgerRow = {
   account_name: string
   in_out: InOut
   category: 'RECEIPT' | 'EXPENSE' | 'MANUAL' | 'TRANSFER' | 'FX'
+  purpose_code?: string | null
+  purpose_group?: string | null
   description: string
   counterparty_name?: string | null
   amount: number
@@ -83,6 +86,29 @@ const emptyAccountForm: AccountForm = {
   is_active: true,
 }
 
+const purposeOptions: { code: string; label: string; group: PurposeGroup }[] = [
+  { code: 'SALES_RECEIPT', label: 'Sales Receipt', group: 'Revenue' },
+  { code: 'PURCHASE_PAYMENT', label: 'Purchase Payment', group: 'Direct Cost' },
+  { code: 'FREIGHT', label: 'Freight', group: 'Direct Cost' },
+  { code: 'SAMPLE_COST', label: 'Sample Cost', group: 'Direct Cost' },
+  { code: 'PAYROLL', label: 'Payroll', group: 'Overhead' },
+  { code: 'RENT', label: 'Rent', group: 'Overhead' },
+  { code: 'UTILITIES', label: 'Utilities', group: 'Overhead' },
+  { code: 'OFFICE_SUPPLIES', label: 'Office Supplies', group: 'Overhead' },
+  { code: 'MEALS', label: 'Meals', group: 'Overhead' },
+  { code: 'TRAVEL', label: 'Travel', group: 'Overhead' },
+  { code: 'VEHICLE_MAINTENANCE', label: 'Vehicle Maintenance', group: 'Overhead' },
+  { code: 'TRANSPORTATION', label: 'Transportation', group: 'Overhead' },
+  { code: 'EMPLOYEE_BENEFITS', label: 'Employee Benefits', group: 'Overhead' },
+  { code: 'MISC_EXPENSE', label: 'Misc Expense', group: 'Overhead' },
+  { code: 'BANK_FEE', label: 'Bank Fee', group: 'Financial Cost' },
+  { code: 'TAX_PAYMENT', label: 'Tax Payment', group: 'Tax' },
+  { code: 'OWNER_DRAW', label: 'Owner Draw', group: 'Owner / Equity' },
+  { code: 'CAPITAL_INJECTION', label: 'Capital Injection', group: 'Owner / Equity' },
+  { code: 'ADJUSTMENT', label: 'Adjustment', group: 'Other' },
+  { code: 'OTHER', label: 'Other', group: 'Other' },
+]
+
 const excelLabels = {
   en: {
     exportDate: 'Export Date',
@@ -108,6 +134,8 @@ const excelLabels = {
     accountName: 'Account Name',
     inOut: 'In/Out',
     category: 'Category',
+    purposeGroup: 'Purpose Group',
+    purpose: 'Purpose',
     description: 'Description',
     counterparty: 'Counterparty',
     amount: 'Amount',
@@ -141,6 +169,8 @@ const excelLabels = {
     accountName: '账户名称',
     inOut: '收入/支出',
     category: '类别',
+    purposeGroup: '用途组',
+    purpose: '用途',
     description: '摘要',
     counterparty: '往来单位',
     amount: '金额',
@@ -176,6 +206,11 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+function purposeLabel(code?: string | null) {
+  if (!code) return ''
+  return purposeOptions.find((item) => item.code === code)?.label || code
+}
+
 export default function CashbookPage() {
   const today = new Date().toISOString().slice(0, 10)
 
@@ -196,12 +231,14 @@ export default function CashbookPage() {
   const [toAmount, setToAmount] = useState('')
   const [fxRate, setFxRate] = useState('')
   const [adjustDirection, setAdjustDirection] = useState<InOut>('IN')
+  const [purposeCode, setPurposeCode] = useState('')
   const [description, setDescription] = useState('')
   const [counterpartyName, setCounterpartyName] = useState('')
   const [memo, setMemo] = useState('')
 
   const [filterAccount, setFilterAccount] = useState('')
   const [filterCurrency, setFilterCurrency] = useState('')
+  const [filterPurpose, setFilterPurpose] = useState('')
   const [filterQ, setFilterQ] = useState('')
   const [editingAccountId, setEditingAccountId] = useState('')
   const [showBankDetail, setShowBankDetail] = useState(false)
@@ -213,6 +250,7 @@ export default function CashbookPage() {
   const selectedAccount = useMemo(() => activeAccounts.find((x) => accountId(x) === account), [activeAccounts, account])
   const selectedFrom = useMemo(() => activeAccounts.find((x) => accountId(x) === fromAccount), [activeAccounts, fromAccount])
   const selectedTo = useMemo(() => activeAccounts.find((x) => accountId(x) === toAccount), [activeAccounts, toAccount])
+  const selectedPurpose = useMemo(() => purposeOptions.find((x) => x.code === purposeCode), [purposeCode])
 
   const totalsByCurrency = useMemo(() => {
     const map = new Map<Currency, number>()
@@ -224,6 +262,11 @@ export default function CashbookPage() {
       total: map.get(currency) || 0,
     }))
   }, [accounts])
+
+  const visibleRows = useMemo(() => {
+    if (!filterPurpose) return rows
+    return rows.filter((row) => row.purpose_code === filterPurpose)
+  }, [filterPurpose, rows])
 
   async function loadAccounts() {
     const res = await fetch('/api/finance/cash-accounts?active_only=true', { cache: 'no-store' })
@@ -277,6 +320,7 @@ export default function CashbookPage() {
     setToAmount('')
     setFxRate('')
     setAdjustDirection('IN')
+    setPurposeCode('')
     setDescription('')
     setCounterpartyName('')
     setMemo('')
@@ -465,22 +509,24 @@ export default function CashbookPage() {
     styleTable(accountsSheet)
 
     const ledgerSheet = wb.addWorksheet(excelLang === 'zh' ? '出纳明细' : 'Cashbook Lines')
-    setupSheet(ledgerSheet, t.cashbookLines, [12, 16, 24, 10, 14, 34, 20, 16, 10])
-    ledgerSheet.getRow(4).values = [t.date, t.account, t.accountName, t.inOut, t.category, t.description, t.counterparty, t.amount, t.currency]
-    rows.forEach((row) => {
+    setupSheet(ledgerSheet, t.cashbookLines, [12, 16, 24, 10, 14, 18, 22, 32, 18, 16, 10])
+    ledgerSheet.getRow(4).values = [t.date, t.account, t.accountName, t.inOut, t.category, t.purposeGroup, t.purpose, t.description, t.counterparty, t.amount, t.currency]
+    visibleRows.forEach((row) => {
       ledgerSheet.addRow([
         row.tx_date,
         row.account_code,
         row.account_name,
         row.in_out,
         row.category,
+        row.purpose_group || '',
+        purposeLabel(row.purpose_code),
         row.description,
         row.counterparty_name || '',
         Number(row.amount || 0),
         row.currency,
       ])
     })
-    ledgerSheet.getColumn(8).numFmt = '#,##0.00'
+    ledgerSheet.getColumn(10).numFmt = '#,##0.00'
     styleTable(ledgerSheet)
 
     const bankSheet = wb.addWorksheet(excelLang === 'zh' ? '银行信息' : 'Bank Details')
@@ -549,18 +595,19 @@ export default function CashbookPage() {
 
     autoTable(doc, {
       startY: (doc as any).lastAutoTable.finalY + 8,
-      head: [['Date', 'Account', 'In/Out', 'Category', 'Description', 'Counterparty', 'Amount', 'Currency']],
-      body: rows.map((row) => [
+      head: [['Date', 'Account', 'In/Out', 'Category', 'Purpose', 'Description', 'Counterparty', 'Amount', 'Currency']],
+      body: visibleRows.map((row) => [
         row.tx_date,
         `${row.account_code} ${row.account_name}`,
         row.in_out,
         row.category,
+        purposeLabel(row.purpose_code) || '-',
         row.description,
         row.counterparty_name || '-',
         fmtMoney(row.amount),
         row.currency,
       ]),
-      styles: { fontSize: 7, cellPadding: 2 },
+      styles: { fontSize: 6.5, cellPadding: 1.8 },
       headStyles: { fillColor: [55, 65, 81] },
       margin: { left: 14, right: 14 },
     })
@@ -622,6 +669,8 @@ export default function CashbookPage() {
         description,
         counterparty_name: counterpartyName,
         amount: Number(amount || 0),
+        purpose_code: selectedPurpose?.code || null,
+        purpose_group: selectedPurpose?.group || null,
         memo,
       }),
     })
@@ -666,6 +715,10 @@ export default function CashbookPage() {
     if (mode === 'DEPOSIT' || mode === 'WITHDRAW' || mode === 'ADJUST') {
       if (!account) {
         setMessage('Account is required')
+        return
+      }
+      if (!purposeCode) {
+        setMessage('Purpose is required')
         return
       }
     } else {
@@ -1030,16 +1083,30 @@ export default function CashbookPage() {
               placeholder="0"
             />
           </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium">{mode === 'FX' ? 'To Amount' : 'To Amount'}</label>
-            <input
-              className={inputCls}
-              value={toAmount}
-              onChange={(e) => setToAmount(e.target.value)}
-              placeholder={mode === 'FX' ? '0' : 'same as amount'}
-              disabled={mode !== 'FX'}
-            />
-          </div>
+          {isSingleAccountMode ? (
+            <div>
+              <label className="mb-1 block text-xs font-medium">Purpose</label>
+              <select className={inputCls} value={purposeCode} onChange={(e) => setPurposeCode(e.target.value)}>
+                <option value="">Select Purpose</option>
+                {purposeOptions.map((item) => (
+                  <option key={item.code} value={item.code}>
+                    {item.label} / {item.group}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div>
+              <label className="mb-1 block text-xs font-medium">{mode === 'FX' ? 'To Amount' : 'To Amount'}</label>
+              <input
+                className={inputCls}
+                value={toAmount}
+                onChange={(e) => setToAmount(e.target.value)}
+                placeholder={mode === 'FX' ? '0' : 'same as amount'}
+                disabled={mode !== 'FX'}
+              />
+            </div>
+          )}
           <div>
             <label className="mb-1 block text-xs font-medium">From Currency</label>
             <div className={`${inputCls} bg-gray-50`}>{isSingleAccountMode ? selectedAccount?.currency || '-' : selectedFrom?.currency || '-'}</div>
@@ -1102,7 +1169,7 @@ export default function CashbookPage() {
       <div className="order-3 space-y-3 rounded-lg border border-gray-200 bg-white p-4">
         <div className="flex items-center justify-between gap-4">
           <h2 className="text-lg font-bold">Recent Cashbook Lines</h2>
-          <div className="grid w-full max-w-3xl grid-cols-1 gap-2 md:grid-cols-3">
+          <div className="grid w-full max-w-4xl grid-cols-1 gap-2 md:grid-cols-4">
             <select className={inputCls} value={filterAccount} onChange={(e) => setFilterAccount(e.target.value)}>
               <option value="">All Accounts</option>
               {activeAccounts.map((item) => (
@@ -1118,11 +1185,19 @@ export default function CashbookPage() {
               <option value="CNY">CNY</option>
               <option value="VND">VND</option>
             </select>
+            <select className={inputCls} value={filterPurpose} onChange={(e) => setFilterPurpose(e.target.value)}>
+              <option value="">All Purposes</option>
+              {purposeOptions.map((item) => (
+                <option key={item.code} value={item.code}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
             <input className={inputCls} value={filterQ} onChange={(e) => setFilterQ(e.target.value)} placeholder="Search" />
           </div>
         </div>
         <div className="flex gap-2">
-          <button className={compactBtn} onClick={() => { setFilterAccount(''); setFilterCurrency(''); setFilterQ('') }}>
+          <button className={compactBtn} onClick={() => { setFilterAccount(''); setFilterCurrency(''); setFilterPurpose(''); setFilterQ('') }}>
             Reset
           </button>
           <button className="rounded-md bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700" onClick={loadLedger}>
@@ -1138,6 +1213,7 @@ export default function CashbookPage() {
                 <th className="px-2.5 py-2">Account</th>
                 <th className="px-2.5 py-2">In/Out</th>
                 <th className="px-2.5 py-2">Category</th>
+                <th className="px-2.5 py-2">Purpose</th>
                 <th className="px-2.5 py-2">Description</th>
                 <th className="px-2.5 py-2">Counterparty</th>
                 <th className="px-2.5 py-2 text-right">Amount</th>
@@ -1146,15 +1222,19 @@ export default function CashbookPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td className="px-2.5 py-4 text-center text-gray-500" colSpan={8}>Loading...</td></tr>
-              ) : rows.length === 0 ? (
-                <tr><td className="px-2.5 py-4 text-center text-gray-500" colSpan={8}>No data</td></tr>
-              ) : rows.map((row) => (
+                <tr><td className="px-2.5 py-4 text-center text-gray-500" colSpan={9}>Loading...</td></tr>
+              ) : visibleRows.length === 0 ? (
+                <tr><td className="px-2.5 py-4 text-center text-gray-500" colSpan={9}>No data</td></tr>
+              ) : visibleRows.map((row) => (
                 <tr key={row.id} className="border-b">
                   <td className="px-2.5 py-2">{row.tx_date}</td>
                   <td className="px-2.5 py-2">{row.account_code}<div className="text-[11px] text-gray-500">{row.account_name}</div></td>
                   <td className={`px-2.5 py-2 font-semibold ${row.in_out === 'IN' ? 'text-blue-600' : 'text-red-600'}`}>{row.in_out}</td>
                   <td className="px-2.5 py-2">{row.category}</td>
+                  <td className="px-2.5 py-2">
+                    {purposeLabel(row.purpose_code) || '-'}
+                    {row.purpose_group ? <div className="text-[11px] text-gray-500">{row.purpose_group}</div> : null}
+                  </td>
                   <td className="px-2.5 py-2">{row.description}</td>
                   <td className="px-2.5 py-2">{row.counterparty_name || '-'}</td>
                   <td className="px-2.5 py-2 text-right">{fmtMoney(row.amount)}</td>
