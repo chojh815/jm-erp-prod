@@ -105,7 +105,7 @@ function fmtMoney(value: number | null | undefined) {
   return Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function fmtTooltip(value: number | string | undefined) {
+function fmtTooltip(value: unknown) {
   return fmtMoney(Number(value || 0));
 }
 
@@ -252,10 +252,10 @@ export default function ExpenseDashboardPage() {
                 <SelectItem value="VND">VND</SelectItem>
               </SelectContent>
             </Select>
-            <Button onClick={load} disabled={loading} className="h-8 text-xs">
+            <Button onClick={load} disabled={loading} className="h-8 bg-blue-600 text-xs text-white hover:bg-blue-700">
               {loading ? "Loading..." : "Refresh"}
             </Button>
-            <Button onClick={exportPdf} variant="outline" className="h-8 text-xs">
+            <Button onClick={exportPdf} className="h-8 bg-blue-600 text-xs text-white hover:bg-blue-700">
               PDF
             </Button>
           </div>
@@ -264,9 +264,11 @@ export default function ExpenseDashboardPage() {
         {error ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div> : null}
 
         <div ref={reportRef} className="space-y-4 bg-white">
-          <div className="hidden border-b pb-2 print:block">
-            <div className="text-lg font-semibold">Expense Dashboard</div>
-            <div className="text-xs text-gray-500">{dateFrom} to {dateTo} / {currency === "ALL" ? "All Currencies" : currency}</div>
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            <div className="text-lg font-semibold">Expense Dashboard Report</div>
+            <div className="mt-1 text-xs text-gray-500">
+              Period: {dateFrom} to {dateTo} / Currency: {currency === "ALL" ? "All Currencies" : currency}
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
