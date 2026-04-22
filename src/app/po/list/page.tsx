@@ -491,6 +491,11 @@ function getStatusBadgeClass(status: string | null | undefined) {
   }
 }
 
+function isCanceledPoStatus(status: string | null | undefined) {
+  const s = (status ?? "").toString().trim().toUpperCase();
+  return s === "CANCELED" || s === "CANCELLED";
+}
+
 export default function PurchaseOrderListPage() {
   const router = useRouter();
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
@@ -1083,13 +1088,14 @@ export default function PurchaseOrderListPage() {
 
       for (const it of allSorted) {
         const lines = await fetchLinesForHeaderId(it.id);
+        const includeInTotals = !isCanceledPoStatus(it.status);
 
         let poSum = 0;
 
         if (!lines || lines.length === 0) {
           const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
-          poSum = headerSubtotal;
-          grandSum += headerSubtotal;
+          poSum = includeInTotals ? headerSubtotal : 0;
+          grandSum += poSum;
           totalLines += 1;
 
           const row = sheet.addRow([
@@ -1119,7 +1125,7 @@ export default function PurchaseOrderListPage() {
             it.currency ?? "-",
             "",
             "",
-            headerSubtotal,
+            poSum,
             "",
           ]);
           styleTotal(subtotalRow);
@@ -1149,7 +1155,7 @@ export default function PurchaseOrderListPage() {
           else if (typeof qtyNum === "number" && typeof priceNum === "number")
             amount = qtyNum * priceNum;
 
-          if (typeof amount === "number") poSum += amount;
+          if (includeInTotals && typeof amount === "number") poSum += amount;
 
           const row = sheet.addRow([
             it.poNo,
@@ -1268,13 +1274,14 @@ export default function PurchaseOrderListPage() {
 
       for (const it of allSorted) {
         const lines = await fetchLinesForHeaderId(it.id);
+        const includeInTotals = !isCanceledPoStatus(it.status);
 
         let poSum = 0;
 
         if (!lines || lines.length === 0) {
           totalLines += 1;
           const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
-          poSum = headerSubtotal;
+          poSum = includeInTotals ? headerSubtotal : 0;
 
           body.push([
             it.poNo,
@@ -1302,11 +1309,11 @@ export default function PurchaseOrderListPage() {
             it.currency ?? "-",
             "",
             "",
-            nf2.format(headerSubtotal),
+            nf2.format(poSum),
             "",
           ]);
 
-          grandSum += headerSubtotal;
+          grandSum += poSum;
           continue;
         }
 
@@ -1335,7 +1342,7 @@ export default function PurchaseOrderListPage() {
           else if (typeof qtyNum === "number" && typeof priceNum === "number")
             amount = qtyNum * priceNum;
 
-          if (typeof amount === "number") poSum += amount;
+          if (includeInTotals && typeof amount === "number") poSum += amount;
 
           const showHeaderCols = idx === 0;
 
@@ -1706,7 +1713,7 @@ export default function PurchaseOrderListPage() {
                     <SelectItem value="ALLOCATED">ALLOCATED</SelectItem>
                     <SelectItem value="SHIPPED">SHIPPED</SelectItem>
                     <SelectItem value="CLOSED">CLOSED</SelectItem>
-                    <SelectItem value="CANCELED">CANCELED</SelectItem>
+                    <SelectItem value="CANCELLED">CANCELED</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
