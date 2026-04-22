@@ -98,7 +98,7 @@ export type ExpenseHeaderDraft = {
   fx_rate_to_usd: number | string;
   fx_as_of?: string | null;
   fx_source?: string | null;
-  total_amount_original: number;
+  total_amount_original: number | string;
   scope_type: "PO" | "SHIPMENT" | "LINE" | "FACTORY" | "GENERAL" | "MULTI";
   allocation_method: "BY_REVENUE" | "BY_CBM" | "BY_GW" | "BY_QTY" | "MANUAL" | "NONE";
   note?: string | null;
@@ -115,10 +115,11 @@ function monthStartISO(d: string) {
   return m.toISOString().slice(0, 10);
 }
 
-function calcUsd(currency: string, amountOriginal: number, fx: number | string) {
+function calcUsd(currency: string, amountOriginal: number | string, fx: number | string) {
+  const amountNum = toNumber(amountOriginal);
   const fxNum = toNumber(fx);
-  if (currency === "USD") return amountOriginal;
-  return fxNum > 0 ? amountOriginal / fxNum : 0;
+  if (currency === "USD") return amountNum;
+  return fxNum > 0 ? amountNum / fxNum : 0;
 }
 
 function useDebounced<T>(value: T, delayMs: number) {
@@ -131,6 +132,7 @@ function useDebounced<T>(value: T, delayMs: number) {
 }
 
 const DECIMAL_RE = /^(\d+)?(\.\d{0,6})?$/;
+const MONEY_DECIMAL_RE = /^(\d+)?(\.\d{0,2})?$/;
 
 function siteLabel(s: { code?: string | null; site_name?: string | null; id?: string | null }) {
   const code = String(s.code || "").toUpperCase();
@@ -442,6 +444,7 @@ export default function ExpenseForm({
         fx_rate_to_usd: toNumber(header.fx_rate_to_usd),
         fx_as_of: header.fx_as_of || header.expense_date,
         fx_source: fxManual ? "manual" : (header.fx_source || "frankfurter"),
+        total_amount_original: toNumber(header.total_amount_original),
         total_amount_usd: usdPreview,
         allocations: allocations.map((a) => ({
           target_type: a.target_type,
@@ -643,9 +646,19 @@ export default function ExpenseForm({
             <Input
               inputMode="decimal"
               value={String(header.total_amount_original)}
-              onChange={(e) =>
-                setHeader((p) => ({ ...p, total_amount_original: toNumber(e.target.value) }))
-              }
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "" || MONEY_DECIMAL_RE.test(v)) {
+                  setHeader((p) => ({ ...p, total_amount_original: v }));
+                }
+              }}
+              onBlur={() => {
+                const v = header.total_amount_original;
+                setHeader((p) => ({
+                  ...p,
+                  total_amount_original: v === "" ? 0 : toNumber(v),
+                }));
+              }}
             />
           </div>
 
