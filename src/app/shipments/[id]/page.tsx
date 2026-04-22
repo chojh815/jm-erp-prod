@@ -65,7 +65,12 @@ type ApiResponse = {
   shipment?: any;
   summary?: ShipmentSummary | null;
   lines?: ShipmentLine[];
-  invoice?: any;
+};
+
+type InvoiceLinkResponse = {
+  success: boolean;
+  error?: string;
+  invoice?: any | null;
 };
 
 type PackingLinkResponse = {
@@ -172,6 +177,21 @@ export default function ShipmentDetailPage() {
     .toString()
     .toUpperCase();
 
+  const loadInvoiceLink = React.useCallback(async () => {
+    if (!shipmentId) return;
+    try {
+      const res = await fetch(`/api/shipments/${shipmentId}/invoice`, { cache: "no-store" });
+      const j: InvoiceLinkResponse = await res.json();
+      if (!res.ok || !j?.success) {
+        setLinkedInvoice(null);
+        return;
+      }
+      setLinkedInvoice(j.invoice ?? null);
+    } catch {
+      setLinkedInvoice(null);
+    }
+  }, [shipmentId]);
+
   const loadPackingLink = React.useCallback(async () => {
     if (!shipmentId) return;
     try {
@@ -206,15 +226,14 @@ export default function ShipmentDetailPage() {
         setDraftLines(loadedLines as any);
       }
 
-      setLinkedInvoice((j as any).invoice ?? null);
-      await loadPackingLink();
+      await Promise.all([loadInvoiceLink(), loadPackingLink()]);
     } catch (e: any) {
       console.error(e);
       alert(e?.message || "Load error");
     } finally {
       setLoading(false);
     }
-  }, [shipmentId, loadPackingLink, editMode]);
+  }, [shipmentId, loadInvoiceLink, loadPackingLink, editMode]);
 
   React.useEffect(() => {
     load();

@@ -138,7 +138,6 @@ export async function GET(_: Request, { params }: { params: { id: string } }) {
       .select("*")
       .eq("shipment_id", shipmentId)
       .eq("is_deleted", false)
-      .eq("is_latest", true)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
