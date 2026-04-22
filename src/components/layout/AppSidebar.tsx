@@ -110,6 +110,16 @@ const SECTION_STYLE: Record<
     dot: "bg-amber-500",
     divider: "border-amber-200",
   },
+  DASHBOARDS: {
+    header: "text-indigo-800",
+    dot: "bg-indigo-500",
+    divider: "border-indigo-200",
+  },
+  FINANCE: {
+    header: "text-rose-800",
+    dot: "bg-rose-500",
+    divider: "border-rose-200",
+  },
 };
 
 function sectionKeyOf(label: string) {
@@ -182,6 +192,8 @@ function ExpandedMenu({
     DEVELOPMENT: "bg-violet-50/70 border-violet-200",
     TRADE: "bg-emerald-50/70 border-emerald-200",
     PRODUCTION: "bg-amber-50/70 border-amber-200",
+    DASHBOARDS: "bg-indigo-50/70 border-indigo-200",
+    FINANCE: "bg-rose-50/70 border-rose-200",
   };
 
   return (
