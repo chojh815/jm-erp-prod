@@ -2,7 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { MENU_SECTIONS } from "@/config/menuConfig";
+import { PERMISSIONS } from "@/config/permissions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -26,16 +26,7 @@ function uniq(arr: string[]) {
 }
 
 function getAllPermissionKeysFromMenu(): string[] {
-  const keys: string[] = [];
-  for (const sec of MENU_SECTIONS) {
-    for (const it of sec.items) {
-      const p: any = (it as any).perm;
-      if (!p) continue;
-      if (Array.isArray(p)) p.forEach((x) => keys.push(String(x)));
-      else keys.push(String(p));
-    }
-  }
-  return uniq(keys).sort();
+  return uniq([...PERMISSIONS].map(String)).sort();
 }
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -168,6 +159,8 @@ export default function AdminUsersPage() {
   }, [selectedUserId, selectedUser?.role]);
 
   function getEffectiveAllowed(perm: string): boolean {
+    if (String(selectedUser?.role || "").toLowerCase() === "admin") return true;
+
     // 개인 override가 있으면 우선
     if (localState.has(perm)) {
       const st = localState.get(perm)!;
@@ -385,7 +378,7 @@ export default function AdminUsersPage() {
             )}
 
             <div className="mt-4 text-xs text-slate-500">
-              * Permission list is auto-generated from <b>menuConfig.ts</b>
+              * Permission list is auto-generated from <b>permissions.ts</b>
             </div>
           </div>
         </div>

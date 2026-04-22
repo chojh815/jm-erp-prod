@@ -134,7 +134,7 @@ export async function GET(_: Request, ctx: { params: { id: string } }) {
         role,
         is_active: prof.is_active ?? true,
       },
-      overrides: role === "admin" ? [] : overrides,
+      overrides,
       base_permissions: effective.base,
       effective_permissions: effective.effective,
       summary: {

@@ -56,7 +56,7 @@ export const MENU_SECTIONS: MenuSection[] = [
       {
         label: "Product Development",
         href: "/dev/product-register",
-        perm: "dev.samples.view",
+        perm: "dev.product.view",
       },
       {
         label: "Costings",
@@ -80,7 +80,7 @@ export const MENU_SECTIONS: MenuSection[] = [
       {
        label: "Sample Requests",
        href: "/sample-requests",
-       perm: "dev.samples.view",
+       perm: "dev.sample_requests.view",
       },
       {
         label: "BOM Library",
