@@ -12,6 +12,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
+import ExcelJS from "exceljs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
 type SummaryRow = {
   vendor_id: string | null;
@@ -737,6 +740,296 @@ export default function VendorDashboardPage() {
     router.push(`/po/list?vendor_id=${encodeURIComponent(id)}`);
   }, [router]);
 
+  function exportFilterText() {
+    const vendorName =
+      vendorFilter === "ALL"
+        ? "All Vendors"
+        : vendorOptions.find((v) => v.id === vendorFilter)?.label || selectedVendorName || vendorFilter;
+    return [
+      dateFrom ? `Date From: ${dateFrom}` : "",
+      dateTo ? `Date To: ${dateTo}` : "",
+      `Vendor: ${vendorName}`,
+      `Production Mode: ${productionMode}`,
+      `Scope: ${scope}`,
+    ].filter(Boolean).join(" | ");
+  }
+
+  function exportKpis() {
+    const revenue = scopedAssignedRows.reduce((s, r) => s + n(r.buyer_revenue), 0);
+    const plannedCost = scopedAssignedRows.reduce((s, r) => s + n(r.planned_vendor_cost_usd), 0);
+    const actualCost = scopedAssignedRows.reduce((s, r) => s + n(r.actual_vendor_cost_usd), 0);
+    const plannedMargin = scopedAssignedRows.reduce((s, r) => s + n(r.planned_margin), 0);
+    const actualMargin = scopedAssignedRows.reduce((s, r) => s + n(r.actual_margin), 0);
+    return [
+      ["Revenue (USD)", revenue],
+      ["Planned Cost (USD)", plannedCost],
+      ["Actual Cost (USD)", actualReady ? actualCost : ""],
+      ["Planned Margin (USD)", plannedMargin],
+      ["Actual Margin (USD)", actualReady ? actualMargin : ""],
+      ["Pending Revenue (USD)", pendingRevenue],
+      ["Pending Planned Cost (USD)", pendingPlannedCost],
+      ["Pending Margin (USD)", pendingPlannedMargin],
+      ["Completed OTD %", assignedCompletedDelivery > 0 ? (assignedOnTimeDelivery / assignedCompletedDelivery) * 100 : ""],
+      ["Active Vendors", scopedAssignedRows.length],
+      ["Pending Vendors", scopedAssignedRows.filter((r) => n(r.pending_qty) > 0).length],
+      ["Late Vendors", scopedAssignedRows.filter((r) => n(r.late_count) > 0).length],
+      ["Ordered Qty", scopedAssignedRows.reduce((s, r) => s + n(r.ordered_qty), 0)],
+      ["Shipped Qty", scopedAssignedRows.reduce((s, r) => s + n(r.shipped_qty), 0)],
+      ["Pending Qty", scopedAssignedRows.reduce((s, r) => s + n(r.pending_qty), 0)],
+      ["Unassigned Revenue (USD)", unassignedRevenue],
+    ] as [string, string | number][];
+  }
+
+  function handleExportExcel() {
+    if (scopedAssignedRows.length === 0 && ordersRows.length === 0) {
+      toast.info("No data to export");
+      return;
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "JM ERP";
+    workbook.created = new Date();
+    const charcoal = "FF374151";
+    const pale = "FFF3F4F6";
+    const borderColor = "FFD1D5DB";
+    const border = { style: "thin", color: { argb: borderColor } } as const;
+
+    const styleTitle = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.mergeCells(`A1:${lastCol}1`);
+      sheet.getCell("A1").value = title;
+      sheet.getCell("A1").font = { bold: true, size: 18, color: { argb: "FF111827" } };
+      sheet.getRow(1).height = 28;
+      sheet.mergeCells(`A2:${lastCol}2`);
+      sheet.getCell("A2").value = `Filters: ${exportFilterText()}`;
+      sheet.getCell("A2").font = { color: { argb: "FF4B5563" } };
+    };
+
+    const styleHeader = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: charcoal } };
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      });
+    };
+
+    const styleBody = (row: ExcelJS.Row, numericColumns: number[], moneyColumns: number[], pctColumns: number[]) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { vertical: "middle", wrapText: true };
+        if (numericColumns.includes(colNumber) || moneyColumns.includes(colNumber) || pctColumns.includes(colNumber)) {
+          cell.alignment = { horizontal: "right", vertical: "middle" };
+        }
+        if (numericColumns.includes(colNumber)) cell.numFmt = "#,##0.##";
+        if (moneyColumns.includes(colNumber)) cell.numFmt = '$#,##0.00;[Red]-$#,##0.00';
+        if (pctColumns.includes(colNumber)) cell.numFmt = "0.0%";
+      });
+    };
+
+    const summarySheet = workbook.addWorksheet("Summary", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(summarySheet, "Vendor Dashboard", "D");
+    const kpiHeader = summarySheet.addRow(["Metric", "Value", "Metric", "Value"]);
+    styleHeader(kpiHeader);
+    const kpiPairs = exportKpis();
+    for (let i = 0; i < kpiPairs.length; i += 2) {
+      const row = summarySheet.addRow([
+        kpiPairs[i]?.[0] || "",
+        kpiPairs[i]?.[1] ?? "",
+        kpiPairs[i + 1]?.[0] || "",
+        kpiPairs[i + 1]?.[1] ?? "",
+      ]);
+      styleBody(row, [2, 4], [], []);
+      const leftMetric = String(kpiPairs[i]?.[0] || "");
+      const rightMetric = String(kpiPairs[i + 1]?.[0] || "");
+      row.getCell(2).numFmt = leftMetric.includes("(USD)") ? '$#,##0.00;[Red]-$#,##0.00' : leftMetric.includes("%") ? "0.0" : "#,##0.##";
+      row.getCell(4).numFmt = rightMetric.includes("(USD)") ? '$#,##0.00;[Red]-$#,##0.00' : rightMetric.includes("%") ? "0.0" : "#,##0.##";
+    }
+    summarySheet.columns = [{ width: 28 }, { width: 18 }, { width: 28 }, { width: 18 }];
+
+    const addSummaryTable = (name: string, title: string, tableRows: SummaryRow[]) => {
+      const sheet = workbook.addWorksheet(name, { views: [{ state: "frozen", ySplit: 4 }] });
+      styleTitle(sheet, title, "N");
+      styleHeader(sheet.addRow([
+        "Vendor", "Vendor Code", "POs", "Buyers", "Ordered Qty", "Shipped Qty", "Pending Qty",
+        "Revenue", "Planned Cost", "Actual Cost", "Planned Margin", "Planned %", "OTD %", "Avg Delay",
+      ]));
+      for (const r of tableRows) {
+        styleBody(sheet.addRow([
+          safeText(r.vendor_name) || "(No Vendor)",
+          safeText(r.vendor_code) || "-",
+          n(r.po_count),
+          n(r.buyer_count),
+          n(r.ordered_qty),
+          n(r.shipped_qty),
+          n(r.pending_qty),
+          n(r.buyer_revenue),
+          n(r.planned_vendor_cost_usd),
+          n(r.actual_vendor_cost_usd),
+          n(r.planned_margin),
+          Number.isFinite(Number(r.planned_margin_pct)) ? n(r.planned_margin_pct) / 100 : "",
+          Number.isFinite(Number(r.otd_pct)) ? n(r.otd_pct) / 100 : "",
+          Number.isFinite(Number(r.avg_delay_days)) ? n(r.avg_delay_days) : "",
+        ]), [3, 4, 5, 6, 7, 14], [8, 9, 10, 11], [12, 13]);
+      }
+      sheet.columns = [
+        { width: 28 }, { width: 14 }, { width: 10 }, { width: 10 }, { width: 14 }, { width: 14 }, { width: 14 },
+        { width: 16 }, { width: 16 }, { width: 16 }, { width: 17 }, { width: 12 }, { width: 12 }, { width: 12 },
+      ];
+    };
+
+    addSummaryTable("Overview", "Vendor Overview", visibleOverviewRows);
+    addSummaryTable("Pending", "Vendor Pending", visiblePendingRows);
+    addSummaryTable("Margin", "Vendor Margin", visibleMarginRows);
+    addSummaryTable("Delivery", "Vendor Delivery", visibleDeliveryRows);
+
+    const ordersSheet = workbook.addWorksheet("Orders", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(ordersSheet, "Vendor Orders Detail", "P");
+    styleHeader(ordersSheet.addRow([
+      "Vendor", "PO No", "Buyer", "Brand", "JM Style", "Buyer Style", "Ordered Qty", "Shipped Qty",
+      "Pending Qty", "Revenue", "Planned Cost", "Planned Margin", "Req Ship Date", "Due Date", "Ready Date", "Status",
+    ]));
+    for (const r of ordersRows) {
+      styleBody(ordersSheet.addRow([
+        safeText(r.vendor_name) || "(No Vendor)",
+        safeText(r.po_no) || "-",
+        safeText(r.buyer_name) || "-",
+        safeText(r.brand) || "-",
+        safeText(r.jm_style_no) || "-",
+        safeText(r.buyer_style_no) || "-",
+        n(r.ordered_qty),
+        n(r.shipped_qty),
+        n(r.pending_qty),
+        n(r.buyer_revenue),
+        n(r.planned_vendor_cost_usd),
+        n(r.planned_margin),
+        fmtDate(r.requested_ship_date),
+        fmtDate(r.vendor_due_date),
+        fmtDate(r.vendor_ready_date),
+        safeText(r.vendor_delivery_status).toUpperCase() || "PENDING",
+      ]), [7, 8, 9], [10, 11, 12], []);
+    }
+    ordersSheet.columns = [
+      { width: 28 }, { width: 16 }, { width: 22 }, { width: 18 }, { width: 16 }, { width: 16 }, { width: 14 }, { width: 14 },
+      { width: 14 }, { width: 16 }, { width: 16 }, { width: 17 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 },
+    ];
+
+    const rankingsSheet = workbook.addWorksheet("Rankings");
+    styleTitle(rankingsSheet, "Vendor Rankings", "D");
+    const addRankingBlock = (title: string, rankingRows: RankingRow[], valueLabel: string, value: (r: RankingRow) => any) => {
+      rankingsSheet.addRow([]);
+      const section = rankingsSheet.addRow([title]);
+      section.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+      section.getCell(1).font = { bold: true };
+      styleHeader(rankingsSheet.addRow(["Vendor", valueLabel, "Revenue", "Margin %"]));
+      for (const r of rankingRows) {
+        styleBody(rankingsSheet.addRow([
+          r.vendor_name,
+          value(r),
+          n(r.buyer_revenue),
+          Number.isFinite(Number(r.planned_margin_pct)) ? n(r.planned_margin_pct) / 100 : "",
+        ]), [2], [3], [4]);
+      }
+    };
+    addRankingBlock("Top Revenue", ranking?.rankings?.by_revenue ?? [], "Revenue", (r) => n(r.buyer_revenue));
+    addRankingBlock("Top Margin %", ranking?.rankings?.by_margin_pct ?? [], "Margin %", (r) => Number.isFinite(Number(r.planned_margin_pct)) ? n(r.planned_margin_pct) / 100 : "");
+    addRankingBlock("Highest Pending", ranking?.rankings?.by_pending_revenue ?? [], "Pending Revenue", (r) => n(r.pending_revenue));
+    addRankingBlock("Worst OTD", ranking?.rankings?.by_otd_asc ?? [], "OTD %", (r) => Number.isFinite(Number(r.otd_pct)) ? n(r.otd_pct) / 100 : "");
+    rankingsSheet.columns = [{ width: 28 }, { width: 18 }, { width: 18 }, { width: 14 }];
+
+    workbook.xlsx.writeBuffer().then((buffer) => {
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vendor-dashboard-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  function handleExportPdf() {
+    if (scopedAssignedRows.length === 0 && ordersRows.length === 0) {
+      toast.info("No data to export");
+      return;
+    }
+
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    doc.setFontSize(18);
+    doc.text("Vendor Dashboard", 40, 40);
+    doc.setFontSize(9);
+    doc.text(`Filters: ${exportFilterText()}`, 40, 58, { maxWidth: 760 });
+
+    const kpiPairs = exportKpis();
+    autoTable(doc, {
+      startY: 76,
+      head: [["Metric", "Value", "Metric", "Value"]],
+      body: Array.from({ length: Math.ceil(kpiPairs.length / 2) }, (_, i) => {
+        const left = kpiPairs[i * 2];
+        const right = kpiPairs[i * 2 + 1];
+        return [
+          left?.[0] || "",
+          typeof left?.[1] === "number" ? fmtMoney(left[1]) : left?.[1] || "-",
+          right?.[0] || "",
+          typeof right?.[1] === "number" ? fmtMoney(right[1]) : right?.[1] || "-",
+        ];
+      }),
+      theme: "grid",
+      styles: { fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [55, 65, 81], textColor: [255, 255, 255], lineColor: [209, 213, 219] },
+      bodyStyles: { lineColor: [209, 213, 219] },
+    });
+
+    autoTable(doc, {
+      startY: (doc as any).lastAutoTable.finalY + 18,
+      head: [["Vendor", "POs", "Ordered", "Shipped", "Pending", "Revenue", "Planned Cost", "Planned Margin", "Planned %", "OTD %"]],
+      body: visibleOverviewRows.map((r) => [
+        safeText(r.vendor_name) || "(No Vendor)",
+        fmtQty(r.po_count),
+        fmtQty(r.ordered_qty),
+        fmtQty(r.shipped_qty),
+        fmtQty(r.pending_qty),
+        fmtMoney(r.buyer_revenue),
+        fmtMoney(r.planned_vendor_cost_usd),
+        fmtMoney(r.planned_margin),
+        fmtPct(r.planned_margin_pct),
+        fmtOtd(r.otd_pct, r.completed_delivery_count),
+      ]),
+      theme: "grid",
+      styles: { fontSize: 7, cellPadding: 3, overflow: "linebreak" },
+      headStyles: { fillColor: [55, 65, 81], textColor: [255, 255, 255], lineColor: [209, 213, 219] },
+      bodyStyles: { lineColor: [209, 213, 219] },
+      columnStyles: { 1: { halign: "right" }, 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" }, 7: { halign: "right" }, 8: { halign: "right" }, 9: { halign: "right" } },
+    });
+
+    autoTable(doc, {
+      startY: (doc as any).lastAutoTable.finalY + 18,
+      head: [["Vendor", "PO No", "Buyer", "Brand", "Style", "Ordered", "Pending", "Revenue", "Planned Margin", "Req Ship", "Due", "Status"]],
+      body: ordersRows.map((r) => [
+        safeText(r.vendor_name) || "(No Vendor)",
+        safeText(r.po_no) || "-",
+        safeText(r.buyer_name) || "-",
+        safeText(r.brand) || "-",
+        safeText(r.jm_style_no) || safeText(r.buyer_style_no) || "-",
+        fmtQty(r.ordered_qty),
+        fmtQty(r.pending_qty),
+        fmtMoney(r.buyer_revenue),
+        fmtMoney(r.planned_margin),
+        fmtDate(r.requested_ship_date),
+        fmtDate(r.vendor_due_date),
+        safeText(r.vendor_delivery_status).toUpperCase() || "PENDING",
+      ]),
+      theme: "grid",
+      styles: { fontSize: 6.5, cellPadding: 3, overflow: "linebreak" },
+      headStyles: { fillColor: [55, 65, 81], textColor: [255, 255, 255], lineColor: [209, 213, 219] },
+      bodyStyles: { lineColor: [209, 213, 219] },
+      columnStyles: { 5: { halign: "right" }, 6: { halign: "right" }, 7: { halign: "right" }, 8: { halign: "right" } },
+    });
+
+    doc.save(`vendor-dashboard-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+
   return (
     <AppShell>
       <div className="space-y-4 p-4">
@@ -832,6 +1125,12 @@ export default function VendorDashboardPage() {
                   disabled={loading}
                 >
                   Reset
+                </Button>
+                <Button variant="outline" onClick={handleExportExcel} disabled={loading}>
+                  Export XLSX
+                </Button>
+                <Button variant="outline" onClick={handleExportPdf} disabled={loading}>
+                  Export PDF
                 </Button>
               </div>
             </div>

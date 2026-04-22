@@ -25,6 +25,7 @@ import {
 import jsPDF from "jspdf";
 // @ts-ignore
 import autoTable from "jspdf-autotable";
+import ExcelJS from "exceljs";
 
 type DevRole = AppRole;
 
@@ -207,6 +208,26 @@ function originCodeToCooText(origin?: string | null) {
   return `MADE IN ${o.replace(/_/g, " ")}`;
 }
 
+function getStampAssetByOrigin(origin?: string | null) {
+  const o = String(origin || "").toUpperCase().trim();
+  if (o.startsWith("CN") || o.includes("CHINA") || o.includes("QINGDAO")) {
+    return { src: "/images/stamp_cn.png", format: "PNG" as const };
+  }
+  return { src: "/images/jm_stamp_vn.jpg", format: "JPEG" as const };
+}
+
+function getContainedSize(
+  naturalWidth: number,
+  naturalHeight: number,
+  maxWidth: number,
+  maxHeight: number
+) {
+  const nw = Number.isFinite(naturalWidth) && naturalWidth > 0 ? naturalWidth : maxWidth;
+  const nh = Number.isFinite(naturalHeight) && naturalHeight > 0 ? naturalHeight : maxHeight;
+  const scale = Math.min(maxWidth / nw, maxHeight / nh, 1);
+  return { width: nw * scale, height: nh * scale };
+}
+
 function fmtCartonRange(from?: any, to?: any) {
   const fRaw =
     from === null || from === undefined || from === "" ? "" : String(from).trim();
@@ -373,6 +394,7 @@ export default function PackingListDetailPage() {
 
   const searchParams = useSearchParams();
   const printedRef = React.useRef(false);
+  const excelRanRef = React.useRef(false);
 
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -489,6 +511,7 @@ export default function PackingListDetailPage() {
 
   const handleSave = React.useCallback(async () => {
     if (!header) return;
+    if (!window.confirm("Do you want to save this packing list?")) return;
     setSaving(true);
     try {
       const normalized = lines
@@ -903,18 +926,27 @@ export default function PackingListDetailPage() {
       doc.setFontSize(11);
       doc.text("Signed by", pageW - marginX, stampY - 4, { align: "right" });
 
+      const stampAsset = getStampAssetByOrigin(header.shipping_origin_code);
       const stampImg = new Image();
-      stampImg.src = "/images/jm_stamp_vn.jpg";
+      stampImg.src = stampAsset.src;
 
       await new Promise<void>((resolve, reject) => {
         stampImg.onload = () => resolve();
         stampImg.onerror = () => reject(new Error("Stamp image load error"));
       });
 
-      const stampW = 60;
-      const stampH = 30;
+      const maxStampW = 60;
+      const maxStampH = 30;
+      const stampSize = getContainedSize(
+        stampImg.naturalWidth,
+        stampImg.naturalHeight,
+        maxStampW,
+        maxStampH
+      );
+      const stampW = stampSize.width;
+      const stampH = stampSize.height;
       const stampX = pageW - marginX - stampW;
-      doc.addImage(stampImg, "JPEG", stampX, stampY, stampW, stampH);
+      doc.addImage(stampImg, stampAsset.format, stampX, stampY, stampW, stampH);
 
       doc.setFontSize(11);
       doc.text("JM International Co.Ltd", pageW - marginX, stampY + stampH + 6, {
@@ -965,6 +997,231 @@ export default function PackingListDetailPage() {
     }
   }, [header, lines, totals, invoiceLink]);
 
+  const handleExcel = React.useCallback(async () => {
+    if (!header) return;
+
+    setExporting(true);
+    try {
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "JM ERP";
+      workbook.created = new Date();
+      const sheet = workbook.addWorksheet("Packing List", {
+        pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+        views: [{ showGridLines: false }],
+      });
+
+      sheet.columns = [
+        { width: 13 }, { width: 15 }, { width: 18 }, { width: 24 },
+        { width: 10 }, { width: 10 }, { width: 10 }, { width: 10 }, { width: 10 },
+      ];
+
+      const border = { style: "thin", color: { argb: "FF000000" } } as const;
+      const lightBorder = { style: "thin", color: { argb: "FF999999" } } as const;
+      const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFF3F7" } } as const;
+
+      const boxRange = (from: string, to: string) => {
+        const fromCell = sheet.getCell(from);
+        const toCell = sheet.getCell(to);
+        for (let rowNo = Number(fromCell.row); rowNo <= Number(toCell.row); rowNo++) {
+          for (let colNo = Number(fromCell.col); colNo <= Number(toCell.col); colNo++) {
+            const cell = sheet.getCell(rowNo, colNo);
+            cell.border = { top: border, left: border, bottom: border, right: border };
+            cell.alignment = { vertical: "top", wrapText: true };
+          }
+        }
+      };
+
+      const shipperName = s(header.shipper_name || "JM International Co.Ltd");
+      const shipperAddr = s(header.shipper_address || "");
+      const packingNo = s(header.packing_list_no) || "packing-list";
+      const packingDate = fmtDate10(header.packing_date) || "-";
+      const invNo = s((header as any).invoice_no) || s(invoiceLink?.invoice_no) || "-";
+      const invDate =
+        fmtDate10((header as any).invoice_date ?? null) ||
+        fmtDate10(invoiceLink?.invoice_date || null) ||
+        "-";
+      const consignee = s(header.consignee_text || "-");
+      const notify = s(header.notify_party_text || "-");
+      const portOfLoading = s(header.port_of_loading || "-");
+      const finalDestination = s(header.final_destination || header.destination || "-");
+      const cooText = s((header as any).coo_text) || originCodeToCooText(header.shipping_origin_code) || "-";
+
+      sheet.mergeCells("A1:I1");
+      sheet.getCell("A1").value = "Packing List";
+      sheet.getCell("A1").font = { bold: true, size: 18 };
+      sheet.getCell("A1").alignment = { horizontal: "center" };
+      sheet.getRow(1).height = 28;
+
+      sheet.mergeCells("A2:D2");
+      sheet.mergeCells("E2:I2");
+      sheet.mergeCells("A3:D3");
+      sheet.mergeCells("E3:I3");
+      sheet.getCell("A2").value = `Buyer: ${header.buyer_name || "-"}`;
+      sheet.getCell("E2").value = `Packing List No: ${packingNo}`;
+      sheet.getCell("A3").value = `Invoice No: ${invNo}`;
+      sheet.getCell("E3").value = `Date: ${packingDate}`;
+      sheet.getCell("E2").alignment = { horizontal: "right" };
+      sheet.getCell("E3").alignment = { horizontal: "right" };
+
+      sheet.mergeCells("A5:D5");
+      sheet.mergeCells("E5:I5");
+      sheet.mergeCells("A6:D7");
+      sheet.mergeCells("E6:I7");
+      sheet.getCell("A5").value = "Shipper / Exporter";
+      sheet.getCell("E5").value = "Packing List Info";
+      sheet.getCell("A6").value = [shipperName, shipperAddr].filter(Boolean).join("\n");
+      sheet.getCell("E6").value = `Packing List No: ${packingNo}\nPacking Date: ${packingDate}\nInvoice No: ${invNo}\nInvoice Date: ${invDate}`;
+      boxRange("A5", "I7");
+
+      sheet.mergeCells("A9:D9");
+      sheet.mergeCells("E9:I9");
+      sheet.mergeCells("A10:D12");
+      sheet.mergeCells("E10:I12");
+      sheet.getCell("A9").value = "Consignee";
+      sheet.getCell("E9").value = "Notify Party";
+      sheet.getCell("A10").value = consignee;
+      sheet.getCell("E10").value = notify;
+      boxRange("A9", "I12");
+
+      sheet.mergeCells("A14:D14");
+      sheet.mergeCells("E14:I14");
+      sheet.mergeCells("A15:D15");
+      sheet.mergeCells("E15:I15");
+      sheet.getCell("A14").value = "Port of Loading";
+      sheet.getCell("E14").value = "Final Destination";
+      sheet.getCell("A15").value = portOfLoading;
+      sheet.getCell("E15").value = finalDestination;
+      boxRange("A14", "I15");
+
+      sheet.mergeCells("A17:I17");
+      sheet.mergeCells("A18:I19");
+      sheet.getCell("A17").value = "COO / Certification";
+      sheet.getCell("A18").value = `${cooText}\nWE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.`;
+      boxRange("A17", "I19");
+
+      for (const addr of ["A5", "E5", "A9", "E9", "A14", "E14", "A17"]) {
+        sheet.getCell(addr).font = { bold: true };
+        sheet.getCell(addr).fill = headerFill;
+      }
+
+      const tableStart = 21;
+      const tableHeader = ["C/T No", "PO #", "Style #", "Description", "Cartons", "Qty/CTN", "NW/CTN", "GW/CTN", "CBM/CTN"];
+      const headerRow = sheet.getRow(tableStart);
+      headerRow.values = tableHeader;
+      headerRow.eachCell((cell) => {
+        cell.fill = headerFill;
+        cell.font = { bold: true };
+        cell.border = { top: lightBorder, left: lightBorder, bottom: lightBorder, right: lightBorder };
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      });
+
+      const alive = lines.filter((l) => !l.is_deleted).map(recomputeLine);
+      let rowNo = tableStart + 1;
+      for (const g of groupByPoForPdf(alive)) {
+        for (const l of g.lines) {
+          const cartons = n(l.cartons, 0);
+          const qtyPerCtn = cartons > 0 ? Math.round(n(l.qty, 0) / cartons) : 0;
+          const desc = s(l.description);
+          const cleanDesc = desc.toUpperCase().includes("LAST CTN")
+            ? desc.replace(/\s*\(LAST CTN\)\s*/i, "").trim()
+            : desc;
+
+          const row = sheet.getRow(rowNo++);
+          row.values = [
+            fmtCartonRange(l.carton_no_from, l.carton_no_to),
+            s(l.po_no),
+            s(l.style_no),
+            cleanDesc,
+            n(l.cartons, 0),
+            qtyPerCtn,
+            n(l.nw_per_carton, 0),
+            n(l.gw_per_carton, 0),
+            n(l.cbm_per_carton, 0),
+          ];
+          row.eachCell((cell, colNumber) => {
+            cell.border = { top: lightBorder, left: lightBorder, bottom: lightBorder, right: lightBorder };
+            cell.alignment = { vertical: "middle", wrapText: true };
+            if (colNumber >= 5) {
+              cell.alignment = { horizontal: "right", vertical: "middle", wrapText: true };
+            }
+            if (colNumber >= 5 && colNumber <= 6) cell.numFmt = "#,##0";
+            if (colNumber >= 7 && colNumber <= 8) cell.numFmt = "#,##0.0";
+            if (colNumber === 9) cell.numFmt = "#,##0.000";
+          });
+        }
+      }
+
+      const totalRowNo = rowNo + 1;
+      sheet.mergeCells(`A${totalRowNo}:D${totalRowNo}`);
+      sheet.getCell(`A${totalRowNo}`).value = "Totals";
+      sheet.getCell(`A${totalRowNo}`).font = { bold: true };
+      sheet.getCell(`A${totalRowNo}`).alignment = { horizontal: "right" };
+      sheet.getCell(totalRowNo, 5).value = totals.totalCartons;
+      sheet.getCell(totalRowNo, 6).value = totals.totalQty;
+      sheet.getCell(totalRowNo, 7).value = totals.totalNW;
+      sheet.getCell(totalRowNo, 8).value = totals.totalGW;
+      sheet.getCell(totalRowNo, 9).value = totals.totalCBM;
+      sheet.getRow(totalRowNo).eachCell((cell, colNumber) => {
+        cell.font = { bold: true };
+        cell.border = { top: lightBorder, left: lightBorder, bottom: lightBorder, right: lightBorder };
+        if (colNumber >= 5) cell.alignment = { horizontal: "right" };
+      });
+      sheet.getCell(totalRowNo, 5).numFmt = "#,##0";
+      sheet.getCell(totalRowNo, 6).numFmt = "#,##0";
+      sheet.getCell(totalRowNo, 7).numFmt = "#,##0.0";
+      sheet.getCell(totalRowNo, 8).numFmt = "#,##0.0";
+      sheet.getCell(totalRowNo, 9).numFmt = "#,##0.000";
+
+      const memo = s(header.memo);
+      const signRowNo = totalRowNo + (memo ? 5 : 4);
+      if (memo) {
+        sheet.mergeCells(totalRowNo + 2, 1, totalRowNo + 3, 9);
+        sheet.getCell(totalRowNo + 2, 1).value = `Remarks\n${memo}`;
+        sheet.getCell(totalRowNo + 2, 1).alignment = { vertical: "top", wrapText: true };
+      }
+
+      sheet.mergeCells(signRowNo, 7, signRowNo, 9);
+      sheet.getCell(signRowNo, 7).value = "Signed by";
+      sheet.getCell(signRowNo, 7).alignment = { horizontal: "center" };
+
+      const stamp = getStampAssetByOrigin(header.shipping_origin_code);
+      try {
+        const stampRes = await fetch(stamp.src);
+        const stampBuffer = await stampRes.arrayBuffer();
+        const imageId = workbook.addImage({
+          buffer: stampBuffer as any,
+          extension: stamp.format === "JPEG" ? "jpeg" : "png",
+        });
+        sheet.addImage(imageId, {
+          tl: { col: 6.65, row: signRowNo },
+          ext: { width: 190, height: 95 },
+        });
+      } catch (e) {
+        console.warn("Failed to add packing list stamp to Excel:", e);
+      }
+
+      sheet.mergeCells(signRowNo + 8, 7, signRowNo + 8, 9);
+      sheet.getCell(signRowNo + 8, 7).value = "JM International Co.Ltd";
+      sheet.getCell(signRowNo + 8, 7).alignment = { horizontal: "center" };
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${packingNo}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to export Excel.");
+    } finally {
+      setExporting(false);
+    }
+  }, [header, lines, totals, invoiceLink]);
+
   // ✅ Auto PDF/Print when opened with ?print=1 OR ?autoPdf=1
   // - print=1   → generate + open print dialog
   // - autoPdf=1 → just generate PDF (no auto print)
@@ -987,6 +1244,23 @@ export default function PackingListDetailPage() {
 
     return () => window.clearTimeout(t);
   }, [searchParams, loading, header, lines, handlePdf]);
+
+  React.useEffect(() => {
+    const ax = searchParams?.get("autoExcel");
+    if (ax !== "1") return;
+
+    if (loading) return;
+    if (!header) return;
+    if (excelRanRef.current) return;
+
+    excelRanRef.current = true;
+
+    const t = window.setTimeout(() => {
+      handleExcel();
+    }, 250);
+
+    return () => window.clearTimeout(t);
+  }, [searchParams, loading, header, lines, handleExcel]);
 
   if (loading) {
     return (
@@ -1036,6 +1310,9 @@ export default function PackingListDetailPage() {
             </Button>
             <Button onClick={handleSave} disabled={saving || exporting || !!header.is_deleted}>
               {saving ? "Saving..." : "Save"}
+            </Button>
+            <Button variant="outline" onClick={handleExcel} disabled={saving || exporting}>
+              {exporting ? "Excel..." : "Excel"}
             </Button>
             <Button onClick={() => handlePdf(false)} disabled={exporting}>
               {exporting ? "PDF..." : "PDF / Print"}

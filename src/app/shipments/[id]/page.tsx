@@ -222,6 +222,7 @@ export default function ShipmentDetailPage() {
 
   async function cancelShipment() {
     if (!shipmentId) return;
+    if (!window.confirm("Do you want to cancel this shipment?")) return;
     try {
       setCancelling(true);
       const res = await fetch(`/api/shipments/${shipmentId}/cancel`, { method: "POST" });
@@ -240,6 +241,7 @@ export default function ShipmentDetailPage() {
 
   const onConfirmShipment = React.useCallback(async () => {
     if (!shipmentId) return;
+    if (!window.confirm("Do you want to confirm this shipment?")) return;
     try {
       setConfirming(true);
       const res = await fetch(`/api/shipments/${shipmentId}/confirm`, { method: "POST" });
@@ -257,6 +259,7 @@ export default function ShipmentDetailPage() {
 
   const onMarkAsShipped = React.useCallback(async () => {
     if (!shipmentId) return;
+    if (!window.confirm("Do you want to mark this shipment as shipped?")) return;
     try {
       setShipping(true);
       const res = await fetch(`/api/shipments/${shipmentId}/ship`, { method: "POST" });
@@ -274,6 +277,7 @@ export default function ShipmentDetailPage() {
 
   const onCreateInvoice = React.useCallback(async () => {
     if (!shipmentId) return;
+    if (!window.confirm("Do you want to create an invoice from this shipment? This may mark the shipment as shipped.")) return;
 
     setCreatingInvoice(true);
     try {
@@ -315,6 +319,7 @@ export default function ShipmentDetailPage() {
 
   const onCreatePackingList = React.useCallback(async () => {
     if (!shipmentId) return;
+    if (!window.confirm("Do you want to create a packing list from this shipment?")) return;
     setCreatingPackingList(true);
     try {
       const res = await fetch(`/api/shipments/${shipmentId}/packing-list`, { method: "POST" });
@@ -482,6 +487,7 @@ export default function ShipmentDetailPage() {
 
   const saveEdits = async () => {
     if (!shipmentId) return;
+    if (!window.confirm("Do you want to save shipment edits? Removed lines will be saved as deleted.")) return;
     setSaving(true);
     try {
       const payload = {
@@ -511,6 +517,7 @@ export default function ShipmentDetailPage() {
 
       setEditMode(false);
       await load();
+      alert("Saved.");
     } catch (e: any) {
       alert(e?.message || "Save failed.");
     } finally {

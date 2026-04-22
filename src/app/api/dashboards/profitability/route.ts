@@ -95,6 +95,181 @@ function withEffectiveCost(row: ProfitRow): ProfitRow {
   };
 }
 
+async function loadFallbackRows(args: {
+  start: string;
+  end: string;
+  buyerIds: string[];
+  vendorIds: string[];
+  siteIds: string[];
+  q: string;
+  limit: number;
+}): Promise<ProfitRow[]> {
+  const buyerFilter = args.buyerIds.length && args.buyerIds[0] !== "ALL" ? args.buyerIds : null;
+  const vendorFilter = args.vendorIds.length && args.vendorIds[0] !== "ALL" ? args.vendorIds : null;
+  const siteFilter = args.siteIds.length && args.siteIds[0] !== "ALL" ? args.siteIds : null;
+
+  let invQ = supabaseAdmin
+    .from("invoice_headers")
+    .select("id, invoice_no, invoice_date, buyer_id, buyer_name, buyer_code, currency, total_amount, is_deleted")
+    .eq("is_deleted", false)
+    .order("invoice_date", { ascending: false })
+    .limit(args.limit);
+
+  if (args.start) invQ = invQ.gte("invoice_date", args.start);
+  if (args.end) invQ = invQ.lte("invoice_date", args.end);
+  if (buyerFilter) invQ = invQ.in("buyer_id", buyerFilter);
+
+  const { data: invoices, error: invErr } = await invQ;
+  if (invErr) throw invErr;
+
+  const invoiceIds = (invoices || []).map((x: any) => x.id).filter(Boolean);
+  if (!invoiceIds.length) return [];
+
+  const { data: lines, error: lineErr } = await supabaseAdmin
+    .from("invoice_lines")
+    .select("id, invoice_id, po_header_id, po_line_id, po_no, style_no, buyer_style_no, description, qty, unit_price, amount, is_deleted")
+    .in("invoice_id", invoiceIds)
+    .eq("is_deleted", false);
+  if (lineErr) throw lineErr;
+
+  const poLineIds = Array.from(new Set((lines || []).map((x: any) => x.po_line_id).filter(Boolean)));
+  const poHeaderIds = Array.from(new Set((lines || []).map((x: any) => x.po_header_id).filter(Boolean)));
+
+  const [{ data: poLines, error: poLineErr }, { data: poHeaders, error: poHeadErr }, { data: wsLines, error: wsErr }] =
+    await Promise.all([
+      poLineIds.length
+        ? supabaseAdmin
+            .from("po_lines")
+            .select("id, po_header_id, jm_style_no, buyer_style_no, jm_style_code, buyer_style_code, description, qty")
+            .in("id", poLineIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      poHeaderIds.length
+        ? supabaseAdmin
+            .from("po_headers")
+            .select("id, buyer_brand_name, site_id")
+            .in("id", poHeaderIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      poLineIds.length
+        ? supabaseAdmin
+            .from("work_sheet_lines")
+            .select("po_line_id, vendor_id, vendor_unit_cost_usd, actual_unit, actual_amt, actual_vendor_unit_cost_usd")
+            .in("po_line_id", poLineIds)
+            .eq("is_deleted", false)
+        : Promise.resolve({ data: [], error: null } as any),
+    ]);
+
+  if (poLineErr) throw poLineErr;
+  if (poHeadErr) throw poHeadErr;
+  if (wsErr) throw wsErr;
+
+  const vendorIds = Array.from(new Set((wsLines || []).map((x: any) => x.vendor_id).filter(Boolean)));
+  const [{ data: vendors, error: vendorErr }, { data: expenses, error: expenseErr }] = await Promise.all([
+    vendorIds.length
+      ? supabaseAdmin.from("companies").select("id, company_name, name").in("id", vendorIds)
+      : Promise.resolve({ data: [], error: null } as any),
+    poLineIds.length || poHeaderIds.length
+      ? supabaseAdmin
+          .from("expense_allocations")
+          .select("po_header_id, po_line_id, amount_usd, is_deleted")
+          .eq("is_deleted", false)
+          .or(
+            [
+              poLineIds.length ? `po_line_id.in.(${poLineIds.join(",")})` : "",
+              poHeaderIds.length ? `po_header_id.in.(${poHeaderIds.join(",")})` : "",
+            ]
+              .filter(Boolean)
+              .join(",")
+          )
+      : Promise.resolve({ data: [], error: null } as any),
+  ]);
+
+  if (vendorErr) throw vendorErr;
+  if (expenseErr) throw expenseErr;
+
+  const invById = new Map((invoices || []).map((x: any) => [x.id, x]));
+  const poLineById = new Map((poLines || []).map((x: any) => [x.id, x]));
+  const poHeaderById = new Map((poHeaders || []).map((x: any) => [x.id, x]));
+  const wsByPoLine = new Map((wsLines || []).map((x: any) => [x.po_line_id, x]));
+  const vendorById = new Map((vendors || []).map((x: any) => [x.id, x]));
+
+  const expenseByPoLine = new Map<string, number>();
+  const expenseByPoHeader = new Map<string, number>();
+  for (const e of expenses || []) {
+    if (e.po_line_id) expenseByPoLine.set(e.po_line_id, (expenseByPoLine.get(e.po_line_id) || 0) + num(e.amount_usd));
+    if (e.po_header_id) expenseByPoHeader.set(e.po_header_id, (expenseByPoHeader.get(e.po_header_id) || 0) + num(e.amount_usd));
+  }
+
+  const rows: ProfitRow[] = [];
+  const query = args.q.toLowerCase();
+
+  for (const line of lines || []) {
+    const inv: any = invById.get(line.invoice_id);
+    if (!inv) continue;
+
+    const poLine: any = line.po_line_id ? poLineById.get(line.po_line_id) : null;
+    const poHeader: any = line.po_header_id ? poHeaderById.get(line.po_header_id) : null;
+    const ws: any = line.po_line_id ? wsByPoLine.get(line.po_line_id) : null;
+    const vendor: any = ws?.vendor_id ? vendorById.get(ws.vendor_id) : null;
+
+    if (vendorFilter && (!ws?.vendor_id || !vendorFilter.includes(String(ws.vendor_id)))) continue;
+    if (siteFilter && (!poHeader?.site_id || !siteFilter.includes(String(poHeader.site_id)))) continue;
+
+    const hay = [
+      inv.invoice_no,
+      line.po_no,
+      line.style_no,
+      line.buyer_style_no,
+      poLine?.jm_style_no,
+      poLine?.buyer_style_no,
+      poLine?.jm_style_code,
+      poLine?.buyer_style_code,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    if (query && !hay.includes(query)) continue;
+
+    const qty = num(line.qty) || num(poLine?.qty);
+    const plannedUnit = num(ws?.vendor_unit_cost_usd);
+    const actualUnit = num(ws?.actual_vendor_unit_cost_usd) || num(ws?.actual_unit);
+    const actualAmt = num(ws?.actual_amt);
+
+    rows.push({
+      invoice_id: inv.id ?? null,
+      invoice_no: inv.invoice_no ?? null,
+      invoice_date: inv.invoice_date ?? null,
+      buyer_id: inv.buyer_id ?? null,
+      buyer_name: inv.buyer_name ?? null,
+      buyer_code: inv.buyer_code ?? null,
+      brand_name: poHeader?.buyer_brand_name ?? null,
+      po_no: line.po_no ?? null,
+      jm_style: line.style_no ?? poLine?.jm_style_no ?? poLine?.jm_style_code ?? null,
+      buyer_style: line.buyer_style_no ?? poLine?.buyer_style_no ?? poLine?.buyer_style_code ?? null,
+      vendor_id: ws?.vendor_id ?? null,
+      vendor_name: vendor?.company_name ?? vendor?.name ?? null,
+      site_id: poHeader?.site_id ?? null,
+      site_name: poHeader?.site_id ?? null,
+      currency: inv.currency ?? null,
+      fx_rate_to_usd: null,
+      revenue_local: line.amount == null ? null : num(line.amount),
+      revenue_usd: line.amount == null ? null : num(line.amount),
+      planned_cogs_usd: plannedUnit > 0 && qty > 0 ? plannedUnit * qty : null,
+      actual_cogs_usd: actualAmt > 0 ? actualAmt : actualUnit > 0 && qty > 0 ? actualUnit * qty : null,
+      other_expenses_usd:
+        (line.po_line_id ? expenseByPoLine.get(line.po_line_id) || 0 : 0) +
+        (line.po_header_id ? expenseByPoHeader.get(line.po_header_id) || 0 : 0),
+      factory_overhead_usd: null,
+      profit_usd: null,
+      margin_pct: null,
+      net_profit_usd: null,
+      net_margin_pct: null,
+      actual_coverage: actualAmt > 0 || actualUnit > 0 ? 1 : 0,
+    });
+  }
+
+  return rows.slice(0, args.limit);
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -107,7 +282,7 @@ export async function GET(req: NextRequest) {
     const q = (searchParams.get("q") || "").trim();
     const limit = Math.min(Math.max(Number(searchParams.get("limit") || "500"), 50), 5000);
 
-    const { data, error } = await supabaseAdmin.rpc("profitability_fact", {
+    const rpcArgs = {
       p_start: start || null,
       p_end: end || null,
       p_preset: preset || null,
@@ -116,9 +291,17 @@ export async function GET(req: NextRequest) {
       p_site_ids: siteIds.length && siteIds[0] !== "ALL" ? siteIds : null,
       p_q: q || null,
       p_limit: limit,
-    });
+    };
 
-    if (error) {
+    let { data, error } = await supabaseAdmin.rpc("profitability_fact_app", rpcArgs);
+
+    if (error?.code === "PGRST202") {
+      const legacy = await supabaseAdmin.rpc("profitability_fact", rpcArgs);
+      data = legacy.data;
+      error = legacy.error;
+    }
+
+    if (error && error.code !== "PGRST203") {
       return NextResponse.json(
         {
           ok: false,
@@ -129,7 +312,12 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const rawRows: ProfitRow[] = (data || []).map((r: any) => ({
+    const sourceRows =
+      error?.code === "PGRST203"
+        ? await loadFallbackRows({ start, end, buyerIds, vendorIds, siteIds, q, limit })
+        : data || [];
+
+    const rawRows: ProfitRow[] = (sourceRows || []).map((r: any) => ({
       invoice_id: r.invoice_id ?? null,
       invoice_no: r.invoice_no ?? null,
       invoice_date: r.invoice_date ?? null,

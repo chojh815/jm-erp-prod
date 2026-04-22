@@ -79,6 +79,7 @@ export default function RedQuotationDetailPage() {
 
   async function saveStyleNo() {
     if (!id) return;
+    if (!window.confirm("Do you want to save this RED quotation?")) return;
     setSavingStyle(true);
     setErr(null);
     try {
@@ -91,6 +92,7 @@ export default function RedQuotationDetailPage() {
       if (!r.ok) throw new Error(j?.error || "Save failed");
       // 헤더 최신화
       setQ((prev) => (prev ? { ...prev, style_no: j?.data?.style_no ?? styleNo } : prev));
+      alert("Saved.");
     } catch (e: any) {
       setErr(e?.message || "Save failed");
     } finally {
@@ -254,4 +256,3 @@ async function resizeImageFile(file: File, maxDim = 800, quality = 0.82): Promis
   URL.revokeObjectURL(url);
   return new File([blob], "thumbnail.jpg", { type: "image/jpeg" });
 }
-

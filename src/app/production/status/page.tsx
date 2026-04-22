@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -757,10 +757,9 @@ export default function ProductionStatusPage() {
     }
   };
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
     setExporting(true);
     try {
-      // main sheet
       const headers = [
         "PO No",
         "Buyer",
@@ -782,11 +781,62 @@ export default function ProductionStatusPage() {
         headers.push("Margin %");
       }
 
-      const data = visibleRows.map((r) => {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("Production Status", { views: [{ state: "frozen", ySplit: 5 }] });
+      const headerFill = "FF374151";
+      const sectionFill = "FFF3F4F6";
+      const border = { style: "thin", color: { argb: "FFD1D5DB" } } as const;
+      const moneyFmt = '#,##0.00;[Red]-#,##0.00';
+      const qtyFmt = '#,##0';
+      const pctFmt = '0.0';
+      const idxUnit = showUnitPrice ? headers.indexOf("Unit Price (USD)") : -1;
+      const idxQty = headers.indexOf("Qty");
+      const idxAmt = headers.indexOf("Amount (USD)");
+      const idxUnitCost = showMargin ? headers.indexOf("Unit Cost (USD)") : -1;
+      const idxMargin = showMargin ? headers.indexOf("Margin (USD)") : -1;
+      const idxPct = showMargin ? headers.indexOf("Margin %") : -1;
+
+      sheet.columns = headers.map((h) => {
+        if (h === "Buyer" || h === "Vendor") return { width: 24 };
+        if (h === "Style") return { width: 14 };
+        if (h.includes("Date")) return { width: 14 };
+        if (h.includes("Price") || h.includes("Amount") || h.includes("Cost") || h.includes("Margin"))
+          return { width: 16 };
+        if (h === "PO No") return { width: 16 };
+        return { width: 13 };
+      });
+
+      sheet.mergeCells(1, 1, 1, headers.length);
+      sheet.getCell(1, 1).value = "Production Status";
+      sheet.getCell(1, 1).font = { bold: true, size: 18, color: { argb: "FF111827" } };
+      sheet.getRow(1).height = 26;
+      sheet.mergeCells(2, 1, 2, headers.length);
+      sheet.getCell(2, 1).value = `${buildFiltersText() || "All records"} | Printed: ${nowStamp()} | Rows: ${visibleRows.length}`;
+      sheet.getCell(2, 1).font = { size: 11, color: { argb: "FF334155" } };
+
+      const summary = sheet.addRow(["Summary", "", "", "", "", "", "", "", "", grand.qty, grand.amount]);
+      sheet.mergeCells(summary.number, 1, summary.number, 9);
+      summary.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FF111827" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: sectionFill } };
+        cell.border = { top: border, left: border, bottom: border, right: border };
+      });
+      summary.getCell(10).numFmt = qtyFmt;
+      summary.getCell(11).numFmt = moneyFmt;
+
+      const headerRow = sheet.addRow(headers);
+      headerRow.height = 22;
+      headerRow.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = { top: border, left: border, bottom: border, right: border };
+      });
+
+      visibleRows.forEach((r) => {
         const style = r.style_no ?? r.style ?? "";
         const vendor = r.vendor_name ?? r.vendor ?? "";
         const amount = calcAmount(r);
-
         const base: any[] = [
           r.po_no ?? "",
           r.buyer_name ?? "",
@@ -810,108 +860,70 @@ export default function ProductionStatusPage() {
           base.push(Number(marginPct));
         }
 
-        return base;
-      });
-
-      const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
-
-      // number formats
-      const range = XLSX.utils.decode_range(ws["!ref"] || "A1:A1");
-      const idxUnit = showUnitPrice ? headers.indexOf("Unit Price (USD)") : -1;
-      const idxQty = headers.indexOf("Qty");
-      const idxAmt = headers.indexOf("Amount (USD)");
-      const idxUnitCost = showMargin ? headers.indexOf("Unit Cost (USD)") : -1;
-      const idxMargin = showMargin ? headers.indexOf("Margin (USD)") : -1;
-      const idxPct = showMargin ? headers.indexOf("Margin %") : -1;
-
-      for (let R = 1; R <= range.e.r; R++) {
-        const setNumFmt = (c: number, fmt: string) => {
-          if (c < 0) return;
-          const addr = XLSX.utils.encode_cell({ r: R, c });
-          const cell: any = ws[addr];
-          if (cell && typeof cell.v === "number") {
-            cell.t = "n";
-            cell.z = fmt;
-          }
-        };
-
-        if (idxUnit >= 0) setNumFmt(idxUnit, "0.00");
-        setNumFmt(idxQty, "#,##0");
-        setNumFmt(idxAmt, "0.00");
+        const row = sheet.addRow(base);
+        row.eachCell((cell, col) => {
+          cell.border = { top: border, left: border, bottom: border, right: border };
+          cell.alignment = { vertical: "middle", horizontal: [idxUnit, idxQty, idxAmt, idxUnitCost, idxMargin, idxPct].includes(col - 1) ? "right" : "left" };
+        });
+        if (idxUnit >= 0) row.getCell(idxUnit + 1).numFmt = moneyFmt;
+        row.getCell(idxQty + 1).numFmt = qtyFmt;
+        row.getCell(idxAmt + 1).numFmt = moneyFmt;
         if (showMargin) {
-          setNumFmt(idxUnitCost, "0.00");
-          setNumFmt(idxMargin, "0.00");
-          setNumFmt(idxPct, "0.0");
+          row.getCell(idxUnitCost + 1).numFmt = moneyFmt;
+          row.getCell(idxMargin + 1).numFmt = moneyFmt;
+          row.getCell(idxPct + 1).numFmt = pctFmt;
         }
-      }
-
-      ws["!cols"] = headers.map((h) => {
-        if (h === "Buyer" || h === "Vendor") return { wch: 22 };
-        if (h === "Style") return { wch: 12 };
-        if (h.includes("Date")) return { wch: 12 };
-        if (h.includes("Price") || h.includes("Amount") || h.includes("Cost") || h.includes("Margin"))
-          return { wch: 14 };
-        if (h === "PO No") return { wch: 14 };
-        return { wch: 12 };
       });
 
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Production Status");
+      sheet.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: headers.length } };
 
-      // ✅ Vendor Margin Ranking sheet (ADMIN only)
       if (showMargin) {
         const dim = rankingTab === "vendor" ? "Vendor" : rankingTab === "buyer" ? "Buyer" : "Brand";
         const h2 = ["Rank", dim, "Qty", "Amount (USD)", "Margin (USD)", "Margin %"];
-
         const data =
           rankingTab === "vendor" ? vendorRanking : rankingTab === "buyer" ? buyerRanking : brandRanking;
-
-        const d2 = data.map((v: any, i: number) => [
-          i + 1,
-          rankingTab === "vendor" ? v.vendor : rankingTab === "buyer" ? v.buyer : v.brand,
-          Number(v.qty),
-          Number(v.amount),
-          Number(v.margin),
-          Number(v.marginPct),
-        ]);
-
-        const ws2 = XLSX.utils.aoa_to_sheet([h2, ...d2]);
-
-        // formats
-        const r2 = XLSX.utils.decode_range(ws2["!ref"] || "A1:A1");
-        const idxQty2 = h2.indexOf("Qty");
-        const idxAmt2 = h2.indexOf("Amount (USD)");
-        const idxMar2 = h2.indexOf("Margin (USD)");
-        const idxPct2 = h2.indexOf("Margin %");
-        for (let R = 1; R <= r2.e.r; R++) {
-          const setNumFmt2 = (c: number, fmt: string) => {
-            const addr = XLSX.utils.encode_cell({ r: R, c });
-            const cell: any = ws2[addr];
-            if (cell && typeof cell.v === "number") {
-              cell.t = "n";
-              cell.z = fmt;
-            }
-          };
-          setNumFmt2(idxQty2, "#,##0");
-          setNumFmt2(idxAmt2, "0.00");
-          setNumFmt2(idxMar2, "0.00");
-          setNumFmt2(idxPct2, "0.0");
-        }
-
-        // widths
-        ws2["!cols"] = h2.map((h) => {
-          if (h === dim) return { wch: 28 };
-          if (h.includes("Amount") || h.includes("Margin")) return { wch: 14 };
-          return { wch: 10 };
+        const ws2 = workbook.addWorksheet(`${dim} Ranking`, { views: [{ state: "frozen", ySplit: 3 }] });
+        ws2.columns = [{ width: 10 }, { width: 28 }, { width: 14 }, { width: 16 }, { width: 16 }, { width: 12 }];
+        ws2.mergeCells("A1:F1");
+        ws2.getCell("A1").value = `${dim} Margin Ranking`;
+        ws2.getCell("A1").font = { bold: true, size: 16, color: { argb: "FF111827" } };
+        const hrow = ws2.addRow(h2);
+        hrow.eachCell((cell) => {
+          cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+          cell.alignment = { horizontal: "center", vertical: "middle" };
+          cell.border = { top: border, left: border, bottom: border, right: border };
         });
-
-        XLSX.utils.book_append_sheet(wb, ws2, `${dim} Margin Ranking`);
+        data.forEach((v: any, i: number) => {
+          const row = ws2.addRow([
+            i + 1,
+            rankingTab === "vendor" ? v.vendor : rankingTab === "buyer" ? v.buyer : v.brand,
+            Number(v.qty),
+            Number(v.amount),
+            Number(v.margin),
+            Number(v.marginPct),
+          ]);
+          row.eachCell((cell, col) => {
+            cell.border = { top: border, left: border, bottom: border, right: border };
+            cell.alignment = { vertical: "middle", horizontal: col >= 3 ? "right" : "left" };
+          });
+          row.getCell(3).numFmt = qtyFmt;
+          row.getCell(4).numFmt = moneyFmt;
+          row.getCell(5).numFmt = moneyFmt;
+          row.getCell(6).numFmt = pctFmt;
+        });
       }
 
-      XLSX.writeFile(
-        wb,
-        `production-status-${nowStamp().replace(/[: ]/g, "-")}.xlsx`
-      );
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `production-status-${nowStamp().replace(/[: ]/g, "-")}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     } finally {
       setExporting(false);
     }

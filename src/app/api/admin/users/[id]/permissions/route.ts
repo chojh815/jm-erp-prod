@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { ROLE_DEFAULT_PERMISSIONS } from "@/config/permissions";
+import { PERMISSIONS, ROLE_DEFAULT_PERMISSIONS } from "@/config/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -95,6 +95,11 @@ async function loadOverrides(userId: string) {
 }
 
 function calcEffective(role: string, overrides: Array<{ perm_key: string; allowed: boolean }>) {
+  if (role === "admin") {
+    const all = [...PERMISSIONS].map(String);
+    return { base: all, allow: [], deny: [], effective: all };
+  }
+
   const base = (ROLE_DEFAULT_PERMISSIONS[role] ||
     ROLE_DEFAULT_PERMISSIONS["viewer"] ||
     []) as string[];
@@ -129,7 +134,7 @@ export async function GET(_: Request, ctx: { params: { id: string } }) {
         role,
         is_active: prof.is_active ?? true,
       },
-      overrides,
+      overrides: role === "admin" ? [] : overrides,
       base_permissions: effective.base,
       effective_permissions: effective.effective,
       summary: {

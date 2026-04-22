@@ -12,6 +12,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
+import ExcelJS from "exceljs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { CalendarDays } from "lucide-react";
 
 function fmtMoney(v: any) {
   const n = Number(v ?? 0);
@@ -96,6 +100,8 @@ export default function ExpectedProfitabilityPage() {
   const [editing, setEditing] = React.useState<Row | null>(null);
   const [extraRows, setExtraRows] = React.useState<ExtraCostRow[]>([]);
   const [savingExtra, setSavingExtra] = React.useState(false);
+  const startDateRef = React.useRef<HTMLInputElement>(null);
+  const endDateRef = React.useRef<HTMLInputElement>(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -168,6 +174,252 @@ export default function ExpectedProfitabilityPage() {
     [extraRows]
   );
 
+  function exportFilterText() {
+    const buyerName = buyers.find((b) => b.id === buyerId)?.name;
+    const parts = [
+      q.trim() ? `Search: ${q.trim()}` : "",
+      buyerId !== "ALL" ? `Buyer: ${buyerName || buyerId}` : "",
+      brand.trim() ? `Brand: ${brand.trim()}` : "",
+      start ? `Order Start: ${start}` : "",
+      end ? `Order End: ${end}` : "",
+      marginMin.trim() ? `Min Margin: ${marginMin.trim()}%` : "",
+      marginMax.trim() ? `Max Margin: ${marginMax.trim()}%` : "",
+      missingOnly ? "Missing planned cost only" : "",
+    ].filter(Boolean);
+    return parts.length ? parts.join(" | ") : "All records";
+  }
+
+  function plannedCostSource(row: Row) {
+    if (!row.has_planned_cost) return "No Cost";
+    const currency = row.source_cost_currency || "USD";
+    const fx = Number(row.source_fx_rate_to_usd ?? 1);
+    return Number.isFinite(fx) && fx !== 1 ? `${currency} to USD @ ${fx.toFixed(4)}` : currency;
+  }
+
+  function openDatePicker(ref: React.RefObject<HTMLInputElement>) {
+    const input = ref.current;
+    if (!input) return;
+    input.focus();
+    (input as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
+  }
+
+  async function handleExportExcel() {
+    if (rows.length === 0) {
+      toast.info("No data to export");
+      return;
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "JM ERP";
+    workbook.created = new Date();
+    const sheet = workbook.addWorksheet("Expected Margin", {
+      views: [{ state: "frozen", ySplit: 7 }],
+    });
+
+    const charcoal = "FF374151";
+    const pale = "FFF3F4F6";
+    const borderColor = "FFD1D5DB";
+    const border = { style: "thin", color: { argb: borderColor } } as const;
+
+    sheet.mergeCells("A1:P1");
+    sheet.getCell("A1").value = "Expected Margin";
+    sheet.getCell("A1").font = { bold: true, size: 18, color: { argb: "FF111827" } };
+    sheet.getCell("A1").alignment = { vertical: "middle" };
+    sheet.getRow(1).height = 28;
+
+    sheet.mergeCells("A2:P2");
+    sheet.getCell("A2").value = `Filters: ${exportFilterText()}`;
+    sheet.getCell("A2").font = { color: { argb: "FF4B5563" } };
+
+    const summaryHeader = sheet.addRow([
+      "Expected Revenue",
+      "Expected COGS",
+      "Expected Margin",
+      "Avg Margin %",
+      "Missing Cost Lines",
+      "Rows",
+    ]);
+    summaryHeader.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+      cell.font = { bold: true, color: { argb: "FF111827" } };
+      cell.border = { top: border, left: border, bottom: border, right: border };
+      cell.alignment = { horizontal: "center" };
+    });
+
+    const summaryRow = sheet.addRow([
+      Number(summary?.revenue_usd ?? 0),
+      Number(summary?.expected_cogs ?? 0),
+      Number(summary?.expected_margin ?? 0),
+      Number(summary?.margin_pct ?? 0),
+      Number(summary?.missing_count ?? 0),
+      rows.length,
+    ]);
+    summaryRow.eachCell((cell, colNumber) => {
+      cell.border = { top: border, left: border, bottom: border, right: border };
+      cell.alignment = { horizontal: "right" };
+      if (colNumber <= 3) cell.numFmt = '$#,##0.00;[Red]-$#,##0.00';
+      if (colNumber === 4) cell.numFmt = "0.00%";
+      if (colNumber >= 5) cell.numFmt = "#,##0";
+    });
+
+    sheet.addRow([]);
+    const headerRow = sheet.addRow([
+      "PO",
+      "Buyer",
+      "Brand",
+      "JM Style",
+      "Buyer Style",
+      "Qty",
+      "Unit Price (USD)",
+      "Revenue (USD)",
+      "Planned Unit (USD)",
+      "Planned Cost Source",
+      "Optional Unit (USD)",
+      "Total Unit (USD)",
+      "Expected COGS (USD)",
+      "Expected Margin (USD)",
+      "Margin %",
+      "Missing Planned Cost",
+    ]);
+
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: charcoal } };
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.border = { top: border, left: border, bottom: border, right: border };
+      cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    });
+
+    for (const row of rows) {
+      const excelRow = sheet.addRow([
+        row.po_no || "-",
+        row.buyer_name || "-",
+        row.buyer_brand_name || "-",
+        row.jm_style_no || "-",
+        row.buyer_style_no || "-",
+        Number(row.qty ?? 0),
+        Number(row.unit_price_usd ?? 0),
+        Number(row.revenue_usd ?? 0),
+        row.has_planned_cost ? Number(row.planned_unit_cost ?? 0) : "",
+        plannedCostSource(row),
+        Number(row.optional_unit_cost ?? 0),
+        Number(row.total_unit_cost ?? 0),
+        Number(row.expected_cogs ?? 0),
+        Number(row.expected_margin ?? 0),
+        row.has_planned_cost && row.margin_pct !== null ? Number(row.margin_pct) : "",
+        row.has_planned_cost ? "No" : "Yes",
+      ]);
+
+      excelRow.eachCell((cell, colNumber) => {
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { vertical: "middle", wrapText: true };
+        if ([6, 7, 8, 9, 11, 12, 13, 14, 15].includes(colNumber)) {
+          cell.alignment = { horizontal: "right", vertical: "middle" };
+        }
+        if (colNumber === 6) cell.numFmt = "#,##0.##";
+        if ([7, 8, 9, 11, 12, 13, 14].includes(colNumber)) cell.numFmt = '$#,##0.00;[Red]-$#,##0.00';
+        if (colNumber === 15) cell.numFmt = "0.00%";
+        if (colNumber === 16 && cell.value === "Yes") {
+          cell.font = { color: { argb: "FFB91C1C" }, bold: true };
+        }
+      });
+    }
+
+    sheet.columns = [
+      { width: 15 }, { width: 24 }, { width: 18 }, { width: 16 }, { width: 18 }, { width: 12 },
+      { width: 16 }, { width: 16 }, { width: 18 }, { width: 24 }, { width: 17 }, { width: 16 },
+      { width: 18 }, { width: 19 }, { width: 13 }, { width: 18 },
+    ];
+    sheet.autoFilter = { from: "A6", to: "P6" };
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `expected-margin-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleExportPdf() {
+    if (rows.length === 0) {
+      toast.info("No data to export");
+      return;
+    }
+
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    doc.setFontSize(18);
+    doc.text("Expected Margin", 40, 40);
+    doc.setFontSize(9);
+    doc.text(`Filters: ${exportFilterText()}`, 40, 58, { maxWidth: 760 });
+
+    autoTable(doc, {
+      startY: 76,
+      head: [["Expected Revenue", "Expected COGS", "Expected Margin", "Avg Margin %", "Missing Cost Lines", "Rows"]],
+      body: [[
+        `$${fmtMoney(summary?.revenue_usd)}`,
+        `$${fmtMoney(summary?.expected_cogs)}`,
+        `$${fmtMoney(summary?.expected_margin)}`,
+        fmtPct(summary?.margin_pct),
+        fmtInt(summary?.missing_count),
+        fmtInt(rows.length),
+      ]],
+      theme: "grid",
+      styles: { fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [243, 244, 246], textColor: [17, 24, 39], lineColor: [209, 213, 219] },
+      bodyStyles: { lineColor: [209, 213, 219] },
+    });
+
+    autoTable(doc, {
+      startY: (doc as any).lastAutoTable.finalY + 18,
+      head: [[
+        "PO",
+        "Buyer",
+        "Brand",
+        "Style",
+        "Qty",
+        "Revenue",
+        "Planned Unit",
+        "Optional Unit",
+        "Total Unit",
+        "Expected Margin",
+        "Margin %",
+        "Missing",
+      ]],
+      body: rows.map((row) => [
+        row.po_no || "-",
+        row.buyer_name || "-",
+        row.buyer_brand_name || "-",
+        row.jm_style_no || row.buyer_style_no || "-",
+        fmtQty(row.qty),
+        `$${fmtMoney(row.revenue_usd)}`,
+        row.has_planned_cost ? `$${fmtMoney(row.planned_unit_cost)}` : "No Cost",
+        `$${fmtMoney(row.optional_unit_cost)}`,
+        `$${fmtMoney(row.total_unit_cost)}`,
+        `$${fmtMoney(row.expected_margin)}`,
+        row.has_planned_cost ? fmtPct(row.margin_pct) : "No Cost",
+        row.has_planned_cost ? "No" : "Yes",
+      ]),
+      theme: "grid",
+      styles: { fontSize: 7, cellPadding: 3, overflow: "linebreak" },
+      headStyles: { fillColor: [55, 65, 81], textColor: [255, 255, 255], lineColor: [209, 213, 219] },
+      bodyStyles: { lineColor: [209, 213, 219] },
+      columnStyles: {
+        4: { halign: "right" },
+        5: { halign: "right" },
+        6: { halign: "right" },
+        7: { halign: "right" },
+        8: { halign: "right" },
+        9: { halign: "right" },
+        10: { halign: "right" },
+      },
+    });
+
+    doc.save(`expected-margin-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+
   return (
     <AppShell title="Expected Margin">
       <div className="mx-auto w-full max-w-[1500px] space-y-4 p-4">
@@ -226,11 +478,45 @@ export default function ExpectedProfitabilityPage() {
             </div>
             <div>
               <Label>Order Start</Label>
-              <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+              <div className="relative">
+                <Input
+                  ref={startDateRef}
+                  className="cursor-pointer pr-10"
+                  type="date"
+                  value={start}
+                  onClick={() => openDatePicker(startDateRef)}
+                  onChange={(e) => setStart(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="absolute inset-y-0 right-2 flex items-center text-slate-500 hover:text-slate-900"
+                  onClick={() => openDatePicker(startDateRef)}
+                  aria-label="Open order start calendar"
+                >
+                  <CalendarDays className="h-4 w-4" />
+                </button>
+              </div>
             </div>
             <div>
               <Label>Order End</Label>
-              <Input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+              <div className="relative">
+                <Input
+                  ref={endDateRef}
+                  className="cursor-pointer pr-10"
+                  type="date"
+                  value={end}
+                  onClick={() => openDatePicker(endDateRef)}
+                  onChange={(e) => setEnd(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="absolute inset-y-0 right-2 flex items-center text-slate-500 hover:text-slate-900"
+                  onClick={() => openDatePicker(endDateRef)}
+                  aria-label="Open order end calendar"
+                >
+                  <CalendarDays className="h-4 w-4" />
+                </button>
+              </div>
             </div>
             <div>
               <Label>Min Margin %</Label>
@@ -266,6 +552,12 @@ export default function ExpectedProfitabilityPage() {
 
             <div className="xl:col-span-8 flex gap-2">
               <Button onClick={() => void load()} disabled={loading}>{loading ? "Loading..." : "Search"}</Button>
+              <Button variant="outline" onClick={() => void handleExportExcel()} disabled={loading || rows.length === 0}>
+                Export XLSX
+              </Button>
+              <Button variant="outline" onClick={handleExportPdf} disabled={loading || rows.length === 0}>
+                Export PDF
+              </Button>
             </div>
           </CardContent>
         </Card>

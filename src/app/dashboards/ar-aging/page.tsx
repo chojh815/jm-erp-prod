@@ -14,6 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import ExcelJS from "exceljs";
 
 type DatePreset = "MTD" | "LAST_30" | "LAST_90" | "LAST_12_MONTHS" | "YTD" | "CUSTOM";
 type GroupBy = "buyer" | "buyer_code";
@@ -384,8 +385,122 @@ export default function ArAgingDashboardPage() {
     doc.save(`ar-aging-${new Date().toISOString().slice(0, 10)}.pdf`);
   }
 
+  async function handleExportExcel() {
+    if (!data) return;
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("AR Aging", { views: [{ state: "frozen", ySplit: 4 }] });
+    const headerFill = "FF374151";
+    const sectionFill = "FFF3F4F6";
+    const border = { style: "thin", color: { argb: "FFD1D5DB" } } as const;
+    const moneyFmt = '$#,##0;[Red]-$#,##0';
+
+    sheet.columns = [
+      { width: 28 }, { width: 14 }, { width: 14 }, { width: 14 },
+      { width: 14 }, { width: 14 }, { width: 16 }, { width: 12 },
+    ];
+
+    sheet.mergeCells("A1:H1");
+    sheet.getCell("A1").value = "A/R Aging";
+    sheet.getCell("A1").font = { bold: true, size: 18, color: { argb: "FF111827" } };
+    sheet.getRow(1).height = 26;
+    sheet.mergeCells("A2:H2");
+    sheet.getCell("A2").value = `Period: ${preset}${preset === "CUSTOM" ? ` (${start || ""} ~ ${end || ""})` : ""} | Group: ${groupBy === "buyer_code" ? "Buyer Code" : "Buyer"}`;
+    sheet.getCell("A2").font = { size: 11, color: { argb: "FF334155" } };
+
+    function styleHeader(row: ExcelJS.Row) {
+      row.height = 22;
+      row.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = { top: border, left: border, bottom: border, right: border };
+      });
+    }
+
+    function styleBody(row: ExcelJS.Row, moneyCols: number[] = []) {
+      row.eachCell((cell, col) => {
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { vertical: "middle", horizontal: moneyCols.includes(col) ? "right" : "left" };
+        if (moneyCols.includes(col)) cell.numFmt = moneyFmt;
+      });
+    }
+
+    function addSection(title: string) {
+      const row = sheet.addRow([title]);
+      sheet.mergeCells(row.number, 1, row.number, 8);
+      row.getCell(1).font = { bold: true, size: 13, color: { argb: "FF111827" } };
+      row.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: sectionFill } };
+      row.getCell(1).border = { top: border, left: border, bottom: border, right: border };
+      sheet.addRow([]);
+    }
+
+    sheet.addRow([]);
+    addSection("Summary");
+    const summaryHeader = sheet.addRow(["Current", "1-30", "31-60", "61-90", "90+", "Total A/R", "Invoices"]);
+    styleHeader(summaryHeader);
+    const summaryRow = sheet.addRow([
+      data.buckets.current,
+      data.buckets.b1_30,
+      data.buckets.b31_60,
+      data.buckets.b61_90,
+      data.buckets.b90_plus,
+      data.buckets.total,
+      data.buckets.invoice_count || 0,
+    ]);
+    styleBody(summaryRow, [1, 2, 3, 4, 5, 6]);
+
+    sheet.addRow([]);
+    addSection("A/R Aging by Buyer");
+    const agingHeader = sheet.addRow([groupBy === "buyer_code" ? "Buyer Code" : "Buyer", "Current", "1-30", "31-60", "61-90", "90+", "Total", "Invoices"]);
+    styleHeader(agingHeader);
+    (data.rows || []).forEach((r) => {
+      const row = sheet.addRow([
+        groupBy === "buyer_code" ? (r.buyer_code || "—") : (r.buyer_name || r.buyer_code || "—"),
+        r.current,
+        r.b1_30,
+        r.b31_60,
+        r.b61_90,
+        r.b90_plus,
+        r.total,
+        r.invoice_count || 0,
+      ]);
+      styleBody(row, [2, 3, 4, 5, 6, 7]);
+    });
+
+    sheet.addRow([]);
+    addSection("Top Overdue Invoices");
+    const overdueHeader = sheet.addRow(["Invoice", "Buyer", "Due Date", "Days", "Balance", "Invoice Date", "Term Days"]);
+    styleHeader(overdueHeader);
+    (data.top_overdue_invoices || []).forEach((r) => {
+      const row = sheet.addRow([
+        r.invoice_no || "—",
+        r.buyer_name || r.buyer_code || "—",
+        r.due_date || "—",
+        r.overdue_days,
+        r.balance_usd,
+        r.invoice_date || "—",
+        r.payment_term_days,
+      ]);
+      styleBody(row, [5]);
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `ar-aging-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  }
+
   const headerRight = (
     <div className="flex items-center gap-2">
+      <Button variant="secondary" onClick={handleExportExcel} disabled={loading || !data}>
+        Export Excel
+      </Button>
       <Button variant="secondary" onClick={handleExportPdf} disabled={loading || !data}>
         Export PDF
       </Button>

@@ -21,7 +21,7 @@ import { Separator } from "@/components/ui/separator";
 
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 import {
   ResponsiveContainer,
@@ -120,6 +120,20 @@ function parseYearMonth(dateStr: string) {
   return { y, m };
 }
 
+function toDateInputValue(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function oneYearBefore(dateStr: string) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setFullYear(dt.getFullYear() - 1);
+  return toDateInputValue(dt);
+}
+
 function ytdRange(endMonthStart: string) {
   // endMonthStart is YYYY-MM-01
   const { y, m } = parseYearMonth(endMonthStart);
@@ -154,17 +168,8 @@ export default function PerformanceDashboardPage() {
   const [topMetric, setTopMetric] = React.useState<TopMetric>("combined");
   const [viewMode, setViewMode] = React.useState<ViewMode>("BY_ENTITY");
 
-  const [start, setStart] = React.useState<string>(() => {
-    const d = new Date();
-    d.setUTCMonth(d.getUTCMonth() - 11);
-    d.setUTCDate(1);
-    return d.toISOString().slice(0, 10);
-  });
-  const [end, setEnd] = React.useState<string>(() => {
-    const d = new Date();
-    d.setUTCDate(1);
-    return d.toISOString().slice(0, 10);
-  });
+  const [start, setStart] = React.useState<string>(() => oneYearBefore(toDateInputValue(new Date())));
+  const [end, setEnd] = React.useState<string>(() => toDateInputValue(new Date()));
 
   // Multi-select filters
   const [allBuyers, setAllBuyers] = React.useState(true);
@@ -479,131 +484,157 @@ export default function PerformanceDashboardPage() {
     return arr.slice(0, 10);
   }, [monthly, dimension, topMetric]);
 
-  function exportExcel() {
+  async function exportExcel() {
     const isCombined = viewMode === "COMBINED";
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Report", { views: [{ state: "frozen", ySplit: 4 }] });
+    const teal = "FF18B99A";
+    const pale = "FFEFFAF7";
+    const border = { style: "thin", color: { argb: "FFD9E2EC" } } as const;
+    const moneyFmt = '#,##0;[Red]-#,##0';
 
-    const sheetMonthly: any[] = isCombined
-      ? combinedMonthly.map((r) => ({
-          ViewMode: viewMode,
-          Dimension: dimension,
-          Name: "Combined Total",
-          Month: monthLabel(r.month_start),
-          Orders_USD: Number(r.order_usd || 0),
-          Orders_YoY_Pct: r.order_yoy_pct ?? null,
-          Orders_MoM_Pct: r.order_mom_pct ?? null,
-          Shipping_USD: Number(r.ship_usd || 0),
-          Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
-          Shipping_MoM_Pct: r.ship_mom_pct ?? null,
-        }))
-      : monthlyGrouped.flatMap(([name, list]) =>
-          list
-            .slice()
-            .sort((a, b) => a.month_start.localeCompare(b.month_start))
-            .map((r) => ({
-              ViewMode: viewMode,
-              Dimension: dimension,
-              Name: name,
-              Month: monthLabel(r.month_start),
-              Orders_USD: Number(r.order_usd || 0),
-              Orders_YoY_Pct: r.order_yoy_pct ?? null,
-              Orders_MoM_Pct: r.order_mom_pct ?? null,
-              Shipping_USD: Number(r.ship_usd || 0),
-              Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
-              Shipping_MoM_Pct: r.ship_mom_pct ?? null,
-            }))
-        );
+    sheet.columns = [
+      { width: 24 }, { width: 16 }, { width: 13 }, { width: 13 },
+      { width: 16 }, { width: 13 }, { width: 13 }, { width: 16 },
+    ];
 
-    const sheetYearly: any[] = isCombined
-      ? combinedYearly.map((r) => ({
-          ViewMode: viewMode,
-          Dimension: dimension,
-          Name: "Combined Total",
-          Year: r.year,
-          Orders_USD: Number(r.order_usd || 0),
-          Orders_YoY_Pct: r.order_yoy_pct ?? null,
-          Shipping_USD: Number(r.ship_usd || 0),
-          Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
-        }))
-      : yearlyGrouped.flatMap(([name, list]) =>
-          (list as YearlyRow[])
-            .slice()
-            .sort((a, b) => a.year - b.year)
-            .map((r) => ({
-              ViewMode: viewMode,
-              Dimension: dimension,
-              Name: name,
-              Year: r.year,
-              Orders_USD: Number(r.order_usd || 0),
-              Orders_YoY_Pct: r.order_yoy_pct ?? null,
-              Shipping_USD: Number(r.ship_usd || 0),
-              Shipping_YoY_Pct: r.ship_yoy_pct ?? null,
-            }))
-        );
+    const scopeParts: string[] = [];
+    scopeParts.push(`View: ${isCombined ? "Combined Total" : "By Entity"}`);
+    scopeParts.push(compareMode === "YTD" ? "Mode: YTD" : "Mode: Range");
+    scopeParts.push(`Range: ${start.slice(0, 7)} ~ ${end.slice(0, 7)}`);
+    if (!allBuyers && buyerIds.length) scopeParts.push(`Buyers: ${buyerIds.length}`);
+    if (!allBrands && brandNames.length) scopeParts.push(`Brands: ${brandNames.length}`);
 
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetMonthly), "Monthly");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYearly), "Yearly");
+    sheet.mergeCells("A1:H1");
+    sheet.getCell("A1").value = `Performance (${dimension === "buyer" ? "Buyer" : "Brand"})${isCombined ? " - Combined Total" : ""}`;
+    sheet.getCell("A1").font = { bold: true, size: 18, color: { argb: "FF111827" } };
+    sheet.getRow(1).height = 26;
+    sheet.mergeCells("A2:H2");
+    sheet.getCell("A2").value = scopeParts.join(" | ");
+    sheet.getCell("A2").font = { size: 11, color: { argb: "FF334155" } };
 
-    if (!isCombined) {
-      const sheetTop10 = top10.map((r, idx) => ({
-        Rank: idx + 1,
-        Dimension: dimension,
-        Name: r.name,
-        Metric: topMetric,
-        Orders_USD: Number(r.order_usd || 0),
-        Shipping_USD: Number(r.ship_usd || 0),
-        Combined_USD: Number((r.order_usd || 0) + (r.ship_usd || 0)),
-        Score: Number(r.score || 0),
-      }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetTop10), "Top10");
+    function styleHeader(row: ExcelJS.Row) {
+      row.height = 22;
+      row.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: teal } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = { top: border, left: border, bottom: border, right: border };
+      });
     }
 
-    if (compareMode === "YTD") {
-      if (isCombined && compareCombined) {
-        const ytdSheet = [{
-          ViewMode: viewMode,
-          Dimension: dimension,
-          Name: "Combined Total",
-          YTD_Start: compareCombined.ytdStart,
-          YTD_End: compareCombined.ytdEnd,
-          Orders_Cur: compareCombined.order_cur,
-          Orders_Prev: compareCombined.order_prev,
-          Orders_YoY_Pct: compareCombined.order_yoy,
-          Shipping_Cur: compareCombined.ship_cur,
-          Shipping_Prev: compareCombined.ship_prev,
-          Shipping_YoY_Pct: compareCombined.ship_yoy,
-        }];
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ytdSheet), "YTD_vs_PriorYTD");
-      } else if (compare) {
-        const sheetYtd = compare.top.map((r) => ({
-          Dimension: dimension,
-          Name: r.name,
-          YTD_Start: compare.ytdStart,
-          YTD_End: compare.ytdEnd,
-          Orders_Cur: r.order_cur,
-          Orders_Prev: r.order_prev,
-          Orders_YoY_Pct: r.order_yoy,
-          Shipping_Cur: r.ship_cur,
-          Shipping_Prev: r.ship_prev,
-          Shipping_YoY_Pct: r.ship_yoy,
-        }));
-        sheetYtd.unshift({
-          Dimension: dimension,
-          Name: "TOTAL (TOP 12)",
-          YTD_Start: compare.ytdStart,
-          YTD_End: compare.ytdEnd,
-          Orders_Cur: compare.total.order_cur,
-          Orders_Prev: compare.total.order_prev,
-          Orders_YoY_Pct: compare.total.total_order_yoy,
-          Shipping_Cur: compare.total.ship_cur,
-          Shipping_Prev: compare.total.ship_prev,
-          Shipping_YoY_Pct: compare.total.total_ship_yoy,
-        });
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheetYtd), "YTD_vs_PriorYTD");
+    function styleBody(row: ExcelJS.Row, moneyCols: number[] = []) {
+      row.eachCell((cell, col) => {
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { vertical: "middle", horizontal: moneyCols.includes(col) ? "right" : "left" };
+        if (moneyCols.includes(col)) cell.numFmt = moneyFmt;
+      });
+    }
+
+    function addSection(title: string) {
+      const row = sheet.addRow([title]);
+      sheet.mergeCells(row.number, 1, row.number, 8);
+      row.getCell(1).font = { bold: true, size: 13, color: { argb: "FF111827" } };
+      row.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+      row.getCell(1).border = { top: border, left: border, bottom: border, right: border };
+      sheet.addRow([]);
+    }
+
+    sheet.addRow([]);
+    addSection("Summary");
+    const summaryHeader = sheet.addRow(["KPI", "Value", "Trend"]);
+    styleHeader(summaryHeader);
+    [
+      ["Orders Total", Number(kpis.orderTotal || 0), `${kpis.orderTrendLabel}: ${fmtPct(kpis.orderTrendValue)}`],
+      ["Shipping Total", Number(kpis.shipTotal || 0), `${kpis.shipTrendLabel}: ${fmtPct(kpis.shipTrendValue)}`],
+    ].forEach((values) => {
+      const row = sheet.addRow(values);
+      styleBody(row, [2]);
+    });
+
+    if (isCombined) {
+      if (compareMode === "YTD" && compareCombined) {
+        sheet.addRow([]);
+        addSection("YTD vs Prior YTD");
+        const header = sheet.addRow(["Section", "Orders (YTD)", "Orders (Prior)", "YoY", "Shipping (YTD)", "Shipping (Prior)", "YoY"]);
+        styleHeader(header);
+        const row = sheet.addRow([
+          "Combined Total",
+          compareCombined.order_cur,
+          compareCombined.order_prev,
+          fmtPct(compareCombined.order_yoy),
+          compareCombined.ship_cur,
+          compareCombined.ship_prev,
+          fmtPct(compareCombined.ship_yoy),
+        ]);
+        styleBody(row, [2, 3, 5, 6]);
       }
+
+      sheet.addRow([]);
+      addSection("Monthly");
+      const header = sheet.addRow(["Month", "Orders", "YoY", "MoM", "Shipping", "YoY", "MoM"]);
+      styleHeader(header);
+      combinedMonthly.forEach((r) => {
+        const row = sheet.addRow([
+          monthLabel(r.month_start),
+          Number(r.order_usd || 0),
+          fmtPct(r.order_yoy_pct),
+          fmtPct(r.order_mom_pct),
+          Number(r.ship_usd || 0),
+          fmtPct(r.ship_yoy_pct),
+          fmtPct(r.ship_mom_pct),
+        ]);
+        styleBody(row, [2, 5]);
+      });
+    } else {
+      const rank = new Map<string, number>();
+      top10.forEach((x, i) => rank.set(x.name, i));
+      const topMonthlyGroups = monthlyGrouped
+        .filter(([name]) => rank.has(name))
+        .slice()
+        .sort((a, b) => rank.get(a[0])! - rank.get(b[0])!);
+
+      sheet.addRow([]);
+      addSection("Top 10");
+      const topHeader = sheet.addRow([dimension === "buyer" ? "Buyer" : "Brand", "Orders", "Shipping", "Combined"]);
+      styleHeader(topHeader);
+      top10.forEach((r) => {
+        const row = sheet.addRow([r.name, Number(r.order_usd || 0), Number(r.ship_usd || 0), Number((r.order_usd || 0) + (r.ship_usd || 0))]);
+        styleBody(row, [2, 3, 4]);
+      });
+
+      topMonthlyGroups.forEach(([name, list]) => {
+        sheet.addRow([]);
+        addSection(name);
+        const header = sheet.addRow(["Month", "Orders", "YoY", "MoM", "Shipping", "YoY", "MoM"]);
+        styleHeader(header);
+        list
+          .slice()
+          .sort((a, b) => a.month_start.localeCompare(b.month_start))
+          .forEach((r) => {
+            const row = sheet.addRow([
+              monthLabel(r.month_start),
+              Number(r.order_usd || 0),
+              fmtPct(r.order_yoy_pct),
+              fmtPct(r.order_mom_pct),
+              Number(r.ship_usd || 0),
+              fmtPct(r.ship_yoy_pct),
+              fmtPct(r.ship_mom_pct),
+            ]);
+            styleBody(row, [2, 5]);
+          });
+      });
     }
 
-    XLSX.writeFile(wb, `performance_${dimension}_${viewMode.toLowerCase()}_${start}_to_${end}.xlsx`);
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `performance_${dimension}_${viewMode.toLowerCase()}_${start}_to_${end}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
   }
 
   function exportPdf() {
@@ -763,6 +794,11 @@ export default function PerformanceDashboardPage() {
     return [...list, v];
   }
 
+  function changeEnd(next: string) {
+    setEnd(next);
+    if (next) setStart(oneYearBefore(next));
+  }
+
   return (
     <AppShell title="Performance (Buyer / Brand)">
       <div className="space-y-6">
@@ -818,7 +854,7 @@ export default function PerformanceDashboardPage() {
 
               <div className="space-y-2 md:col-span-3">
                 <Label>End (month)</Label>
-                <Input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+                <Input type="date" value={end} onChange={(e) => changeEnd(e.target.value)} />
               </div>
 
               <div className="md:col-span-12 grid gap-3 md:grid-cols-12 items-end">

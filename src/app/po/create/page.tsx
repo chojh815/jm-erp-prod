@@ -26,6 +26,7 @@ import {
   TabsTrigger,
   TabsContent,
 } from "@/components/ui/tabs";
+import ExcelJS from "exceljs";
 
 type ShippingOriginCode =
   | "KR_SEOUL"
@@ -2390,6 +2391,172 @@ if (!buyerId) {
     popup.focus();
   };
 
+  const handleExportExcel = async () => {
+    if (!poNo) {
+      alert("PO No. is required to export Excel.");
+      return;
+    }
+    if (!lines.length) {
+      alert("At least one line item is required.");
+      return;
+    }
+
+    try {
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "JM ERP";
+      workbook.created = new Date();
+      const sheet = workbook.addWorksheet("Purchase Order", {
+        pageSetup: { paperSize: 9, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+        views: [{ showGridLines: false }],
+      });
+
+      sheet.columns = [
+        { width: 8 },
+        { width: 18 },
+        { width: 18 },
+        { width: 36 },
+        { width: 14 },
+        { width: 12 },
+        { width: 18 },
+        { width: 11 },
+        { width: 10 },
+        { width: 14 },
+        { width: 14 },
+        { width: 16 },
+      ];
+
+      const border = { style: "thin", color: { argb: "FFDDDDDD" } } as const;
+      const boxBorder = { style: "thin", color: { argb: "FFE5E7EB" } } as const;
+      const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF3F4F6" } } as const;
+
+      const setBoxBorder = (from: string, to: string) => {
+        const fromCell = sheet.getCell(from);
+        const toCell = sheet.getCell(to);
+        for (let rowNo = Number(fromCell.row); rowNo <= Number(toCell.row); rowNo++) {
+          for (let colNo = Number(fromCell.col); colNo <= Number(toCell.col); colNo++) {
+            const cell = sheet.getCell(rowNo, colNo);
+            cell.border = { top: boxBorder, left: boxBorder, bottom: boxBorder, right: boxBorder };
+            cell.alignment = { vertical: "top", wrapText: true };
+          }
+        }
+      };
+
+      sheet.mergeCells("A1:L1");
+      sheet.getCell("A1").value = "Purchase Order";
+      sheet.getCell("A1").font = { bold: true, size: 18 };
+      sheet.getCell("A1").alignment = { horizontal: "left" };
+      sheet.getRow(1).height = 28;
+
+      sheet.mergeCells("A2:L2");
+      sheet.getCell("A2").value = `PO No: ${poNo}    |    Status: ${status}    |    Currency: ${currency}`;
+      sheet.getCell("A2").font = { color: { argb: "FF4B5563" } };
+
+      sheet.mergeCells("A4:F4");
+      sheet.mergeCells("G4:L4");
+      sheet.mergeCells("A5:F8");
+      sheet.mergeCells("G5:L8");
+      sheet.getCell("A4").value = "Buyer";
+      sheet.getCell("G4").value = "Order Info";
+      sheet.getCell("A5").value = `${currentBuyer?.name || "-"}\nDept: ${dept || "-"}\nBrand: ${brand || "-"}`;
+      sheet.getCell("G5").value =
+        `Order Date: ${orderDate || "-"}\n` +
+        `Req. Ship Date: ${reqShipDate || "-"}\n` +
+        `Ship Mode: ${shipMode || "-"}\n` +
+        `Incoterm: ${incoterm || "-"}\n` +
+        `Destination: ${destination || "-"}`;
+      setBoxBorder("A4", "L8");
+
+      for (const addr of ["A4", "G4"]) {
+        sheet.getCell(addr).font = { bold: true };
+        sheet.getCell(addr).fill = headerFill;
+      }
+
+      sheet.mergeCells("A10:L10");
+      sheet.getCell("A10").value = "Line Items";
+      sheet.getCell("A10").font = { bold: true, size: 13 };
+
+      const tableStart = 11;
+      const headerRow = sheet.getRow(tableStart);
+      headerRow.values = [
+        "No",
+        "Buyer Style",
+        "JM Style",
+        "Description",
+        "Color",
+        "Size",
+        "HS",
+        "Qty",
+        "UOM",
+        "Unit Price",
+        "Amount",
+        "UPC",
+      ];
+      headerRow.eachCell((cell) => {
+        cell.fill = headerFill;
+        cell.font = { bold: true };
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      });
+
+      lines.forEach((line, index) => {
+        const row = sheet.getRow(tableStart + index + 1);
+        row.values = [
+          index + 1,
+          line.buyerStyleNo || "",
+          line.jmStyleNo || "",
+          line.description || "",
+          line.color || "",
+          line.size || "",
+          line.hsCode || "",
+          line.qty || 0,
+          line.uom || "",
+          line.unitPrice || 0,
+          line.amount || 0,
+          line.upc || "",
+        ];
+        row.eachCell((cell, colNumber) => {
+          cell.border = { top: border, left: border, bottom: border, right: border };
+          cell.alignment = { vertical: "middle", wrapText: true };
+          if ([1, 8, 10, 11].includes(colNumber)) {
+            cell.alignment = { horizontal: "right", vertical: "middle", wrapText: true };
+          }
+          if (colNumber === 8) cell.numFmt = "#,##0";
+          if ([10, 11].includes(colNumber)) cell.numFmt = "#,##0.00";
+        });
+      });
+
+      const subtotalRowNo = tableStart + lines.length + 1;
+      sheet.mergeCells(subtotalRowNo, 1, subtotalRowNo, 10);
+      sheet.getCell(subtotalRowNo, 1).value = "Subtotal";
+      sheet.getCell(subtotalRowNo, 1).font = { bold: true };
+      sheet.getCell(subtotalRowNo, 1).alignment = { horizontal: "right" };
+      sheet.getCell(subtotalRowNo, 11).value = subtotal;
+      sheet.getCell(subtotalRowNo, 11).font = { bold: true };
+      sheet.getCell(subtotalRowNo, 11).numFmt = "#,##0.00";
+      sheet.getCell(subtotalRowNo, 12).border = { top: border, left: border, bottom: border, right: border };
+
+      sheet.views = [{ state: "frozen", ySplit: tableStart }];
+      sheet.autoFilter = {
+        from: { row: tableStart, column: 1 },
+        to: { row: tableStart, column: 12 },
+      };
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${poNo.replace(/[\\/:*?"<>|]/g, "-") || "purchase-order"}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export PO Excel:", err);
+      alert("Failed to export Excel.");
+    }
+  };
+
   // 간단 테스트
   React.useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2976,6 +3143,14 @@ const canCreateProforma =
                             onClick={handleExportPdf}
                           >
                             Export PDF
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={handleExportExcel}
+                          >
+                            Excel
                           </Button>
                           <Button
                             type="button"

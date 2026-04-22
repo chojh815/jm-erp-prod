@@ -195,7 +195,7 @@ export const MENU_SECTIONS: MenuSection[] = [
       },
       {
       label: "A/R Aging",
-      href: "dashboards/ar-aging",
+      href: "/dashboards/ar-aging",
       perm: "receipts.view",
     },
     ],

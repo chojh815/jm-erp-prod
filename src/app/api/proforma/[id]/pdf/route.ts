@@ -328,10 +328,15 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     }
 
     // origin / site
-    const originCode =
-      pickFirst(headerRaw, ["origin_code", "shipping_origin_code", "origin"]) ??
-      pickFirst(poHeader, ["shipping_origin_code", "origin_code", "origin"]) ??
+    // PDF stamp selection uses the live shipping origin code first.
+    const shippingOriginCode =
+      pickFirst(headerRaw, ["shipping_origin_code"]) ??
+      pickFirst(poHeader, ["shipping_origin_code"]) ??
+      pickFirst(headerRaw, ["origin_code", "origin"]) ??
+      pickFirst(poHeader, ["origin_code", "origin"]) ??
       null;
+
+    const originCode = safe(shippingOriginCode) || null;
 
     let site: any = null;
     if (originCode) {
@@ -450,6 +455,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 
       ship_mode: shipMode,
       coo_text: cooText,
+      shipping_origin_code: originCode,
     };
 
     // ✅ 라인 후보키들

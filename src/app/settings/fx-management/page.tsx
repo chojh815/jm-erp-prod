@@ -81,9 +81,10 @@ export default function FxManagementPage() {
       setError(null);
       const r = Number(rate);
       if (!Number.isFinite(r) || r <= 0) {
-        alert("rate는 0보다 큰 숫자여야 합니다.");
+        alert("Rate must be greater than 0.");
         return;
       }
+      if (!window.confirm("Do you want to save this FX rate? Existing active rate may be replaced.")) return;
       setLoading(true);
       const res = await fetch("/api/fx/management", {
         method: "POST",
@@ -99,6 +100,7 @@ export default function FxManagementPage() {
       if (!res.ok || !j?.success) throw new Error(j?.error || "Save failed");
       setOpen(false);
       await load();
+      alert("Saved.");
     } catch (e: any) {
       setError(e?.message ?? "Save failed");
     } finally {

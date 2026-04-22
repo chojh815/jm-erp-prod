@@ -104,6 +104,7 @@ export default function CostingDetailValuationPanel() {
 
   async function saveSnapshot() {
     if (!id) return;
+    if (!window.confirm("Do you want to save this valuation snapshot? Existing snapshot for the same date may be overwritten.")) return;
     setErr(null);
     setLoadingSave(true);
     try {
@@ -116,6 +117,7 @@ export default function CostingDetailValuationPanel() {
       if (!r.ok || !j?.success) throw new Error(j?.error || `Save snapshot failed (${r.status})`);
       await fetchPreview();
       await fetchSnapshots();
+      alert("Saved.");
     } catch (e: any) {
       setErr(String(e?.message || e));
     } finally {

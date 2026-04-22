@@ -64,6 +64,7 @@ async function loadShipFrom() {
 
 async function saveShipFrom(next: string) {
   if (!quotationId) return;
+  if (!window.confirm("Do you want to save Ship From?")) return;
   setShipFromCode(next);
   try {
     const r = await fetch(`/api/red/quotations/${quotationId}/ship-from`, {
@@ -276,9 +277,10 @@ React.useEffect(() => {
     // 계산: FOB/pkg = PCS * UnitPrice + PackagingCost(MOQ)
     const up = unitPrice === "" ? null : Number(unitPrice);
     if (up == null || !Number.isFinite(up)) {
-      setMsg("Unit Price (per 1pc) 먼저 입력하세요.");
+      setMsg("Enter Unit Price (per 1pc) first.");
       return;
     }
+    if (!window.confirm("This will auto-fill and overwrite matrix values. Continue?")) return;
     const next: Record<string, string> = { ...cells };
     for (const pcs of pcsRows) {
       for (const moq of RED_MOQS) {
@@ -313,6 +315,7 @@ React.useEffect(() => {
     setOverrides((prev) => ({ ...prev, [key(pcs, moq)]: v }));
   }
 async function save() {
+    if (!window.confirm("Do you want to save RED matrix inputs and values?")) return;
     setLoading(true);
     setMsg(null);
     try {
@@ -392,6 +395,7 @@ async function save() {
   className="border rounded px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
   onClick={async () => {
     if (!targetId) return;
+    if (!window.confirm("Do you want to create a new RED quotation version?")) return;
     setLoading(true);
     setMsg(null);
     try {
@@ -418,7 +422,7 @@ async function save() {
     }
   }}
   disabled={loading || !quotationId || !targetId}
-  title="v2/v3... 새 버전 생성 (이전 버전 복사)"
+  title="Create v2/v3... by copying the previous version"
 >
   Create New Version
 </button>
@@ -465,7 +469,7 @@ async function save() {
         <div>
           <div className="text-sm font-medium">Auto-calc Inputs</div>
           <div className="text-xs text-muted-foreground">
-            1개당 단가(Unit Price) + MOQ별 Packaging(/pkg) 입력 → 아래 Matrix는 자동 계산으로 채웁니다.
+            Enter Unit Price per piece and Packaging per package by MOQ to auto-fill the Matrix below.
             <span className="ml-2">Formula: FOB/pkg = PCS × UnitPrice + PackagingCost(MOQ)</span>
           </div>
         </div>
@@ -516,7 +520,6 @@ async function save() {
           <button
             className="border rounded px-3 py-1 text-sm"
             onClick={async () => {
-              await saveCosts();
               await autoFillMatrix();
             }}
             disabled={loading}

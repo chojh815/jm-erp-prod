@@ -108,6 +108,7 @@ export default function CreditNotesPage() {
       .filter((x) => x.invoice_id && x.amount > 0);
 
     if (lines.length === 0) return setMsg("Enter credit amount(s).");
+    if (!window.confirm("Do you want to save this credit note?")) return;
 
     const payload = {
       buyer_id: buyerId,
@@ -117,15 +118,20 @@ export default function CreditNotesPage() {
       lines,
     };
 
-    const res = await fetch("/api/credits", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const j = await res.json();
-    if (!res.ok) return setMsg(j.error || "Failed");
-    setMsg(`Saved CREDIT: ${j.receipt_id}`);
-    setAmounts({});
+    try {
+      const res = await fetch("/api/credits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const j = await res.json();
+      if (!res.ok) return setMsg(j.error || "Save failed.");
+      setMsg(`Saved CREDIT: ${j.receipt_id}`);
+      alert("Saved.");
+      setAmounts({});
+    } catch (e: any) {
+      setMsg(e?.message || "Save failed.");
+    }
   }
 
   return (

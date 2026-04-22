@@ -1,5 +1,6 @@
 import React from "react";
 import { Document, Page, Text, View, StyleSheet, Image } from "@react-pdf/renderer";
+import { getCompanyStampByOrigin } from "@/lib/companyStamp";
 
 /* =========================
    Types
@@ -27,6 +28,7 @@ export interface ProformaHeaderPDF {
   payment_term?: string | null;
 
   coo_text?: string | null;
+  shipping_origin_code?: string | null;
 
   // allow additional fields without breaking builds
   [key: string]: any;
@@ -379,7 +381,8 @@ const ProformaInvoicePDF: React.FC<{
   const pages = chunk(lines, ROWS_PER_PAGE);
 
   const base = (assetsBaseUrl ?? "").replace(/\/$/, "");
-  const stampSrc = `${base}/images/jm_stamp_vn.jpg`;
+  const stamp = getCompanyStampByOrigin(header.shipping_origin_code);
+  const stampSrc = `${base}${stamp.publicPath}`;
 
   return (
     <Document>
@@ -437,7 +440,7 @@ const ProformaInvoicePDF: React.FC<{
                   <Text style={styles.signedByTitle}>Signed by</Text>
 
                   <Image src={stampSrc} style={styles.stampImg} />
-                  <Text style={styles.companyName}>JM International Co., Ltd</Text>
+                  <Text style={styles.companyName}>{stamp.companyName}</Text>
                 </View>
               </>
             ) : null}

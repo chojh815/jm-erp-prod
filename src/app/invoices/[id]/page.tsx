@@ -13,10 +13,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
+import { getCompanyStampByOrigin } from "@/lib/companyStamp";
 
 import jsPDF from "jspdf";
 // @ts-ignore
 import autoTable from "jspdf-autotable";
+import ExcelJS from "exceljs";
 
 type DevRole = AppRole;
 
@@ -188,6 +190,34 @@ function shouldShowMaterialHS(header: InvoiceHeader, lines: InvoiceLine[]) {
       (l.material_content && l.material_content.trim() !== "") ||
       (l.hs_code && l.hs_code.trim() !== "")
   );
+}
+
+function getStampAssetByOrigin(origin?: string | null) {
+  const stamp = getCompanyStampByOrigin(origin);
+  return { src: stamp.publicPath, format: stamp.format };
+}
+
+function originCodeToCooText(origin?: string | null) {
+  const o = String(origin || "").toUpperCase();
+  if (!o) return "";
+  if (o.startsWith("VN_") || o.includes("VIET")) return "MADE IN VIETNAM";
+  if (o.startsWith("CN_") || o.includes("CHINA") || o.includes("QINGDAO"))
+    return "MADE IN CHINA";
+  if (o.startsWith("KR_") || o.includes("KOREA") || o.includes("SEOUL"))
+    return "MADE IN KOREA";
+  return `MADE IN ${o.replace(/_/g, " ")}`;
+}
+
+function getContainedSize(
+  naturalWidth: number,
+  naturalHeight: number,
+  maxWidth: number,
+  maxHeight: number
+) {
+  const nw = Number.isFinite(naturalWidth) && naturalWidth > 0 ? naturalWidth : maxWidth;
+  const nh = Number.isFinite(naturalHeight) && naturalHeight > 0 ? naturalHeight : maxHeight;
+  const scale = Math.min(maxWidth / nw, maxHeight / nh, 1);
+  return { width: nw * scale, height: nh * scale };
 }
 
 function n(v: any) {
@@ -584,7 +614,9 @@ export default function InvoiceDetailPage() {
   );
 
   const autoPdfRequested = (searchParams?.get("autoPdf") || "") === "1";
+  const autoExcelRequested = (searchParams?.get("autoExcel") || "") === "1";
   const autoPdfRanRef = React.useRef(false);
+  const autoExcelRanRef = React.useRef(false);
 
   const applyInvoiceState = React.useCallback((h: InvoiceHeader, rawLines: InvoiceLine[]) => {
     const patchedHeader: InvoiceHeader = {
@@ -932,17 +964,19 @@ ${shipperAddress}` : `${shipperName}`,
       const consigneeLines = doc.splitTextToSize(consignee, half - 4);
       const notifyLines = doc.splitTextToSize(notify, half - 4);
       const partyBodyLines = Math.max(consigneeLines.length, notifyLines.length, 1);
-      const partyH = Math.max(20, 9 + partyBodyLines * 4 + 4);
+      const partyLineH = 3.5;
+      const partyTextY = y + 8.6;
+      const partyH = Math.max(16, 8.6 + partyBodyLines * partyLineH + 2.5);
       doc.rect(margin, y, half, partyH);
       doc.rect(margin + half, y, half, partyH);
 
       doc.setFont("helvetica", "bold");
-      doc.text("Consignee", margin + 2, y + 4.8);
-      doc.text("Notify Party", margin + half + 2, y + 4.8);
+      doc.text("Consignee", margin + 2, y + 4.5);
+      doc.text("Notify Party", margin + half + 2, y + 4.5);
 
       doc.setFont("helvetica", "normal");
-      doc.text(consigneeLines, margin + 2, y + 9.4);
-      doc.text(notifyLines, margin + half + 2, y + 9.4);
+      doc.text(consigneeLines, margin + 2, partyTextY, { lineHeightFactor: 1.05 });
+      doc.text(notifyLines, margin + half + 2, partyTextY, { lineHeightFactor: 1.05 });
 
       y += partyH;
 
@@ -1067,8 +1101,25 @@ ${shipperAddress}` : `${shipperName}`,
       doc.text("Grand Total", margin, y2);
       doc.text(`${cur} ${fmtMoney2(grandTotal)}`, pageWidth - margin, y2, { align: "right" });
 
-      const stampWidth = 60;
-      const stampHeight = 30;
+      const stampAsset = getStampAssetByOrigin(header.shipping_origin_code);
+      const stampImg = new Image();
+      stampImg.src = stampAsset.src;
+
+      await new Promise<void>((resolve, reject) => {
+        stampImg.onload = () => resolve();
+        stampImg.onerror = () => reject(new Error("Stamp image load error"));
+      });
+
+      const maxStampWidth = 60;
+      const maxStampHeight = 30;
+      const stampSize = getContainedSize(
+        stampImg.naturalWidth,
+        stampImg.naturalHeight,
+        maxStampWidth,
+        maxStampHeight
+      );
+      const stampWidth = stampSize.width;
+      const stampHeight = stampSize.height;
       const sigTextTopGap = 6;
       const sigBottomGap = 8;
       const sigBlockH = sigTextTopGap + stampHeight + sigBottomGap + 10;
@@ -1081,19 +1132,12 @@ ${shipperAddress}` : `${shipperName}`,
       }
 
       const stampX = pageWidth - margin - stampWidth;
-      const stampImg = new Image();
-      stampImg.src = "/images/jm_stamp_vn.jpg";
-
-      await new Promise<void>((resolve, reject) => {
-        stampImg.onload = () => resolve();
-        stampImg.onerror = () => reject(new Error("Stamp image load error"));
-      });
 
       doc.setFont("helvetica", "normal");
       doc.setFontSize(11);
       doc.text("Signed by", pageWidth - margin, stampY - 4, { align: "right" });
 
-      doc.addImage(stampImg, "JPEG", stampX, stampY, stampWidth, stampHeight);
+      doc.addImage(stampImg, stampAsset.format, stampX, stampY, stampWidth, stampHeight);
       doc.text("JM International Co.,Ltd", pageWidth - margin, stampY + stampHeight + 6, {
         align: "right",
       });
@@ -1113,6 +1157,212 @@ ${shipperAddress}` : `${shipperName}`,
     } catch (e) {
       console.error(e);
       alert("Failed to export PDF.");
+    } finally {
+      setExporting(false);
+    }
+  }, [header, lines, recomputeTotal]);
+
+  const handleExcel = React.useCallback(async (): Promise<void> => {
+    if (!header) return;
+    setExporting(true);
+    try {
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "JM ERP";
+      workbook.created = new Date();
+      const sheet = workbook.addWorksheet("Commercial Invoice", {
+        pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+        views: [{ showGridLines: false }],
+      });
+
+      sheet.columns = [
+        { width: 14 }, { width: 18 }, { width: 24 }, { width: 14 },
+        { width: 12 }, { width: 10 }, { width: 14 }, { width: 16 },
+      ];
+
+      const border = { style: "thin", color: { argb: "FF000000" } } as const;
+      const lightBorder = { style: "thin", color: { argb: "FF999999" } } as const;
+      const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFF3F7" } } as const;
+
+      const boxRange = (from: string, to: string) => {
+        const fromCell = sheet.getCell(from);
+        const toCell = sheet.getCell(to);
+        for (let rowNo = Number(fromCell.row); rowNo <= Number(toCell.row); rowNo++) {
+          for (let colNo = Number(fromCell.col); colNo <= Number(toCell.col); colNo++) {
+            const cell = sheet.getCell(rowNo, colNo);
+            cell.border = { top: border, left: border, bottom: border, right: border };
+            cell.alignment = { vertical: "top", wrapText: true };
+          }
+        }
+      };
+
+      const currency = header.currency || "USD";
+      const shipperName = s(header.shipper_name || "JM International Co.,Ltd");
+      const shipperAddress = s(header.shipper_address || "");
+      const invoiceNo = s(header.invoice_no) || "commercial-invoice";
+      const invoiceDate = fmtDate10(header.invoice_date) || "-";
+      const poNos = Array.from(new Set((lines || []).filter((l) => !l.is_deleted).map((l) => s(l.po_no)).filter(Boolean))).sort(poSort);
+      const poText = poNos.length ? poNos.join(", ") : "-";
+      const consignee = s(header.consignee_text) || "-";
+      const notify = s(header.notify_party_text) || "-";
+      const portOfLoading = s(header.port_of_loading) || "-";
+      const finalDestination = s(header.final_destination || header.destination) || "-";
+      const cooText = s(header.coo_text) || originCodeToCooText(header.shipping_origin_code) || "-";
+
+      sheet.mergeCells("A1:H1");
+      sheet.getCell("A1").value = "Commercial Invoice";
+      sheet.getCell("A1").font = { bold: true, size: 18 };
+      sheet.getCell("A1").alignment = { horizontal: "center" };
+      sheet.getRow(1).height = 28;
+
+      sheet.mergeCells("A2:D2");
+      sheet.mergeCells("E2:H2");
+      sheet.mergeCells("A3:D3");
+      sheet.mergeCells("E3:H3");
+      sheet.getCell("A2").value = `Buyer: ${header.buyer_name || "-"}`;
+      sheet.getCell("E2").value = `Invoice No: ${invoiceNo}`;
+      sheet.getCell("A3").value = `PO No: ${poText}`;
+      sheet.getCell("E3").value = `Date: ${invoiceDate}`;
+      sheet.getCell("E2").alignment = { horizontal: "right" };
+      sheet.getCell("E3").alignment = { horizontal: "right" };
+
+      sheet.mergeCells("A5:D5");
+      sheet.mergeCells("E5:H5");
+      sheet.mergeCells("A6:D7");
+      sheet.mergeCells("E6:H7");
+      sheet.getCell("A5").value = "Shipper / Exporter";
+      sheet.getCell("E5").value = "Invoice & Terms";
+      sheet.getCell("A6").value = [shipperName, shipperAddress].filter(Boolean).join("\n");
+      sheet.getCell("E6").value = `Terms: ${header.payment_term || "-"}\nIncoterm: ${header.incoterm || "-"}\nCurrency: ${currency}`;
+      boxRange("A5", "H7");
+
+      sheet.mergeCells("A9:D9");
+      sheet.mergeCells("E9:H9");
+      sheet.mergeCells("A10:D12");
+      sheet.mergeCells("E10:H12");
+      sheet.getCell("A9").value = "Consignee";
+      sheet.getCell("E9").value = "Notify Party";
+      sheet.getCell("A10").value = consignee;
+      sheet.getCell("E10").value = notify;
+      boxRange("A9", "H12");
+
+      sheet.mergeCells("A14:D14");
+      sheet.mergeCells("E14:H14");
+      sheet.mergeCells("A15:D15");
+      sheet.mergeCells("E15:H15");
+      sheet.getCell("A14").value = "Port of Loading";
+      sheet.getCell("E14").value = "Final Destination";
+      sheet.getCell("A15").value = portOfLoading;
+      sheet.getCell("E15").value = finalDestination;
+      boxRange("A14", "H15");
+
+      sheet.mergeCells("A17:H17");
+      sheet.mergeCells("A18:H19");
+      sheet.getCell("A17").value = "COO / Certification";
+      sheet.getCell("A18").value = `${cooText}\nWE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.`;
+      boxRange("A17", "H19");
+
+      for (const addr of ["A5", "E5", "A9", "E9", "A14", "E14", "A17"]) {
+        sheet.getCell(addr).font = { bold: true };
+        sheet.getCell(addr).fill = headerFill;
+      }
+
+      const showMatHs = shouldShowMaterialHS(header, lines);
+      const tableStart = 21;
+      const tableHeader = [
+        "PO #",
+        "Style #",
+        "Description",
+        ...(showMatHs ? ["Material", "HS Code"] : []),
+        "Qty",
+        "Unit Price",
+        "Amount",
+      ];
+      const headerRow = sheet.getRow(tableStart);
+      headerRow.values = tableHeader;
+      headerRow.eachCell((cell) => {
+        cell.fill = headerFill;
+        cell.font = { bold: true };
+        cell.border = { top: lightBorder, left: lightBorder, bottom: lightBorder, right: lightBorder };
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      });
+
+      let rowNo = tableStart + 1;
+      for (const g of groupInvoiceLines(lines)) {
+        for (const l of g.lines) {
+          const row = sheet.getRow(rowNo++);
+          row.values = [
+            l.po_no || "",
+            l.style_no || "",
+            l.description || "",
+            ...(showMatHs ? [l.material_content || "", l.hs_code || ""] : []),
+            n(l.qty),
+            n(l.unit_price),
+            n(l.amount),
+          ];
+          row.eachCell((cell, colNumber) => {
+            cell.border = { top: lightBorder, left: lightBorder, bottom: lightBorder, right: lightBorder };
+            cell.alignment = { vertical: "middle", wrapText: true };
+            if (colNumber >= tableHeader.length - 2) {
+              cell.alignment = { horizontal: "right", vertical: "middle", wrapText: true };
+            }
+          });
+          row.getCell(tableHeader.length - 2).numFmt = "#,##0";
+          row.getCell(tableHeader.length - 1).numFmt = "#,##0.00";
+          row.getCell(tableHeader.length).numFmt = "#,##0.00";
+        }
+      }
+
+      const total =
+        header.total_amount != null && Number(header.total_amount) > 0
+          ? Number(header.total_amount)
+          : Number(recomputeTotal || lines.reduce((sum, l) => sum + n(l.amount), 0));
+      const totalRowNo = rowNo + 1;
+      sheet.mergeCells(totalRowNo, 1, totalRowNo, tableHeader.length - 1);
+      sheet.getCell(totalRowNo, 1).value = "Grand Total";
+      sheet.getCell(totalRowNo, 1).font = { bold: true };
+      sheet.getCell(totalRowNo, 1).alignment = { horizontal: "right" };
+      sheet.getCell(totalRowNo, tableHeader.length).value = total;
+      sheet.getCell(totalRowNo, tableHeader.length).font = { bold: true };
+      sheet.getCell(totalRowNo, tableHeader.length).numFmt = `"${currency} "#,##0.00`;
+
+      const signRowNo = totalRowNo + 4;
+      sheet.mergeCells(signRowNo, 6, signRowNo, 8);
+      sheet.getCell(signRowNo, 6).value = "Signed by";
+      sheet.getCell(signRowNo, 6).alignment = { horizontal: "center" };
+
+      const stamp = getCompanyStampByOrigin(header.shipping_origin_code);
+      try {
+        const stampRes = await fetch(stamp.publicPath);
+        const stampBuffer = await stampRes.arrayBuffer();
+        const imageId = workbook.addImage({
+          buffer: stampBuffer as any,
+          extension: stamp.format === "JPEG" ? "jpeg" : "png",
+        });
+        sheet.addImage(imageId, {
+          tl: { col: 5.65, row: signRowNo },
+          ext: { width: stamp.boxW * 3.5, height: stamp.boxH * 3.5 },
+        });
+      } catch (e) {
+        console.warn("Failed to add invoice stamp to Excel:", e);
+      }
+
+      sheet.mergeCells(signRowNo + 8, 6, signRowNo + 8, 8);
+      sheet.getCell(signRowNo + 8, 6).value = stamp.companyName;
+      sheet.getCell(signRowNo + 8, 6).alignment = { horizontal: "center" };
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${invoiceNo}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to export Excel.");
     } finally {
       setExporting(false);
     }
@@ -1139,6 +1389,28 @@ ${shipperAddress}` : `${shipperName}`,
 
     run();
   }, [autoPdfRequested, loading, header, lines, exporting, invoiceId, router, handlePdf]);
+
+  React.useEffect(() => {
+    if (!autoExcelRequested) return;
+    if (autoExcelRanRef.current) return;
+    if (loading) return;
+    if (!header) return;
+    if (!lines || lines.length === 0) return;
+    if (exporting) return;
+
+    autoExcelRanRef.current = true;
+
+    const run = async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await handleExcel();
+
+      if (invoiceId) {
+        router.replace(`/invoices/${encodeURIComponent(invoiceId)}`);
+      }
+    };
+
+    run();
+  }, [autoExcelRequested, loading, header, lines, exporting, invoiceId, router, handleExcel]);
 
   if (loading) {
     return (
@@ -1189,6 +1461,9 @@ ${shipperAddress}` : `${shipperName}`,
           </Button>
           <Button onClick={handlePdf} disabled={exporting || saving}>
             {exporting ? "PDF..." : "PDF / Print"}
+          </Button>
+          <Button variant="outline" onClick={handleExcel} disabled={exporting || saving}>
+            {exporting ? "Excel..." : "Excel"}
           </Button>
           <Button onClick={handleSave} disabled={saving || loading}>
             {saving ? "Saving..." : "Save"}

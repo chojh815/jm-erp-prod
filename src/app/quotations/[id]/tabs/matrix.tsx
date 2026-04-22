@@ -218,9 +218,10 @@ export default function MatrixTab({ versions, onChanged }: Props) {
     // 계산: FOB/pkg = PCS * UnitPrice + PackagingCost(MOQ)
     const up = unitPrice === "" ? null : Number(unitPrice);
     if (up == null || !Number.isFinite(up)) {
-      setMsg("Unit Price (per 1pc) 먼저 입력하세요.");
+      setMsg("Enter Unit Price (per 1pc) first.");
       return;
     }
+    if (!window.confirm("This will auto-fill and overwrite matrix values. Continue?")) return;
     const next: Record<string, string> = { ...cells };
     for (const pcs of pcsRows) {
       for (const moq of RED_MOQS) {
@@ -250,6 +251,7 @@ export default function MatrixTab({ versions, onChanged }: Props) {
   }
 
   async function save() {
+    if (!window.confirm("Do you want to save matrix inputs and values?")) return;
     setLoading(true);
     setMsg(null);
     try {

@@ -21,6 +21,7 @@ export default function CreateBlankCostingCard() {
       setMsg("Style No is required.");
       return;
     }
+    if (!window.confirm("Do you want to create this blank costing?")) return;
     setBusy(true);
     setMsg(null);
     try {

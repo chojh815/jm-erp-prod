@@ -3,6 +3,7 @@
 
 export const PERMISSIONS = [
   // ===== BASIC / ADMIN =====
+  "home.view",
   "users.manage",
   "roles.manage",
   "companies.manage",
@@ -39,6 +40,8 @@ export const PERMISSIONS = [
   "receipts.edit",
   "receipts.delete",
 
+  "after_service.view",
+
   // ===== DEVELOPMENT =====
   "dev.product.view",
   "dev.product.create",
@@ -68,6 +71,19 @@ export const PERMISSIONS = [
   "work_sheet.create",
   "work_sheet.edit",
   "work_sheet.delete",
+
+  "work_order.view",
+  "purchase_order.view",
+  "production_batches.view",
+
+  // ===== DASHBOARDS =====
+  "dashboard.overview",
+  "dashboard.orders",
+  "dashboard.performance",
+  "dashboard.finance",
+  "dashboard.samples",
+  "dashboard.production",
+  "dashboard.profitability",
 ] as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[number];
@@ -76,7 +92,7 @@ export const PERMISSION_GROUPS: Array<{
   group: string;
   items: PermissionKey[];
 }> = [
-  { group: "Admin", items: ["users.manage", "roles.manage", "companies.manage"] },
+  { group: "Admin", items: ["home.view", "users.manage", "roles.manage", "companies.manage"] },
   { group: "Trade - PO", items: ["po.view", "po.create", "po.edit", "po.delete"] },
   {
     group: "Trade - Proforma",
@@ -128,6 +144,21 @@ export const PERMISSION_GROUPS: Array<{
       "work_sheet.create",
       "work_sheet.edit",
       "work_sheet.delete",
+      "work_order.view",
+      "purchase_order.view",
+      "production_batches.view",
+    ],
+  },
+  {
+    group: "Dashboards",
+    items: [
+      "dashboard.overview",
+      "dashboard.orders",
+      "dashboard.performance",
+      "dashboard.finance",
+      "dashboard.samples",
+      "dashboard.production",
+      "dashboard.profitability",
     ],
   },
 ];

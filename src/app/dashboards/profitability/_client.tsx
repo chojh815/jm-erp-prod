@@ -37,7 +37,7 @@ import {
 
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 type OptionItem = { id: string; name: string };
 
@@ -225,35 +225,123 @@ export default function ProfitabilityClient() {
     );
   };
 
-  const exportExcel = () => {
-    const exportRows = rows.map((r) => ({
-      "Invoice No": r.invoice_no || "",
-      "Invoice Date": r.invoice_date || "",
-      Buyer: r.buyer_name || "",
-      Brand: r.brand_name || "",
-      "PO No": r.po_no || "",
-      "JM Style": r.buyer_style || "",
-      "Buyer Style": r.buyer_style || "",
-      Vendor: r.vendor_name || "",
-      Site: r.site_name || "",
-      Currency: r.currency || "",
-      "FX to USD": r.fx_rate_to_usd ?? "",
-      "Revenue (USD)": r.revenue_usd ?? 0,
-      "Planned COGS (USD)": r.planned_cogs_usd ?? 0,
-      "Actual COGS (USD)": r.actual_cogs_usd ?? 0,
-      "Other Expenses (USD)": r.other_expenses_usd ?? 0,
-      "Factory Overhead (USD)": r.factory_overhead_usd ?? 0,
-      "Profit (USD)": r.profit_usd ?? 0,
-      "Margin %": r.margin_pct ?? "",
-      "Net Profit (USD)": r.net_profit_usd ?? 0,
-      "Net Margin %": r.net_margin_pct ?? "",
-      "Actual Coverage": r.actual_coverage ?? "",
-    }));
+  const exportExcel = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Profitability", {
+      views: [{ state: "frozen", ySplit: 8 }],
+    });
+    const k = data?.kpis;
+    const moneyFmt = '#,##0.00;[Red]-#,##0.00';
+    const pctFmt = '0.00"%"';
+    const border = { style: "thin", color: { argb: "FFD9E2EC" } } as const;
 
-    const ws = XLSX.utils.json_to_sheet(exportRows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Profitability");
-    XLSX.writeFile(wb, `profitability_${start}_${end}.xlsx`);
+    sheet.mergeCells("A1:N1");
+    sheet.getCell("A1").value = "Profitability Dashboard";
+    sheet.getCell("A1").font = { bold: true, size: 16, color: { argb: "FF111827" } };
+    sheet.getCell("A1").alignment = { vertical: "middle" };
+    sheet.getRow(1).height = 24;
+
+    sheet.mergeCells("A2:N2");
+    sheet.getCell("A2").value = `Period: ${start} ~ ${end}    Preset: ${preset}    Rows: ${k?.row_count ?? rows.length}`;
+    sheet.getCell("A2").font = { size: 10, color: { argb: "FF64748B" } };
+
+    const kpiRows = [
+      ["Revenue (USD)", k?.revenue_usd ?? 0, "Actual COGS (USD)", k?.actual_cogs_usd ?? 0, "Profit (USD)", k?.profit_usd ?? 0, "Margin %", k?.margin_pct ?? null],
+      ["Other Expenses (USD)", k?.other_expenses_usd ?? 0, "Factory Overhead (USD)", k?.factory_overhead_usd ?? 0, "Net Profit (USD)", k?.net_profit_usd ?? 0, "Net Margin %", k?.net_margin_pct ?? null],
+      ["Planned COGS (USD)", k?.planned_cogs_usd ?? 0, "Actual Coverage", k?.actual_coverage_pct ?? null, "", "", "", ""],
+    ];
+
+    kpiRows.forEach((values, idx) => {
+      const row = sheet.getRow(4 + idx);
+      row.values = values;
+      [1, 3, 5, 7].forEach((col) => {
+        row.getCell(col).font = { bold: true, color: { argb: "FF334155" } };
+        row.getCell(col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+      });
+      [2, 4, 6, 8].forEach((col) => {
+        row.getCell(col).numFmt = col === 8 || row.getCell(col - 1).value === "Actual Coverage" ? pctFmt : moneyFmt;
+        row.getCell(col).alignment = { horizontal: "right" };
+      });
+      row.eachCell((cell) => {
+        cell.border = { top: border, left: border, bottom: border, right: border };
+      });
+    });
+
+    const header = [
+      "Invoice",
+      "Date",
+      "Buyer",
+      "Brand",
+      "PO",
+      "Style",
+      "Revenue (USD)",
+      "Planned COGS (USD)",
+      "Actual COGS (USD)",
+      "Other Exp (USD)",
+      "Factory OH (USD)",
+      "Profit (USD)",
+      "Margin",
+      "Net Profit (USD)",
+      "Net Margin",
+      "Vendor",
+      "Site",
+      "Coverage",
+    ];
+
+    const headerRow = sheet.getRow(8);
+    headerRow.values = header;
+    headerRow.height = 22;
+    headerRow.eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F2937" } };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.border = { top: border, left: border, bottom: border, right: border };
+    });
+
+    rows.forEach((r, idx) => {
+      const row = sheet.getRow(9 + idx);
+      row.values = [
+        r.invoice_no || "",
+        r.invoice_date || "",
+        r.buyer_name || "",
+        r.brand_name || "",
+        r.po_no || "",
+        r.buyer_style || "",
+        r.revenue_usd ?? 0,
+        r.planned_cogs_usd ?? 0,
+        r.actual_cogs_usd ?? 0,
+        r.other_expenses_usd ?? 0,
+        r.factory_overhead_usd ?? 0,
+        r.profit_usd ?? 0,
+        r.margin_pct ?? null,
+        r.net_profit_usd ?? 0,
+        r.net_margin_pct ?? null,
+        r.vendor_name || "",
+        r.site_name || "",
+        r.actual_coverage ?? "",
+      ];
+      row.eachCell((cell, col) => {
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { vertical: "middle", horizontal: col >= 7 && col <= 15 ? "right" : "left" };
+        if (col >= 7 && col <= 12) cell.numFmt = moneyFmt;
+        if (col === 13 || col === 15) cell.numFmt = pctFmt;
+      });
+    });
+
+    sheet.columns = [
+      { width: 16 }, { width: 13 }, { width: 24 }, { width: 18 }, { width: 14 }, { width: 18 },
+      { width: 16 }, { width: 18 }, { width: 18 }, { width: 18 }, { width: 18 }, { width: 16 },
+      { width: 12 }, { width: 18 }, { width: 12 }, { width: 22 }, { width: 18 }, { width: 14 },
+    ];
+    sheet.autoFilter = { from: "A8", to: "R8" };
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `profitability_${start}_${end}.xlsx`;
+    link.click();
+    URL.revokeObjectURL(link.href);
   };
 
   const exportPDF = () => {
@@ -605,7 +693,7 @@ export default function ProfitabilityClient() {
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Monthly Net Profit / Net Margin</CardTitle>
             </CardHeader>
-            <CardContent style={{ height: 320 }}>
+            <CardContent style={{ height: 400 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={data?.monthly || []}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -621,8 +709,8 @@ export default function ProfitabilityClient() {
                     }}
                   />
                   <Legend />
-                  <Line yAxisId="left" type="monotone" dataKey="net_profit_usd" dot={false} />
-                  <Line yAxisId="right" type="monotone" dataKey="net_margin_pct" dot={false} />
+                  <Line yAxisId="left" type="monotone" dataKey="net_profit_usd" stroke="#2563eb" strokeWidth={2} dot={false} />
+                  <Line yAxisId="right" type="monotone" dataKey="net_margin_pct" stroke="#f97316" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </CardContent>
@@ -664,7 +752,7 @@ export default function ProfitabilityClient() {
                         </BarChart>
                       </ResponsiveContainer>
 
-                      <div className="mt-2 max-h-14 overflow-auto text-xs text-muted-foreground">
+                      <div className="mt-2 max-h-24 overflow-auto text-xs text-muted-foreground">
                         {(chartData || []).map((r: any, idx: number) => (
                           <div key={r.key || r.name || idx} className="flex items-center justify-between gap-2">
                             <div className="truncate">{idx + 1}. {r.name}</div>

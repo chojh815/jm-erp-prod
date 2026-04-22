@@ -10,9 +10,10 @@ export default function ProformaFromPoPage() {
 
   const handleGenerate = async () => {
     if (!poNo.trim()) {
-      alert("PO No를 입력하세요.");
+      alert("Enter PO No.");
       return;
     }
+    if (!window.confirm("Do you want to generate a Proforma Invoice from this PO? Existing Proforma data may be overwritten.")) return;
 
     try {
       setLoading(true);
@@ -34,7 +35,7 @@ export default function ProformaFromPoPage() {
       window.open(url, "_blank");
     } catch (e: any) {
       console.error(e);
-      alert(e.message || "오류가 발생했습니다.");
+      alert(e.message || "An error occurred.");
     } finally {
       setLoading(false);
     }
@@ -59,7 +60,7 @@ export default function ProformaFromPoPage() {
       </div>
 
       <p className="text-sm text-muted-foreground mt-3">
-        입력한 PO No 기준으로 Proforma Invoice PDF를 생성합니다.
+        Generates a Proforma Invoice PDF from the entered PO No.
       </p>
     </div>
   );

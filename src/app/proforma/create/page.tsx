@@ -1,3 +1,4 @@
+
 "use client";
 
 import * as React from "react";
@@ -9,7 +10,6 @@ import { createSupabaseBrowserClient } from "@/lib/supabaseClient";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-
 
 type DevRole = AppRole;
 
@@ -25,6 +25,8 @@ type PoHeader = {
   incoterm?: string | null;
   subtotal?: number | null;
   created_at?: string | null;
+  shipping_origin_code?: string | null;
+  origin_code?: string | null;
 };
 
 type PoLine = {
@@ -175,6 +177,8 @@ export default function ProformaCreatePage() {
           ship_mode: h.ship_mode || undefined,
           destination: h.destination || undefined,
           incoterm: h.incoterm || undefined,
+          shipping_origin_code: h.shipping_origin_code || undefined,
+          origin_code: h.origin_code || h.shipping_origin_code || undefined,
         },
         lines: (po.lines || []).map((line) => ({
           buyerStyleNo: line.buyer_style_no || null,
@@ -201,8 +205,6 @@ export default function ProformaCreatePage() {
         },
       };
 
-      console.log("PROFORMA CREATE PAYLOAD:", payload);
-
       const res = await fetch("/api/proforma/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -217,12 +219,19 @@ export default function ProformaCreatePage() {
       }
 
       const invoiceNo = data?.invoice_no || data?.invoiceNo || null;
-      if (!invoiceNo) {
-        alert("Proforma created but invoice number is missing.");
+      const headerId = data?.header_id || data?.headerId || null;
+
+      if (headerId) {
+        router.push(`/proforma/${encodeURIComponent(headerId)}`);
         return;
       }
 
-      router.push(`/proforma/detail?invoiceNo=${encodeURIComponent(invoiceNo)}`);
+      if (invoiceNo) {
+        router.push(`/proforma/detail?invoiceNo=${encodeURIComponent(invoiceNo)}`);
+        return;
+      }
+
+      alert("Proforma created but identifier is missing.");
     } catch (err) {
       console.error(err);
       alert("Unexpected error while creating Proforma.");
@@ -289,6 +298,9 @@ export default function ProformaCreatePage() {
                 </div>
                 <div>
                   <span className="text-zinc-500">Ship Mode:</span> {header.ship_mode || "-"}
+                </div>
+                <div>
+                  <span className="text-zinc-500">Shipping Origin:</span> {header.shipping_origin_code || header.origin_code || "-"}
                 </div>
                 <div>
                   <span className="text-zinc-500">Payment Term:</span> {header.payment_term || "-"}

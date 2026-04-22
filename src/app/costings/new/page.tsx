@@ -27,6 +27,7 @@ export default function NewCostingPage() {
 
   async function saveAndOpen() {
     if (!canSave) return;
+    if (!window.confirm("Do you want to create this costing?")) return;
     setErr(null);
     setSaving(true);
     try {

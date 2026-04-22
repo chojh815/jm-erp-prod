@@ -118,6 +118,7 @@ export default function RolesPage() {
   }
 
   async function onSave() {
+    if (!window.confirm("Do you want to save role permissions? Existing role permissions will be overwritten.")) return;
     try {
       setSaving(true);
       const perms = Array.from(checked);

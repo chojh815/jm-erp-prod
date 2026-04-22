@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { ROLE_DEFAULT_PERMISSIONS } from "@/config/permissions";
+import { PERMISSIONS, ROLE_DEFAULT_PERMISSIONS } from "@/config/permissions";
 
 function bad(message: string, status = 403) {
   return NextResponse.json({ ok: false, error: message }, { status });
@@ -73,6 +73,43 @@ function pickPermKey(row: any): string | null {
   return null;
 }
 
+function pickAllowed(row: any): boolean | null {
+  const candidates = ["allowed", "is_allowed", "grant", "enabled", "value"];
+  for (const k of candidates) {
+    const v = row?.[k];
+    if (v === true || v === "true") return true;
+    if (v === false || v === "false") return false;
+  }
+  return null;
+}
+
+async function loadUserOverrides(userId: string) {
+  const first = await supabaseAdmin.from("user_permission_overrides").select("perm_key, allowed").eq("user_id", userId);
+  if (!first.error) {
+    return (first.data || [])
+      .map((r: any) => ({
+        perm_key: r?.perm_key ? String(r.perm_key) : "",
+        allowed: Boolean(r?.allowed),
+      }))
+      .filter((r: any) => r.perm_key);
+  }
+
+  const second = await supabaseAdmin.from("user_permission_overrides").select("*").eq("user_id", userId);
+  if (second.error) {
+    const msg = (second.error.message || "").toLowerCase();
+    if (msg.includes("does not exist") || msg.includes("relation")) return [];
+    throw new Error(second.error.message);
+  }
+
+  return (second.data || [])
+    .map((r: any) => {
+      const perm_key = pickPermKey(r);
+      const allowed = pickAllowed(r);
+      return perm_key && allowed !== null ? { perm_key, allowed } : null;
+    })
+    .filter(Boolean) as Array<{ perm_key: string; allowed: boolean }>;
+}
+
 async function loadPermRows(
   table: "user_permission_grants" | "user_permission_revokes",
   userId: string
@@ -101,18 +138,29 @@ async function loadPermRows(
 }
 
 async function getEffectivePermissions(userId: string, role: string) {
+  if (role === "admin") return [...PERMISSIONS].map(String);
+
   const base = (ROLE_DEFAULT_PERMISSIONS[role] ||
     ROLE_DEFAULT_PERMISSIONS["viewer"] ||
     []) as string[];
 
-  const [grants, revokes] = await Promise.all([
+  const [userOverrides, grants, revokes] = await Promise.all([
+    loadUserOverrides(userId),
     loadPermRows("user_permission_grants", userId),
     loadPermRows("user_permission_revokes", userId),
   ]);
 
-  const revokeSet = new Set(revokes);
-  const merged = uniq([...base, ...grants]).filter((k) => !revokeSet.has(k));
-  return merged;
+  const effective = new Set(base);
+
+  for (const o of userOverrides) {
+    if (o.allowed) effective.add(String(o.perm_key));
+    else effective.delete(String(o.perm_key));
+  }
+
+  for (const g of grants) effective.add(String(g));
+  for (const r of revokes) effective.delete(String(r));
+
+  return uniq(Array.from(effective));
 }
 
 /**

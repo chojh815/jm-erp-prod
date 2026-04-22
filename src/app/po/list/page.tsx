@@ -29,6 +29,7 @@ import {
 // ✅ jsPDF (Client only)
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import ExcelJS from "exceljs";
 
 interface PoHeaderItem {
   id: string;
@@ -1016,15 +1017,69 @@ export default function PurchaseOrderListPage() {
       "Status",
     ];
 
-    const rows: string[][] = [];
-    const nf0 = new Intl.NumberFormat("en-US");
-    const nf2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("PO List", { views: [{ state: "frozen", ySplit: 6 }] });
+    const headerFill = "FF374151";
+    const sectionFill = "FFF3F4F6";
+    const subtotalFill = "FFE5E7EB";
+    const border = { style: "thin", color: { argb: "FFD1D5DB" } } as const;
+    const moneyFmt = '#,##0.00;[Red]-#,##0.00';
+    const qtyFmt = '#,##0';
+
+    sheet.columns = [
+      { width: 18 }, { width: 24 }, { width: 18 }, { width: 22 },
+      { width: 14 }, { width: 16 }, { width: 14 }, { width: 10 },
+      { width: 12 }, { width: 14 }, { width: 16 }, { width: 14 },
+    ];
+
+    sheet.mergeCells("A1:L1");
+    sheet.getCell("A1").value = "Purchase Order List";
+    sheet.getCell("A1").font = { bold: true, size: 18, color: { argb: "FF111827" } };
+    sheet.getRow(1).height = 26;
+
+    const sortLabel = `1) ${s1Field} ${s1Dir}  2) ${s2Field} ${s2Dir}  3) ${s3Field} ${s3Dir}`;
+    sheet.mergeCells("A2:L2");
+    sheet.getCell("A2").value = `Sort: ${sortLabel}`;
+    sheet.getCell("A2").font = { size: 11, color: { argb: "FF334155" } };
+
+    function styleHeader(row: ExcelJS.Row) {
+      row.height = 22;
+      row.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = { top: border, left: border, bottom: border, right: border };
+      });
+    }
+
+    function styleBody(row: ExcelJS.Row, moneyCols: number[] = [], qtyCols: number[] = []) {
+      row.eachCell((cell, col) => {
+        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.alignment = { vertical: "middle", horizontal: moneyCols.includes(col) || qtyCols.includes(col) ? "right" : "left" };
+        if (moneyCols.includes(col)) cell.numFmt = moneyFmt;
+        if (qtyCols.includes(col)) cell.numFmt = qtyFmt;
+      });
+    }
+
+    function styleTotal(row: ExcelJS.Row) {
+      row.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FF111827" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: subtotalFill } };
+      });
+      styleBody(row, [10, 11], [9]);
+    }
+
+    sheet.addRow([]);
+    const headerRow = sheet.addRow(header);
+    styleHeader(headerRow);
 
     try {
       let grandSum = 0;
+      let totalLines = 0;
 
       const allHeaders = await fetchAllHeadersForExport();
       const allSorted = multiSortItems(allHeaders, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
+      sheet.getCell("A2").value = `Sort: ${sortLabel} | Total: ${allSorted.length} POs`;
 
       for (const it of allSorted) {
         const lines = await fetchLinesForHeaderId(it.id);
@@ -1035,8 +1090,9 @@ export default function PurchaseOrderListPage() {
           const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
           poSum = headerSubtotal;
           grandSum += headerSubtotal;
+          totalLines += 1;
 
-          rows.push([
+          const row = sheet.addRow([
             it.poNo,
             it.buyerName ?? "-",
             it.mainBuyerBrand ?? "-",
@@ -1047,11 +1103,12 @@ export default function PurchaseOrderListPage() {
             it.currency ?? "-",
             "-",
             "-",
-            nf2.format(headerSubtotal),
+            headerSubtotal,
             it.status ?? "-",
           ]);
+          styleBody(row, [10, 11], [9]);
 
-          rows.push([
+          const subtotalRow = sheet.addRow([
             it.poNo,
             "",
             "",
@@ -1062,22 +1119,23 @@ export default function PurchaseOrderListPage() {
             it.currency ?? "-",
             "",
             "",
-            nf2.format(headerSubtotal),
+            headerSubtotal,
             "",
           ]);
+          styleTotal(subtotalRow);
 
-          rows.push(["", "", "", "", "", "", "", "", "", "", "", ""]);
+          sheet.addRow([]);
           continue;
         }
 
         lines.forEach((ln) => {
+          totalLines += 1;
           const style =
             (ln.buyerStyleNo ?? "").trim() ||
             (ln.jmStyleNo ?? "").trim() ||
             "-";
 
           const qtyNum = typeof ln.qty === "number" ? ln.qty : null;
-          const qty = typeof qtyNum === "number" ? nf0.format(qtyNum) : "-";
 
           const priceNum =
             typeof ln.price === "number"
@@ -1086,8 +1144,6 @@ export default function PurchaseOrderListPage() {
                 ? ln.unitPrice
                 : null;
 
-          const unitPrice = typeof priceNum === "number" ? nf2.format(priceNum) : "-";
-
           let amount: number | null = null;
           if (typeof ln.amount === "number") amount = ln.amount;
           else if (typeof qtyNum === "number" && typeof priceNum === "number")
@@ -1095,7 +1151,7 @@ export default function PurchaseOrderListPage() {
 
           if (typeof amount === "number") poSum += amount;
 
-          rows.push([
+          const row = sheet.addRow([
             it.poNo,
             it.buyerName ?? "-",
             it.mainBuyerBrand ?? "-",
@@ -1104,16 +1160,17 @@ export default function PurchaseOrderListPage() {
             it.reqShipDate ?? "-",
             it.shipMode ?? "-",
             it.currency ?? "-",
-            qty,
-            unitPrice,
-            typeof amount === "number" ? nf2.format(amount) : "-",
+            typeof qtyNum === "number" ? qtyNum : "-",
+            typeof priceNum === "number" ? priceNum : "-",
+            typeof amount === "number" ? amount : "-",
             it.status ?? "-",
           ]);
+          styleBody(row, [10, 11], [9]);
         });
 
         grandSum += poSum;
 
-        rows.push([
+        const subtotalRow = sheet.addRow([
           it.poNo,
           "",
           "",
@@ -1124,16 +1181,17 @@ export default function PurchaseOrderListPage() {
           it.currency ?? "-",
           "",
           "",
-          nf2.format(poSum),
+          poSum,
           "",
         ]);
+        styleTotal(subtotalRow);
 
-        rows.push(["", "", "", "", "", "", "", "", "", "", "", ""]);
+        sheet.addRow([]);
       }
 
       const curSet = new Set(allHeaders.map((x) => (x.currency ?? "").trim()).filter(Boolean));
       const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
-      rows.push([
+      const grandRow = sheet.addRow([
         "",
         "",
         "",
@@ -1144,35 +1202,27 @@ export default function PurchaseOrderListPage() {
         curLabel,
         "",
         "",
-        nf2.format(grandSum),
+        grandSum,
         "",
       ]);
+      styleTotal(grandRow);
+      sheet.getCell("A2").value = `Sort: ${sortLabel} | Total: ${allSorted.length} POs / ${totalLines} Lines`;
     } catch (e: any) {
       console.error(e);
       alert(e?.message ?? "Failed to export.");
       return;
     }
 
-    const csvLines = [header, ...rows]
-      .map((arr) =>
-        arr
-          .map((cell) => {
-            const v = (cell ?? "").toString();
-            if (/[,"\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-            return v;
-          })
-          .join(",")
-      )
-      .join("\n");
-
-    const blob = new Blob(["﻿" + csvLines], {
-      type: "text/csv;charset=utf-8;",
-    });
+    sheet.autoFilter = { from: "A4", to: "L4" };
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "po_list_lines.csv";
+    a.download = `po-list-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
   };
 

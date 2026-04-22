@@ -93,6 +93,7 @@ export default function QuotationDetailPage() {
 
   async function saveHeader() {
     if (!id || !header) return;
+    if (!window.confirm("Do you want to save this quotation?")) return;
     setSaving(true);
     setError(null);
     try {
@@ -104,6 +105,7 @@ export default function QuotationDetailPage() {
       const j = await safeJson(res);
       if (!res.ok) throw new Error(j?.error || j?.message || `Save failed (${res.status})`);
       await load();
+      alert("Saved.");
     } catch (e: any) {
       setError(e?.message || "Failed to save quotation");
     } finally {

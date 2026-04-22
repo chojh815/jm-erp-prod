@@ -10,12 +10,19 @@ export function BankAccountModal({ open, onClose, initial }: any) {
   const [form, setForm] = useState(initial || { is_active: true });
 
   const save = async () => {
-    await fetch("/api/bank-accounts/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
-    onClose(true);
+    if (!window.confirm("Do you want to save this bank account? Existing default settings may be overwritten.")) return;
+    try {
+      const res = await fetch("/api/bank-accounts/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) throw new Error("Save failed.");
+      alert("Saved.");
+      onClose(true);
+    } catch (e: any) {
+      alert(e?.message || "Save failed.");
+    }
   };
 
   return (

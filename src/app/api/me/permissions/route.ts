@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { ROLE_DEFAULT_PERMISSIONS, type PermissionKey } from "@/config/permissions";
+import { PERMISSIONS, ROLE_DEFAULT_PERMISSIONS, type PermissionKey } from "@/config/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -75,16 +75,15 @@ function pickAllowed(row: any): boolean | null {
 
 /**
  * ✅ role 문자열 정규화
- * - DB roles: owner/manager/staff/viewer
- * - 레거시 값(admin)은 owner로 매핑
+ * - admin은 전체 권한 예외로 유지
+ * - 그 외 role은 개별 override → role 권한 → deny 순서로 계산
  */
-function normalizeRole(input: any): "owner" | "manager" | "staff" | "viewer" {
+function normalizeRole(input: any): "admin" | "owner" | "manager" | "staff" | "viewer" {
   const r = String(input || "")
     .trim()
     .toLowerCase();
 
-  if (r === "admin") return "owner"; // ✅ 레거시 admin → owner
-  if (r === "owner" || r === "manager" || r === "staff" || r === "viewer") return r;
+  if (r === "admin" || r === "owner" || r === "manager" || r === "staff" || r === "viewer") return r;
   return "viewer";
 }
 
@@ -204,12 +203,26 @@ async function loadUserOverrides(userId: string) {
 /**
  * ✅ 최종 권한 계산
  * 우선순위:
- *  A) v_role_permission_codes(role_permissions 기반)  ← ★ 핵심 (dashboard.performance 포함)
- *  B) role_permission_defaults / ROLE_DEFAULT_PERMISSIONS (레거시 호환)
- *  C) user_permission_overrides (true/false)
- *  D) legacy grants/revokes
+ *  - admin: 항상 전체 허용
+ *  - non-admin: user_permission_overrides → role 권한 → deny
+ *  - legacy grants/revokes는 기존 데이터 호환용
  */
 async function getEffectivePermissions(userId: string, role: string) {
+  if (role === "admin") {
+    return {
+      permissions: [...PERMISSIONS].map(String),
+      overrides: {
+        role_defaults_used: false,
+        role_defaults: [],
+        role_permissions_used: false,
+        role_permissions: [...PERMISSIONS].map(String),
+        user_overrides: [],
+        grants: [],
+        revokes: [],
+      },
+    };
+  }
+
   // A) 가장 먼저: DB role_permissions 반영(뷰)
   const rolePermsFromView = await loadRolePermCodesFromView(role);
 
@@ -292,7 +305,7 @@ export async function GET() {
     if (!prof?.user_id) return bad("Profile not found", 404);
     if (prof.is_active === false) return bad("Inactive user", 403);
 
-    // ✅ role 정규화: admin → owner
+    // ✅ role 정규화: admin은 전체 권한 예외로 유지
     const role = normalizeRole(prof.role);
 
     const { permissions, overrides } = await getEffectivePermissions(user.id, role);

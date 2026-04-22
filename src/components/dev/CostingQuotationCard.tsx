@@ -52,6 +52,7 @@ export default function CostingQuotationCard({
       setErr("MOQ tiers is empty");
       return;
     }
+    if (!window.confirm("Do you want to create a quotation from this costing?")) return;
 
     setLoading(true);
     try {

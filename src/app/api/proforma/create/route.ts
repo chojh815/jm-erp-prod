@@ -1,9 +1,7 @@
+
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// PI 번호 규칙 예시:
-// JM-{BuyerCode}-PI-YYYYMMDD-HHmmss
-// (buyer code 없으면 PI-YYYYMMDD-HHmmss 로만 생성)
 function buildInvoiceNo(buyerCode?: string | null): string {
   const now = new Date();
   const pad = (n: number) => n.toString().padStart(2, "0");
@@ -26,6 +24,18 @@ function errorResponse(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
 }
 
+function safe(v: any) {
+  return (v ?? "").toString().trim();
+}
+
+function pickFirst(obj: any, keys: string[]) {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== null && v !== undefined && safe(v) !== "") return v;
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   const supabase = supabaseAdmin;
 
@@ -44,6 +54,8 @@ export async function POST(req: NextRequest) {
       ship_mode?: string;
       destination?: string;
       incoterm?: string;
+      shipping_origin_code?: string;
+      origin_code?: string;
     };
 
     const lines = (body.lines || []) as Array<{
@@ -67,7 +79,6 @@ export async function POST(req: NextRequest) {
       created_at?: string | null;
     };
 
-    // ===== 기본 검증 =====
     if (!header?.buyer_id) {
       return errorResponse("buyer_id is required.", 400);
     }
@@ -78,7 +89,6 @@ export async function POST(req: NextRequest) {
       return errorResponse("At least one line is required.", 400);
     }
 
-    // 1) 바이어 코드 가져오기 (companies.code)
     let buyerCode: string | null = null;
     if (header.buyer_id) {
       const { data: buyerRow, error: buyerErr } = await supabase
@@ -94,7 +104,31 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2) 같은 PO에 대한 기존 Proforma 가 있는지 체크 (업데이트용)
+    let poHeader: any = null;
+    if (header.po_no) {
+      const { data, error } = await supabase
+        .from("po_headers")
+        .select("*")
+        .eq("po_no", header.po_no)
+        .eq("is_deleted", false)
+        .maybeSingle();
+
+      if (error && error.code !== "PGRST116") {
+        console.error("Error loading po header for proforma:", error);
+      } else {
+        poHeader = data ?? null;
+      }
+    }
+
+    const shippingOriginCode =
+      safe(header.shipping_origin_code) ||
+      safe(pickFirst(poHeader, ["shipping_origin_code"])) ||
+      safe(header.origin_code) ||
+      safe(pickFirst(poHeader, ["origin_code", "origin"])) ||
+      null;
+
+    const originCode = shippingOriginCode;
+
     let existingHeaderId: string | null = null;
     let existingInvoiceNo: string | null = null;
 
@@ -106,7 +140,6 @@ export async function POST(req: NextRequest) {
         .maybeSingle();
 
       if (existErr && existErr.code !== "PGRST116") {
-        // PGRST116 = no rows found, 그 외 에러만 로그
         console.error("Error checking existing proforma header:", existErr);
       }
 
@@ -116,12 +149,9 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 새 invoiceNo는 "기존 없을 때만" 생성
-    const invoiceNo =
-      existingInvoiceNo || buildInvoiceNo(buyerCode);
+    const invoiceNo = existingInvoiceNo || buildInvoiceNo(buyerCode);
 
-    // 공통 header payload
-    const headerPayload = {
+    const headerPayload: Record<string, any> = {
       invoice_no: invoiceNo,
       po_no: header.po_no ?? null,
       buyer_id: header.buyer_id ?? null,
@@ -136,10 +166,12 @@ export async function POST(req: NextRequest) {
       created_at: audit?.created_at ?? new Date().toISOString(),
     };
 
+    if (shippingOriginCode) headerPayload.shipping_origin_code = shippingOriginCode;
+    if (originCode) headerPayload.origin_code = originCode;
+
     let headerId: string;
 
     if (existingHeaderId) {
-      // ===== 이미 같은 PO에 대한 Proforma가 있을 때: UPDATE + 라인 리플레이스 =====
       const { error: updateErr } = await supabase
         .from("proforma_headers")
         .update(headerPayload)
@@ -147,15 +179,11 @@ export async function POST(req: NextRequest) {
 
       if (updateErr) {
         console.error("Error updating proforma header:", updateErr);
-        return errorResponse(
-          updateErr.message ?? "Failed to update proforma header.",
-          500
-        );
+        return errorResponse(updateErr.message ?? "Failed to update proforma header.", 500);
       }
 
       headerId = existingHeaderId;
 
-      // 기존 라인 모두 삭제
       const { error: delErr } = await supabase
         .from("proforma_lines")
         .delete()
@@ -163,13 +191,9 @@ export async function POST(req: NextRequest) {
 
       if (delErr) {
         console.error("Error deleting old proforma lines:", delErr);
-        return errorResponse(
-          delErr.message ?? "Failed to replace proforma lines.",
-          500
-        );
+        return errorResponse(delErr.message ?? "Failed to replace proforma lines.", 500);
       }
     } else {
-      // ===== 처음 만드는 Proforma: INSERT =====
       const { data: headerInsert, error: headerErr } = await supabase
         .from("proforma_headers")
         .insert(headerPayload)
@@ -178,16 +202,12 @@ export async function POST(req: NextRequest) {
 
       if (headerErr) {
         console.error("Error inserting proforma header:", headerErr);
-        return errorResponse(
-          headerErr.message ?? "Failed to insert proforma header.",
-          500
-        );
+        return errorResponse(headerErr.message ?? "Failed to insert proforma header.", 500);
       }
 
       headerId = (headerInsert as any).id as string;
     }
 
-    // 4) Lines INSERT (공통)
     const linePayload = lines.map((l, idx) => ({
       proforma_header_id: headerId,
       line_no: idx + 1,
@@ -211,27 +231,24 @@ export async function POST(req: NextRequest) {
 
     if (linesErr) {
       console.error("Error inserting proforma lines:", linesErr);
-      return errorResponse(
-        linesErr.message ?? "Failed to insert proforma lines.",
-        500
-      );
+      return errorResponse(linesErr.message ?? "Failed to insert proforma lines.", 500);
     }
 
-    // 5) 성공 JSON 응답
     return NextResponse.json(
       {
         success: true,
         invoice_no: invoiceNo,
         header_id: headerId,
         updated: !!existingHeaderId,
+        shipping_origin_code: shippingOriginCode,
+        origin_code: originCode,
       },
       { status: 200 }
     );
   } catch (err: any) {
     console.error("Unexpected error in /api/proforma/create:", err);
     return errorResponse(
-      err?.message ||
-        "Unexpected server error while creating proforma invoice.",
+      err?.message || "Unexpected server error while creating proforma invoice.",
       500
     );
   }

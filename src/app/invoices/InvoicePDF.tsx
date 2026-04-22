@@ -123,13 +123,23 @@ const styles = StyleSheet.create({
     padding: 10,
     minHeight: 68,
   },
+  partyBox: {
+    padding: 6,
+    minHeight: 0,
+  },
   boxTitle: {
     fontWeight: 700,
     marginBottom: 6,
   },
+  partyTitle: {
+    marginBottom: 3,
+  },
   mono: {
     lineHeight: 1.25,
     whiteSpace: "pre-wrap",
+  },
+  partyMono: {
+    lineHeight: 1.05,
   },
 
   // small label/value inside right box
@@ -351,13 +361,13 @@ export default function InvoicePDF({ header, lines }: Props) {
 
         {/* ===== Row 2: Consignee + Notify Party ===== */}
         <View style={styles.grid2}>
-          <View style={styles.box}>
-            <Text style={styles.boxTitle}>Consignee</Text>
-            <Text style={styles.mono}>{consigneeText}</Text>
+          <View style={[styles.box, styles.partyBox]}>
+            <Text style={[styles.boxTitle, styles.partyTitle]}>Consignee</Text>
+            <Text style={[styles.mono, styles.partyMono]}>{consigneeText}</Text>
           </View>
-          <View style={styles.box}>
-            <Text style={styles.boxTitle}>Notify Party</Text>
-            <Text style={styles.mono}>{notifyText}</Text>
+          <View style={[styles.box, styles.partyBox]}>
+            <Text style={[styles.boxTitle, styles.partyTitle]}>Notify Party</Text>
+            <Text style={[styles.mono, styles.partyMono]}>{notifyText}</Text>
           </View>
         </View>
 

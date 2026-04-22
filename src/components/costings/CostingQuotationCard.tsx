@@ -40,6 +40,7 @@ export default function CostingQuotationCard({
   const [error, setError] = React.useState<string | null>(null);
 
   async function createQuotation() {
+    if (!window.confirm("Do you want to create a quotation from this costing?")) return;
     setCreating(true);
     setError(null);
     setCreatedId(null);

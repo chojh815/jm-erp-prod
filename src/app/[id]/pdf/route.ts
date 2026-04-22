@@ -51,6 +51,27 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 
     const safeLines = (lines || []) as any[];
 
+    const poNo = safe(pickFirst(header, ["po_no", "poNo", "po_reference"]));
+    let poHeader: any = null;
+
+    if (poNo) {
+      const { data: po, error: poErr } = await supabaseAdmin
+        .from("po_headers")
+        .select("shipping_origin_code, origin_code, origin")
+        .eq("po_no", poNo)
+        .eq("is_deleted", false)
+        .maybeSingle();
+
+      if (!poErr) poHeader = po;
+    }
+
+    const shippingOriginCode =
+      safe(pickFirst(header, ["shipping_origin_code"])) ||
+      safe(pickFirst(poHeader, ["shipping_origin_code"])) ||
+      safe(pickFirst(header, ["origin_code", "origin"])) ||
+      safe(pickFirst(poHeader, ["origin_code", "origin"])) ||
+      null;
+
     // 3) signatureUrl (fallback)
     const signatureUrl =
       pickFirst(header, [
@@ -63,14 +84,17 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       process.env.DEFAULT_PI_SIGNATURE_URL ||
       undefined;
 
-    // (여기서 normalizedHeader를 네 기존 로직으로 교체해도 됨)
-    const normalizedHeader: any = { ...header };
+    const normalizedHeader: any = {
+      ...header,
+      shipping_origin_code: shippingOriginCode,
+    };
 
     // ✅ JSX 금지: route.ts에서는 createElement로 만든다
     const element = React.createElement(ProformaInvoicePDF as any, {
       header: normalizedHeader,
       lines: safeLines,
       signatureUrl,
+      assetsBaseUrl: _req.nextUrl.origin,
     }) as unknown as React.ReactElement<DocumentProps>;
 
     const pdfStream = await renderToStream(element);

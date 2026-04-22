@@ -37,8 +37,9 @@ export default function MatrixFxMarginBar(props: {
     const fxN = toNumberSafe(fx);
     const mN = toNumberSafe(margin);
 
-    if (!fxN || fxN <= 0) return setErr("FX Rate (CNY per 1 USD)을 올바르게 입력하세요.");
-    if (mN === null || mN < 0) return setErr("Margin(%)을 0 이상으로 입력하세요.");
+    if (!fxN || fxN <= 0) return setErr("Enter a valid FX Rate (CNY per 1 USD).");
+    if (mN === null || mN < 0) return setErr("Enter Margin (%) greater than or equal to 0.");
+    if (!window.confirm("This will auto-fill and overwrite matrix values. Continue?")) return;
 
     setLoading(true);
     try {
@@ -81,7 +82,7 @@ export default function MatrixFxMarginBar(props: {
               value={fx}
               onChange={(e) => setFx(e.target.value)}
               inputMode="decimal"
-              placeholder="예: 7.20"
+              placeholder="e.g. 7.20"
             />
           </label>
 
@@ -92,7 +93,7 @@ export default function MatrixFxMarginBar(props: {
               value={margin}
               onChange={(e) => setMargin(e.target.value)}
               inputMode="decimal"
-              placeholder="예: 18.00"
+              placeholder="e.g. 18.00"
             />
           </label>
         </div>
@@ -111,7 +112,7 @@ export default function MatrixFxMarginBar(props: {
 
       {err ? <p className="mt-2 text-sm text-red-600">{err}</p> : null}
       <p className="mt-2 text-xs text-muted-foreground">
-        Auto-fill = FOB(CNY) + Offer(USD) 계산 → DB 스냅샷 저장 → 최신 Matrix로 즉시 갱신
+        Auto-fill calculates FOB (CNY) and Offer (USD), saves a DB snapshot, and refreshes the latest Matrix.
       </p>
     </div>
   );

@@ -115,7 +115,7 @@ export default function InvoiceCreatePage() {
       // 새로 추가할 때 buyer가 다르면 막기
       const target = rows.find((r) => r.id === id);
       if (selectedBuyerId && target?.buyer_id && target.buyer_id !== selectedBuyerId) {
-        alert("Buyer가 다른 Shipment는 같은 Invoice로 합칠 수 없습니다.");
+        alert("Shipments with different buyers cannot be combined into one invoice.");
         return prev;
       }
 
@@ -125,9 +125,10 @@ export default function InvoiceCreatePage() {
 
   const createInvoice = async () => {
     if (selectedIds.length === 0) {
-      alert("먼저 Shipment를 선택해 주세요.");
+      alert("Please select a shipment first.");
       return;
     }
+    if (!window.confirm("Do you want to create this invoice?")) return;
 
     try {
       setCreating(true);
@@ -153,8 +154,8 @@ export default function InvoiceCreatePage() {
 
       alert(
         json.already_exists
-          ? `이미 연결된 Invoice가 있습니다.\nInvoice: ${invoiceId ?? "-"}`
-          : `Invoice 생성 완료\nInvoice No: ${invoiceNo ?? "-"}`
+          ? `An invoice is already linked.\nInvoice: ${invoiceId ?? "-"}`
+          : `Invoice created.\nInvoice No: ${invoiceNo ?? "-"}`
       );
 
       if (invoiceId) {

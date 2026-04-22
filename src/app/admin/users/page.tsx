@@ -137,30 +137,20 @@ export default function AdminUsersPage() {
         setLoadingPerms(true);
         setLocalState(new Map()); // 유저 바뀌면 dirty 초기화
 
-        // (A) role 기본 perms
-        const role = String(selectedUser.role || "viewer").toLowerCase();
-        const rRes = await fetch(`/api/admin/roles/permissions?role=${encodeURIComponent(role)}`, {
-          cache: "no-store",
-          credentials: "include",
-        });
-
-        const rJson = rRes.ok ? await rRes.json() : null;
-        const rp: string[] = Array.isArray(rJson?.permissions) ? rJson.permissions : [];
-        const roleSet = new Set(rp.map(String));
-        if (!mounted) return;
-        setRolePerms(roleSet);
-
-        // (B) user overrides
-        const oRes = await fetch(
-          `/api/admin/users/permission-overrides?user_id=${encodeURIComponent(selectedUserId)}`,
+        const pRes = await fetch(
+          `/api/admin/users/${encodeURIComponent(selectedUserId)}/permissions`,
           { cache: "no-store", credentials: "include" }
         );
-        const oJson = oRes.ok ? await oRes.json() : null;
-        const ov: OverrideRow[] = Array.isArray(oJson?.overrides) ? oJson.overrides : [];
+        const pJson = pRes.ok ? await pRes.json() : null;
+
+        const base: string[] = Array.isArray(pJson?.base_permissions) ? pJson.base_permissions : [];
+        const roleSet = new Set(base.map(String));
+        const ov: OverrideRow[] = Array.isArray(pJson?.overrides) ? pJson.overrides : [];
         const map = new Map<string, boolean>();
         for (const r of ov) map.set(String(r.perm_key), Boolean(r.allowed));
 
         if (!mounted) return;
+        setRolePerms(roleSet);
         setOverrides(map);
 
         setLoadingPerms(false);
@@ -211,6 +201,7 @@ export default function AdminUsersPage() {
 
   async function saveChanges() {
     if (!selectedUserId) return;
+    if (!window.confirm("Do you want to save these permission changes? Existing overrides will be overwritten.")) return;
     setSaving(true);
 
     try {
@@ -251,6 +242,9 @@ export default function AdminUsersPage() {
       for (const r of ov) map.set(String(r.perm_key), Boolean(r.allowed));
       setOverrides(map);
       setLocalState(new Map());
+      alert("Saved.");
+    } catch (e: any) {
+      alert(e?.message || "Save failed.");
     } finally {
       setSaving(false);
     }

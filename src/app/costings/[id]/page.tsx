@@ -346,6 +346,7 @@ setMaterials(mats.length ? mats : [{ row_index: 1, material_name: "", qty: 1, un
   }
 
   async function saveAll() {
+    if (!window.confirm("Do you want to save this costing? Existing material and operation lines will be overwritten.")) return;
     setSaving(true);
     setError(null);
     try {
@@ -417,6 +418,7 @@ setMaterials(mats.length ? mats : [{ row_index: 1, material_name: "", qty: 1, un
 
       // reload for clean ids/order
       await loadAll();
+      alert("Saved.");
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -605,6 +607,7 @@ setMaterials(mats.length ? mats : [{ row_index: 1, material_name: "", qty: 1, un
     if (imgBusy) return;
     const row = images.find((x) => x.id === imageId);
     if (!row) return;
+    if (!window.confirm("Do you want to delete this image?")) return;
 
     setImgBusy(true);
     setError(null);
@@ -639,6 +642,7 @@ setMaterials(mats.length ? mats : [{ row_index: 1, material_name: "", qty: 1, un
       }
 
       await refreshImages();
+      alert("Deleted.");
     } catch (e: any) {
       setError(friendlyUploadError(e));
     } finally {

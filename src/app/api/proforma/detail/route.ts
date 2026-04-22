@@ -72,6 +72,8 @@ export async function GET(req: NextRequest) {
       buyerName: header.buyer_name,
       paymentTerm: header.payment_term,
       shipMode: header.ship_mode,
+      shippingOriginCode: header.shipping_origin_code,
+      originCode: header.origin_code,
       finalDestination: header.final_destination,
       portOfLoading: header.port_of_loading,
       createdAt: header.created_at,
