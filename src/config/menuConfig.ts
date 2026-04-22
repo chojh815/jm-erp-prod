@@ -204,6 +204,7 @@ export const MENU_SECTIONS: MenuSection[] = [
   {
     label: "Finance",
     items: [
+      { label: "Cashbook", href: "/finance/cashbook", perm: "receipts.view" },
       { label: "Bank Accounts", href: "/bank-accounts", perm: "receipts.view" },
       { label: "Receipts", href: "/receipts", perm: "receipts.view" },
       { label: "Expenses", href: "/finance/expenses", perm: "receipts.view" },
