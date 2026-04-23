@@ -34,6 +34,7 @@ async function enrichRefStatus(rows: any[]) {
 
   const payableMap = new Map<string, any>()
   const advanceMap = new Map<string, any>()
+  const inhouseMap = new Map<string, any>()
 
   if (payableIds.length > 0) {
     const { data, error } = await supabaseAdmin
@@ -53,6 +54,23 @@ async function enrichRefStatus(rows: any[]) {
     for (const row of data || []) advanceMap.set(row.id, row)
   }
 
+  const inhouseIds = Array.from(
+    new Set(
+      rows
+        .filter((row: any) => row?.ref_type === 'inhouse_payable' && row?.ref_id)
+        .map((row: any) => row.ref_id)
+    )
+  )
+
+  if (inhouseIds.length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from('inhouse_payables')
+      .select('id, is_deleted, status')
+      .in('id', inhouseIds)
+    if (error) throw error
+    for (const row of data || []) inhouseMap.set(row.id, row)
+  }
+
   return rows.map((row: any) => {
     if (!row?.ref_type || !row?.ref_id) {
       return {
@@ -66,6 +84,7 @@ async function enrichRefStatus(rows: any[]) {
     let linked: any = null
     if (row.ref_type === 'subcontract_payable') linked = payableMap.get(row.ref_id) || null
     if (row.ref_type === 'subcontract_advance') linked = advanceMap.get(row.ref_id) || null
+    if (row.ref_type === 'inhouse_payable') linked = inhouseMap.get(row.ref_id) || null
 
     return {
       ...row,

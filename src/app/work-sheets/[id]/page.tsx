@@ -86,6 +86,8 @@ type WorkSheetLine = {
   production_mode?: "IN_HOUSE" | "OUTSOURCED" | null;
   outsourcing_type?: OutsourcingType | null;
   internal_material_cost?: number | null;
+  inhouse_extra_material_actual?: number | null;
+  inhouse_extra_processing_actual?: number | null;
 
   actual_vendor_unit_cost_local?: number | null;
   actual_vendor_unit_cost_usd?: number | null;
@@ -497,7 +499,9 @@ function calcLineActualSync(
     "CNY",
     (line as any)?.fx_rate ?? null
   );
-  const actualUnit = calcMaterialsActualAmt(specs);
+  const extraMaterialActual = nnumNullable((line as any)?.inhouse_extra_material_actual) ?? 0;
+  const extraProcessingActual = nnumNullable((line as any)?.inhouse_extra_processing_actual) ?? 0;
+  const actualUnit = calcMaterialsActualAmt(specs) + extraMaterialActual + extraProcessingActual;
   const actualAmt =
     actualUnit === null || actualUnit === undefined
       ? 0

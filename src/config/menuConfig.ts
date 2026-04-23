@@ -124,6 +124,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "work_sheet.view",
       },
       {
+        label: "Inhouse Payables",
+        href: "/production/inhouse-payables",
+        perm: "work_sheet.view",
+      },
+      {
         label: "Work Orders",
         href: "/production/work-orders",
         perm: "work_order.view",

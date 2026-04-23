@@ -34,6 +34,16 @@ async function hasActiveLinkedSource(refType: string, refId: string) {
     return !!data && data.is_deleted !== true;
   }
 
+  if (refType === "inhouse_payable") {
+    const { data, error } = await supabaseAdmin
+      .from("inhouse_payables")
+      .select("id, is_deleted")
+      .eq("id", refId)
+      .maybeSingle();
+    if (error) throw error;
+    return !!data && data.is_deleted !== true;
+  }
+
   return false;
 }
 

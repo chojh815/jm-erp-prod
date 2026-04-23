@@ -137,6 +137,39 @@ async function firstWorking<T>(
   return { data: null, error: lastErr };
 }
 
+async function loadInhouseExtraActualMap(lineIds: string[]) {
+  const out: Record<string, { material: number; processing: number }> = {};
+  for (const id of lineIds) out[id] = { material: 0, processing: 0 };
+  if (lineIds.length === 0) return out;
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("inhouse_payables")
+      .select("work_sheet_line_id, payable_type, source_type, gross_amount, status, is_deleted")
+      .in("work_sheet_line_id", lineIds)
+      .eq("source_type", "EXTRA")
+      .eq("is_deleted", false);
+
+    if (error) return out;
+
+    for (const row of data ?? []) {
+      if ((row as any)?.status === "VOID") continue;
+      const lineId = safeText((row as any)?.work_sheet_line_id);
+      if (!lineId) continue;
+      if (!out[lineId]) out[lineId] = { material: 0, processing: 0 };
+      const amount = Number((row as any)?.gross_amount || 0);
+      if (!Number.isFinite(amount)) continue;
+      const type = safeText((row as any)?.payable_type).toUpperCase();
+      if (type === "PROCESSING") out[lineId].processing += amount;
+      else out[lineId].material += amount;
+    }
+  } catch {
+    return out;
+  }
+
+  return out;
+}
+
 // ---- WS Line enrichment from PO lines + images (response-time only) ----
 async function enrichLinesFromPo(wsLines: any[]) {
   try {
@@ -657,6 +690,14 @@ async function loadAll(workSheetId: string) {
       if (!materialsByLineId[k]) materialsByLineId[k] = [];
       materialsByLineId[k].push(r);
     }
+  }
+
+  const inhouseExtraActualMap = await loadInhouseExtraActualMap(lineIds);
+  for (const line of safeLines) {
+    const lineId = safeText((line as any)?.id);
+    const extra = inhouseExtraActualMap[lineId] ?? { material: 0, processing: 0 };
+    (line as any).inhouse_extra_material_actual = extra.material || 0;
+    (line as any).inhouse_extra_processing_actual = extra.processing || 0;
   }
 
   // 2-b) Fallback: if snapshot is empty, read from Product Development
