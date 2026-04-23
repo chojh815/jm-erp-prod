@@ -13,6 +13,69 @@ function isMissingPurposeColumn(error: any) {
   return message.includes('purpose_code') || message.includes('purpose_group')
 }
 
+async function enrichRefStatus(rows: any[]) {
+  if (!rows.length) return rows
+
+  const payableIds = Array.from(
+    new Set(
+      rows
+        .filter((row: any) => row?.ref_type === 'subcontract_payable' && row?.ref_id)
+        .map((row: any) => row.ref_id)
+    )
+  )
+
+  const advanceIds = Array.from(
+    new Set(
+      rows
+        .filter((row: any) => row?.ref_type === 'subcontract_advance' && row?.ref_id)
+        .map((row: any) => row.ref_id)
+    )
+  )
+
+  const payableMap = new Map<string, any>()
+  const advanceMap = new Map<string, any>()
+
+  if (payableIds.length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from('subcontract_payables')
+      .select('id, is_deleted, status')
+      .in('id', payableIds)
+    if (error) throw error
+    for (const row of data || []) payableMap.set(row.id, row)
+  }
+
+  if (advanceIds.length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from('subcontract_advances')
+      .select('id, is_deleted, status')
+      .in('id', advanceIds)
+    if (error) throw error
+    for (const row of data || []) advanceMap.set(row.id, row)
+  }
+
+  return rows.map((row: any) => {
+    if (!row?.ref_type || !row?.ref_id) {
+      return {
+        ...row,
+        source_exists: false,
+        source_deleted: false,
+        source_status: null,
+      }
+    }
+
+    let linked: any = null
+    if (row.ref_type === 'subcontract_payable') linked = payableMap.get(row.ref_id) || null
+    if (row.ref_type === 'subcontract_advance') linked = advanceMap.get(row.ref_id) || null
+
+    return {
+      ...row,
+      source_exists: !!linked,
+      source_deleted: !!linked?.is_deleted,
+      source_status: linked?.status || null,
+    }
+  })
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url)
@@ -51,7 +114,7 @@ export async function GET(req: NextRequest) {
     if (ids.length > 0) {
       const { data: purposeRows, error: purposeError } = await supabaseAdmin
         .from('cash_transactions')
-        .select('id, purpose_code, purpose_group')
+        .select('id, purpose_code, purpose_group, ref_type, ref_id')
         .in('id', ids)
 
       if (purposeError && !isMissingPurposeColumn(purposeError)) throw purposeError
@@ -62,9 +125,13 @@ export async function GET(req: NextRequest) {
           ...row,
           purpose_code: purposeMap.get(row.id)?.purpose_code || null,
           purpose_group: purposeMap.get(row.id)?.purpose_group || null,
+          ref_type: purposeMap.get(row.id)?.ref_type || null,
+          ref_id: purposeMap.get(row.id)?.ref_id || null,
         }))
       }
     }
+
+    items = await enrichRefStatus(items)
 
     return NextResponse.json({ ok: true, items })
   } catch (error: any) {

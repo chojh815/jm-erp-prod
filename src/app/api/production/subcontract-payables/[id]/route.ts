@@ -38,6 +38,27 @@ function addDays(date: string, days: number) {
   return d.toISOString().slice(0, 10);
 }
 
+async function loadExistingPayable(id: string) {
+  const { data, error } = await supabaseAdmin
+    .from("subcontract_payables")
+    .select("id, cash_transaction_id, status, is_deleted")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data as any;
+}
+
+async function setCashTransactionDeleted(id: string, isDeleted: boolean) {
+  if (!id) return;
+  const { error } = await supabaseAdmin
+    .from("cash_transactions")
+    .update({ is_deleted: isDeleted })
+    .eq("id", id);
+
+  if (error) throw error;
+}
+
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
   try {
     const body = await req.json().catch(() => null);
@@ -127,12 +148,27 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
 
 export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
   try {
+    const existing = await loadExistingPayable(params.id);
+    if (!existing || existing.is_deleted) return ok();
+
+    const cashTransactionId = safeTrim(existing.cash_transaction_id);
+
+    if (cashTransactionId) {
+      await setCashTransactionDeleted(cashTransactionId, true);
+    }
+
     const { error } = await supabaseAdmin
       .from("subcontract_payables")
       .update({ is_deleted: true, updated_at: new Date().toISOString() })
       .eq("id", params.id);
 
-    if (error) throw error;
+    if (error) {
+      if (cashTransactionId) {
+        await setCashTransactionDeleted(cashTransactionId, false);
+      }
+      throw error;
+    }
+
     return ok();
   } catch (e: any) {
     return bad(e?.message || "Failed to delete subcontract payable", 500);
