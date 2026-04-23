@@ -319,6 +319,7 @@ export async function GET(req: Request) {
         qty,
         lp_currency: lpCur || null,
         lp_unit: lpUnit,
+        vendor_id: safeTrim((a as any)?.vendor_id) || safeTrim(r?.vendor_id) || null,
         production_mode: mode,
         delivery_date: delivery,
         _score: completenessScore,

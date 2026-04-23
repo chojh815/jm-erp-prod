@@ -9,8 +9,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { createSupabaseBrowserClient } from "@/lib/supabaseClient";
 
 type Buyer = { id: string; name: string };
-type Inv = { id: string; invoice_no: string; currency: string | null; total_amount: number; applied_amount: number; balance: number };
-type BankAccount = { id: string; account_name: string; currency?: string | null };
+type Vendor = { id: string; name: string };
+type Inv = { id: string; invoice_no: string; po_nos?: string[]; currency: string | null; total_amount: number; applied_amount: number; balance: number };
 
 function pickName(r: any) {
   return r.company_name || r.name || r.companyName || r.buyer_name || r.company || r.email || r.code || r.id;
@@ -24,12 +24,14 @@ function fmt(v: any) {
 export default function CreditNotesPage() {
   const supabase = React.useMemo(() => createSupabaseBrowserClient(), []);
   const [buyers, setBuyers] = React.useState<Buyer[]>([]);
-  const [banks, setBanks] = React.useState<BankAccount[]>([]);
+  const [vendors, setVendors] = React.useState<Vendor[]>([]);
   const [buyerId, setBuyerId] = React.useState("");
-  const [bankId, setBankId] = React.useState("");
+  const [invoiceSearch, setInvoiceSearch] = React.useState("");
   const [date, setDate] = React.useState<string>(new Date().toISOString().slice(0, 10));
   const [ref, setRef] = React.useState("");
   const [note, setNote] = React.useState("");
+  const [responsibleVendorId, setResponsibleVendorId] = React.useState("");
+  const [subcontractDeductionAmount, setSubcontractDeductionAmount] = React.useState("");
   const [invoices, setInvoices] = React.useState<Inv[]>([]);
   const [amounts, setAmounts] = React.useState<Record<string, string>>({});
   const [msg, setMsg] = React.useState("");
@@ -50,17 +52,13 @@ export default function CreditNotesPage() {
         setBuyers(list);
       }
 
-      // bank accounts (optional for CREDIT)
       try {
-        const { data: bdata } = await supabase
-          .from("bank_accounts")
-          .select("id, account_name, currency, is_active, sort_order")
-          .eq("is_active", true)
-          .order("sort_order", { ascending: true })
-          .order("account_name", { ascending: true });
-        setBanks(((bdata as any) || []) as BankAccount[]);
+        const res = await fetch("/api/work-sheets/vendors", { cache: "no-store" });
+        const j = await res.json();
+        const list = (j.rows || []).map((r: any) => ({ id: r.id, name: pickName(r) }));
+        setVendors(list);
       } catch {
-        setBanks([]);
+        setVendors([]);
       }
 
     })();
@@ -76,7 +74,11 @@ export default function CreditNotesPage() {
       setLoading(true);
       setMsg("");
       try {
-        const res = await fetch(`/api/invoices/unpaid?buyer_id=${buyerId}`, { cache: "no-store" });
+        const params = new URLSearchParams();
+        params.set("buyer_id", buyerId);
+        if (responsibleVendorId) params.set("vendor_id", responsibleVendorId);
+        if (invoiceSearch.trim()) params.set("q", invoiceSearch.trim());
+        const res = await fetch(`/api/invoices/unpaid?${params.toString()}`, { cache: "no-store" });
         const j = await res.json();
         if (!j.success) throw new Error(j.error || "Failed to load invoices");
         setInvoices(j.rows || []);
@@ -89,7 +91,7 @@ export default function CreditNotesPage() {
         setLoading(false);
       }
     })();
-  }, [buyerId]);
+  }, [buyerId, invoiceSearch, responsibleVendorId]);
 
   const total = React.useMemo(() => {
     let t = 0;
@@ -115,6 +117,9 @@ export default function CreditNotesPage() {
       deposit_date: date,
       reference_no: ref || null,
       note: note || null,
+      responsible_vendor_id: responsibleVendorId || null,
+      responsible_vendor_name: vendors.find((row) => row.id === responsibleVendorId)?.name || null,
+      subcontract_deduction_amount: Math.abs(Number(subcontractDeductionAmount || 0)),
       lines,
     };
 
@@ -152,16 +157,6 @@ export default function CreditNotesPage() {
               </select>
             </div>
 
-            <div className="w-96">
-              <div className="text-xs text-muted-foreground mb-1">Bank Account</div>
-              <select className="w-full border rounded-md h-10 px-2 text-sm" value={bankId} onChange={(e) => setBankId(e.target.value)}>
-                <option value="">Select bank account</option>
-                {banks.map((b) => (
-                  <option key={b.id} value={b.id}>{b.account_name} {b.currency ? `(${b.currency})` : ""}</option>
-                ))}
-              </select>
-            </div>
-
             <div className="w-44">
               <div className="text-xs text-muted-foreground mb-1">Date</div>
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -175,6 +170,26 @@ export default function CreditNotesPage() {
             <div className="flex-1 min-w-[220px]">
               <div className="text-xs text-muted-foreground mb-1">Note</div>
               <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reason / memo" />
+            </div>
+
+            <div className="w-80">
+              <div className="text-xs text-muted-foreground mb-1">Responsible Vendor</div>
+              <select className="w-full border rounded-md h-10 px-2 text-sm" value={responsibleVendorId} onChange={(e) => setResponsibleVendorId(e.target.value)}>
+                <option value="">No subcontract claim</option>
+                {vendors.map((v) => (
+                  <option key={v.id} value={v.id}>{v.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="w-52">
+              <div className="text-xs text-muted-foreground mb-1">Subcontract Deduction</div>
+              <Input value={subcontractDeductionAmount} onChange={(e) => setSubcontractDeductionAmount(e.target.value)} placeholder="0" />
+            </div>
+
+            <div className="w-72">
+              <div className="text-xs text-muted-foreground mb-1">Invoice / PO Search</div>
+              <Input value={invoiceSearch} onChange={(e) => setInvoiceSearch(e.target.value)} placeholder="Invoice no or PO no" />
             </div>
 
             <Button onClick={save} disabled={loading}>
@@ -192,6 +207,7 @@ export default function CreditNotesPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Invoice No</TableHead>
+                <TableHead>PO</TableHead>
                 <TableHead className="text-right">Total</TableHead>
                 <TableHead className="text-right">Applied</TableHead>
                 <TableHead className="text-right">Balance</TableHead>
@@ -202,6 +218,7 @@ export default function CreditNotesPage() {
               {invoices.map((inv) => (
                 <TableRow key={inv.id}>
                   <TableCell>{inv.invoice_no}</TableCell>
+                  <TableCell>{(inv.po_nos || []).join(", ") || "-"}</TableCell>
                   <TableCell className="text-right">{fmt(inv.total_amount)}</TableCell>
                   <TableCell className="text-right">{fmt(inv.applied_amount)}</TableCell>
                   <TableCell className="text-right">{fmt(inv.balance)}</TableCell>
@@ -217,8 +234,8 @@ export default function CreditNotesPage() {
               ))}
               {invoices.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-sm text-muted-foreground">
-                    {buyerId ? (loading ? "Loading..." : "No unpaid invoices.") : "Select buyer."}
+                  <TableCell colSpan={6} className="text-sm text-muted-foreground">
+                    {buyerId ? (loading ? "Loading..." : "No unpaid invoices matched.") : "Select buyer."}
                   </TableCell>
                 </TableRow>
               ) : null}

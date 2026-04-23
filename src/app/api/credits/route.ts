@@ -40,6 +40,9 @@ export async function POST(req: NextRequest) {
         reference_no: reference_no ?? null,
         note: note ?? null,
         receipt_type: "CREDIT",
+        responsible_vendor_id: body?.responsible_vendor_id || null,
+        responsible_vendor_name: body?.responsible_vendor_name || null,
+        subcontract_deduction_amount: Math.abs(toNum(body?.subcontract_deduction_amount || 0)),
       })
       .select()
       .single();

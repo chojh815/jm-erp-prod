@@ -122,6 +122,8 @@ async function recalcInvoicesWithSettlement(invoiceIds: string[]) {
 
     const totalAmount = round2(toNum((inv as any).total_amount));
     const paidAmount = round2(t.applied);
+    // If the buyer remitted the full amount and our bank deducted a fee,
+    // the invoice is still settled in full from the buyer's side.
     const effectivePaid = round2(t.applied + t.writeoff + t.ourFee + t.buyerFee + t.claim);
     const balanceAmount = round2(Math.max(0, totalAmount - effectivePaid));
     const tol = 0.01;

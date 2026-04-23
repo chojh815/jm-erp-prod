@@ -140,7 +140,8 @@ export async function GET(
       rows.reduce((s: number, r: any) => s + toNum(r.applied_amount), 0)
     );
 
-    // Fees / claims / writeoffs are settlement items, not open A/R.
+    // Fees / claims / writeoffs are settlement items.
+    // Our bank fee still closes the invoice when the buyer remitted the full gross amount.
     const settlementAdjTotal = round2(
       rows.reduce(
         (s: number, r: any) =>

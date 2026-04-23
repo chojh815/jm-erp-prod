@@ -111,6 +111,7 @@ async function recalcInvoicesWithSettlement(invoiceIds: string[]) {
 
     const totalAmount = round2(toNum((inv as any).total_amount));
     const paidAmount = round2(t.applied);
+    // If our bank deducted the fee from the incoming wire, it still settles the invoice.
     const effectivePaid = round2(t.applied + t.writeoff + t.ourFee + t.buyerFee + t.claim);
     const balanceAmount = round2(Math.max(0, totalAmount - effectivePaid));
     const tol = 0.01;

@@ -78,7 +78,7 @@ function proportionalSplit(total: number, allocations: AllocationOut[]) {
  * balance_amount = total_amount - effective_settlement
  * effective_settlement = applied + our_fee + buyer_fee + claim + writeoff
  *
- * So if Total=3344, Applied=3324, Our Fee=20 => balance must be 0, not 20.
+ * If our bank deducts the fee from the incoming wire, the buyer still settled that amount.
  */
 async function recalcInvoicesWithSettlement(invoiceIds: string[]) {
   const ids = Array.from(new Set((invoiceIds || []).map((x) => safe(x)).filter(Boolean)));

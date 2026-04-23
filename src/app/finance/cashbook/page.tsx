@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'react'
 type Currency = 'USD' | 'KRW' | 'CNY' | 'VND'
 type EntryMode = 'DEPOSIT' | 'WITHDRAW' | 'TRANSFER' | 'FX' | 'ADJUST'
 type InOut = 'IN' | 'OUT'
-type OutputLang = 'en' | 'zh'
+type OutputLang = 'ko' | 'en' | 'zh'
 type PurposeGroup = 'Revenue' | 'Direct Cost' | 'Overhead' | 'Financial Cost' | 'Tax' | 'Owner / Equity' | 'Other'
 
 type CashAccount = {
@@ -110,11 +110,53 @@ const purposeOptions: { code: string; label: string; group: PurposeGroup }[] = [
 ]
 
 const excelLabels = {
+  ko: {
+    exportDate: '출력일',
+    cashbookSummary: '금전출납부 요약',
+    cashBankAccounts: '현금 / 은행 계정',
+    cashbookReport: '금전출납부',
+    ledgerData: '원장데이터',
+    bankDetails: '은행정보',
+    buyerBankDetails: '바이어 송금 은행정보',
+    currency: '통화',
+    balance: '잔액',
+    accountCount: '계정수',
+    bankCount: '은행계정수',
+    cashCount: '현금계정수',
+    code: '코드',
+    name: '이름',
+    type: '유형',
+    bank: '은행',
+    accountNo: '계좌번호',
+    opening: '기초잔액',
+    current: '현재잔액',
+    previousBalance: '전일잔액',
+    todayIncome: '수입',
+    todayExpense: '지출',
+    cashBalance: '현잔액',
+    summaryType: '구분',
+    date: '날짜',
+    account: '계정',
+    accountName: '계정명',
+    inOut: '입/출',
+    category: '분류',
+    purposeGroup: '계정그룹',
+    purpose: '계정과목',
+    description: '적요',
+    counterparty: '거래처',
+    amount: '금액',
+    holderName: '예금주',
+    swift: 'SWIFT',
+    bankAddress: '은행주소',
+    beneficiaryAddress: '수취인주소',
+    note: '비고',
+  },
   en: {
     exportDate: 'Export Date',
     cashbookSummary: 'Cashbook Summary',
     cashBankAccounts: 'Cash / Bank Accounts',
-    cashbookLines: 'Cashbook Lines',
+    cashbookReport: 'Cashbook Report',
+    ledgerData: 'Ledger Data',
     bankDetails: 'Bank Details',
     buyerBankDetails: 'Buyer Remittance Bank Details',
     currency: 'Currency',
@@ -129,6 +171,11 @@ const excelLabels = {
     accountNo: 'Account No',
     opening: 'Opening',
     current: 'Current',
+    previousBalance: 'Previous Balance',
+    todayIncome: 'Income',
+    todayExpense: 'Expense',
+    cashBalance: 'Cash Balance',
+    summaryType: 'Summary Type',
     date: 'Date',
     account: 'Account',
     accountName: 'Account Name',
@@ -149,7 +196,8 @@ const excelLabels = {
     exportDate: '导出日期',
     cashbookSummary: '现金出纳账汇总',
     cashBankAccounts: '现金/银行账户',
-    cashbookLines: '出纳明细',
+    cashbookReport: '出纳报告',
+    ledgerData: '出纳原始数据',
     bankDetails: '银行信息',
     buyerBankDetails: '买方汇款银行信息',
     currency: '币种',
@@ -164,6 +212,11 @@ const excelLabels = {
     accountNo: '账号',
     opening: '期初余额',
     current: '当前余额',
+    previousBalance: '上期余额',
+    todayIncome: '收入',
+    todayExpense: '支出',
+    cashBalance: '当前余额',
+    summaryType: '汇总类型',
     date: '日期',
     account: '账户',
     accountName: '账户名称',
@@ -211,6 +264,59 @@ function purposeLabel(code?: string | null) {
   return purposeOptions.find((item) => item.code === code)?.label || code
 }
 
+const purposeOutputLabels: Record<OutputLang, Record<string, string>> = {
+  ko: {
+    SALES_RECEIPT: '매출입금',
+    PURCHASE_PAYMENT: '매입지급',
+    FREIGHT: '운송비',
+    SAMPLE_COST: '샘플비',
+    PAYROLL: '급여',
+    RENT: '임대료',
+    UTILITIES: '공과금',
+    OFFICE_SUPPLIES: '사무용품비',
+    MEALS: '식대',
+    TRAVEL: '출장비',
+    VEHICLE_MAINTENANCE: '차량유지비',
+    TRANSPORTATION: '교통비',
+    EMPLOYEE_BENEFITS: '복리후생비',
+    MISC_EXPENSE: '기타잡비',
+    BANK_FEE: '은행수수료',
+    TAX_PAYMENT: '세금납부',
+    OWNER_DRAW: '대표인출',
+    CAPITAL_INJECTION: '자본입금',
+    ADJUSTMENT: '조정',
+    OTHER: '기타',
+  },
+  en: {},
+  zh: {
+    SALES_RECEIPT: '销售收款',
+    PURCHASE_PAYMENT: '采购付款',
+    FREIGHT: '运费',
+    SAMPLE_COST: '样品费',
+    PAYROLL: '工资',
+    RENT: '租金',
+    UTILITIES: '水电费',
+    OFFICE_SUPPLIES: '办公用品',
+    MEALS: '餐费',
+    TRAVEL: '差旅费',
+    VEHICLE_MAINTENANCE: '车辆维护费',
+    TRANSPORTATION: '交通费',
+    EMPLOYEE_BENEFITS: '员工福利',
+    MISC_EXPENSE: '杂费',
+    BANK_FEE: '银行手续费',
+    TAX_PAYMENT: '税金缴纳',
+    OWNER_DRAW: '业主提款',
+    CAPITAL_INJECTION: '资本投入',
+    ADJUSTMENT: '调整',
+    OTHER: '其他',
+  },
+}
+
+function purposeExcelLabel(code: string | null | undefined, lang: OutputLang) {
+  if (!code) return ''
+  return purposeOutputLabels[lang][code] || purposeLabel(code)
+}
+
 export default function CashbookPage() {
   const today = new Date().toISOString().slice(0, 10)
 
@@ -243,7 +349,7 @@ export default function CashbookPage() {
   const [editingAccountId, setEditingAccountId] = useState('')
   const [showBankDetail, setShowBankDetail] = useState(false)
   const [showAccountSetup, setShowAccountSetup] = useState(false)
-  const [excelLang, setExcelLang] = useState<OutputLang>('en')
+  const [excelLang, setExcelLang] = useState<OutputLang>('ko')
   const [accountForm, setAccountForm] = useState<AccountForm>(emptyAccountForm)
 
   const activeAccounts = useMemo(() => accounts.filter((x) => x.is_active !== false), [accounts])
@@ -419,6 +525,29 @@ export default function CashbookPage() {
     const wb = new ExcelJS.Workbook()
     wb.creator = 'JM ERP'
     wb.created = new Date()
+    const sheetNames = {
+      ko: {
+        summary: '요약',
+        cashbookReport: '금전출납부',
+        accounts: '계정',
+        ledgerData: '원장데이터',
+        bankDetails: '은행정보',
+      },
+      en: {
+        summary: 'Summary',
+        cashbookReport: 'Cashbook Report',
+        accounts: 'Accounts',
+        ledgerData: 'Ledger Data',
+        bankDetails: 'Bank Details',
+      },
+      zh: {
+        summary: '汇总',
+        cashbookReport: '出纳报告',
+        accounts: '账户',
+        ledgerData: '出纳原始数据',
+        bankDetails: '银行信息',
+      },
+    }[excelLang]
 
     const titleFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF1F4E78' } }
     const headerFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF374151' } }
@@ -472,7 +601,42 @@ export default function CashbookPage() {
       }
     }
 
-    const summary = wb.addWorksheet(excelLang === 'zh' ? '汇总' : 'Summary')
+    const reportRows = [...visibleRows].sort((a, b) => {
+      const byDate = String(a.tx_date || '').localeCompare(String(b.tx_date || ''))
+      if (byDate !== 0) return byDate
+      return String(a.id || '').localeCompare(String(b.id || ''))
+    })
+    const reportCurrencies = (['USD', 'KRW', 'CNY', 'VND'] as Currency[]).filter((currency) => {
+      if (filterCurrency && filterCurrency !== currency) return false
+      return activeAccounts.some((row) => row.currency === currency) || reportRows.some((row) => row.currency === currency)
+    })
+    const accountRowsForReport = activeAccounts.filter((row) => {
+      if (filterAccount && accountId(row) !== filterAccount) return false
+      if (filterCurrency && row.currency !== filterCurrency) return false
+      return true
+    })
+    const currentByCurrency = new Map<Currency, number>()
+    for (const row of accountRowsForReport) {
+      currentByCurrency.set(row.currency, (currentByCurrency.get(row.currency) || 0) + Number(row.current_balance || 0))
+    }
+    const incomeByCurrency = new Map<Currency, number>()
+    const expenseByCurrency = new Map<Currency, number>()
+    for (const row of reportRows) {
+      const amount = Number(row.amount || 0)
+      if (row.in_out === 'IN') incomeByCurrency.set(row.currency, (incomeByCurrency.get(row.currency) || 0) + amount)
+      if (row.in_out === 'OUT') expenseByCurrency.set(row.currency, (expenseByCurrency.get(row.currency) || 0) + amount)
+    }
+    const openingByCurrency = new Map<Currency, number>()
+    for (const currency of reportCurrencies) {
+      openingByCurrency.set(
+        currency,
+        Number(currentByCurrency.get(currency) || 0) -
+          Number(incomeByCurrency.get(currency) || 0) +
+          Number(expenseByCurrency.get(currency) || 0)
+      )
+    }
+
+    const summary = wb.addWorksheet(sheetNames.summary)
     setupSheet(summary, t.cashbookSummary, [14, 18, 14, 18, 18, 18])
     summary.getRow(4).values = [t.currency, t.balance, '', t.accountCount, t.bankCount, t.cashCount]
     totalsByCurrency.forEach((item, index) => {
@@ -489,7 +653,56 @@ export default function CashbookPage() {
     summary.getColumn(2).numFmt = '#,##0.00'
     styleTable(summary)
 
-    const accountsSheet = wb.addWorksheet(excelLang === 'zh' ? '账户' : 'Accounts')
+    const cashbookReport = wb.addWorksheet(sheetNames.cashbookReport)
+    setupSheet(cashbookReport, t.cashbookReport, [12, 18, 28, 22, 16, 16, 16, 12, 22])
+    cashbookReport.getRow(4).values = [t.currency, t.previousBalance, t.todayIncome, t.todayExpense, t.cashBalance]
+    reportCurrencies.forEach((currency) => {
+      cashbookReport.addRow([
+        currency,
+        Number(openingByCurrency.get(currency) || 0),
+        Number(incomeByCurrency.get(currency) || 0),
+        Number(expenseByCurrency.get(currency) || 0),
+        Number(currentByCurrency.get(currency) || 0),
+      ])
+    })
+    for (let col = 2; col <= 5; col += 1) cashbookReport.getColumn(col).numFmt = '#,##0.00'
+    styleTable(cashbookReport)
+
+    const detailHeaderRow = Math.max(7, cashbookReport.rowCount + 3)
+    cashbookReport.getRow(detailHeaderRow).values = [
+      t.date,
+      t.account,
+      t.description,
+      t.purpose,
+      t.todayIncome,
+      t.todayExpense,
+      t.cashBalance,
+      t.currency,
+      t.counterparty,
+    ]
+    const runningByCurrency = new Map(openingByCurrency)
+    reportRows.forEach((row) => {
+      const previousBalance = Number(runningByCurrency.get(row.currency) || 0)
+      const income = row.in_out === 'IN' ? Number(row.amount || 0) : 0
+      const expense = row.in_out === 'OUT' ? Number(row.amount || 0) : 0
+      const cashBalance = previousBalance + income - expense
+      runningByCurrency.set(row.currency, cashBalance)
+      cashbookReport.addRow([
+        row.tx_date,
+        `${row.account_code} / ${row.account_name}`,
+        row.description,
+        purposeExcelLabel(row.purpose_code, excelLang),
+        income || '',
+        expense || '',
+        cashBalance,
+        row.currency,
+        row.counterparty_name || '',
+      ])
+    })
+    for (let col = 5; col <= 7; col += 1) cashbookReport.getColumn(col).numFmt = '#,##0.00'
+    styleTable(cashbookReport, detailHeaderRow)
+
+    const accountsSheet = wb.addWorksheet(sheetNames.accounts)
     setupSheet(accountsSheet, t.cashBankAccounts, [16, 24, 10, 10, 22, 20, 16, 16])
     accountsSheet.getRow(4).values = [t.code, t.name, t.type, t.currency, t.bank, t.accountNo, t.opening, t.current]
     activeAccounts.forEach((row) => {
@@ -508,8 +721,8 @@ export default function CashbookPage() {
     accountsSheet.getColumn(8).numFmt = '#,##0.00'
     styleTable(accountsSheet)
 
-    const ledgerSheet = wb.addWorksheet(excelLang === 'zh' ? '出纳明细' : 'Cashbook Lines')
-    setupSheet(ledgerSheet, t.cashbookLines, [12, 16, 24, 10, 14, 18, 22, 32, 18, 16, 10])
+    const ledgerSheet = wb.addWorksheet(sheetNames.ledgerData)
+    setupSheet(ledgerSheet, t.ledgerData, [12, 16, 24, 10, 14, 18, 22, 32, 18, 16, 10])
     ledgerSheet.getRow(4).values = [t.date, t.account, t.accountName, t.inOut, t.category, t.purposeGroup, t.purpose, t.description, t.counterparty, t.amount, t.currency]
     visibleRows.forEach((row) => {
       ledgerSheet.addRow([
@@ -519,7 +732,7 @@ export default function CashbookPage() {
         row.in_out,
         row.category,
         row.purpose_group || '',
-        purposeLabel(row.purpose_code),
+        purposeExcelLabel(row.purpose_code, excelLang),
         row.description,
         row.counterparty_name || '',
         Number(row.amount || 0),
@@ -529,7 +742,7 @@ export default function CashbookPage() {
     ledgerSheet.getColumn(10).numFmt = '#,##0.00'
     styleTable(ledgerSheet)
 
-    const bankSheet = wb.addWorksheet(excelLang === 'zh' ? '银行信息' : 'Bank Details')
+    const bankSheet = wb.addWorksheet(sheetNames.bankDetails)
     setupSheet(bankSheet, t.buyerBankDetails, [16, 24, 22, 22, 20, 22, 36, 36, 30])
     bankSheet.getRow(4).values = [t.code, t.name, t.bank, t.accountNo, t.holderName, t.swift, t.bankAddress, t.beneficiaryAddress, t.note]
     activeAccounts.forEach((row) => {
@@ -780,6 +993,7 @@ export default function CashbookPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           <select className="rounded-md border border-gray-300 px-2.5 py-1.5 text-xs outline-none focus:border-blue-500" value={excelLang} onChange={(e) => setExcelLang(e.target.value as OutputLang)}>
+            <option value="ko">Excel Korean</option>
             <option value="en">Excel English</option>
             <option value="zh">Excel 中文简体</option>
           </select>

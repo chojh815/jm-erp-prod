@@ -186,6 +186,21 @@ function extractRemarksFromNote(note: any): string | null {
   return s || null;
 }
 
+function buildMaterialRemarks(row: any): string | null {
+  const parts: string[] = [];
+  const spec = toStr(
+    row?.spec_text ?? row?.specText ?? row?.spec ?? row?.material_spec ?? row?.operation_spec
+  ).trim();
+  const color = toStr(row?.color_text ?? row?.colorText ?? row?.color ?? row?.color_name).trim();
+  const note = extractRemarksFromNote(row?.note ?? row?.remark ?? row?.remarks ?? null);
+
+  if (spec) parts.push(`Spec: ${spec}`);
+  if (color) parts.push(`Color: ${color}`);
+  if (note) parts.push(note);
+
+  return parts.length ? parts.join(" / ") : null;
+}
+
 /** ---------- mode / lang from URL ---------- */
 type Lang = "en" | "cn" | "vn";
 
@@ -429,7 +444,7 @@ function mapApiToPdfData(json: any): PdfData {
 
           const qtyFromNote = extractQtyFromNote(noteText);
           const unitCostFromNote = extractUnitCostFromNote(noteText);
-          const remarksFromNote = extractRemarksFromNote(noteText);
+          const remarksText = buildMaterialRemarks(m);
 
           const q = qtyFromNote ?? m?.qty ?? null;
           const u = unitCostFromNote ?? m?.unit_cost ?? m?.unitCost ?? null;
@@ -443,7 +458,7 @@ function mapApiToPdfData(json: any): PdfData {
             qty: q,
             unitCost: u,
             amount,
-            remark: remarksFromNote ?? m?.remark_text ?? m?.remark ?? m?.remarks ?? null,
+            remark: remarksText ?? m?.remark_text ?? m?.remark ?? m?.remarks ?? null,
           };
         })
     : [];

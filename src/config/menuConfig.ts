@@ -119,6 +119,11 @@ export const MENU_SECTIONS: MenuSection[] = [
     items: [
       { label: "Work Sheets", href: "/work-sheets", perm: "work_sheet.view" },
       {
+        label: "Subcontract Payables",
+        href: "/production/subcontract-payables",
+        perm: "work_sheet.view",
+      },
+      {
         label: "Work Orders",
         href: "/production/work-orders",
         perm: "work_order.view",
