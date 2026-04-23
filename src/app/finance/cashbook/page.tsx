@@ -413,6 +413,14 @@ export default function CashbookPage() {
   }
 
   async function deleteLedgerRow(row: LedgerRow) {
+    if (row.ref_type && row.source_exists && !row.source_deleted) {
+      const statusText = row.source_status ? ` (status: ${row.source_status})` : ''
+      setMessage(
+        `This cashbook line is still linked to an active ${row.ref_type}${statusText}. Delete it from the source screen first.`
+      )
+      return
+    }
+
     let refLabel = ''
     if (row.ref_type) {
       if (row.source_exists && !row.source_deleted) {
