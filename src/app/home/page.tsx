@@ -12,6 +12,8 @@ type SummaryCard = {
   title: string;
   value: string;
   sub: string;
+  detail?: string;
+  footer?: string;
   href: string;
   tone?: "default" | "warning";
 };
@@ -22,6 +24,16 @@ function todayISO() {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+function addDaysISO(baseIso: string, days: number) {
+  const [y, m, d] = baseIso.split("-").map(Number);
+  const date = new Date(y, (m || 1) - 1, d || 1);
+  date.setDate(date.getDate() + days);
+  const yy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
 }
 
 function money(v: any) {
@@ -99,14 +111,20 @@ export default function HomePage() {
 
     let mounted = true;
     const today = todayISO();
+    const next7Start = addDaysISO(today, 1);
+    const next7End = addDaysISO(today, 7);
 
     async function loadSummary() {
       try {
         setSummaryLoading(true);
         setSummaryError("");
 
-        const [todayRes, openPoRes, watchRes, marginRes] = await Promise.all([
+        const [todayRes, nextShipRes, openPoRes, watchRes, marginRes] = await Promise.all([
           fetch(`/api/dashboards/overview?preset=CUSTOM&start=${today}&end=${today}`, {
+            cache: "no-store",
+            credentials: "include",
+          }),
+          fetch(`/api/dashboards/overview?preset=CUSTOM&start=${next7Start}&end=${next7End}`, {
             cache: "no-store",
             credentials: "include",
           }),
@@ -124,8 +142,9 @@ export default function HomePage() {
           }),
         ]);
 
-        const [todayJson, openPoJson, watchJson, marginJson] = await Promise.all([
+        const [todayJson, nextShipJson, openPoJson, watchJson, marginJson] = await Promise.all([
           todayRes.ok ? todayRes.json() : null,
+          nextShipRes.ok ? nextShipRes.json() : null,
           openPoRes.ok ? openPoRes.json() : null,
           watchRes.ok ? watchRes.json() : null,
           marginRes.ok ? marginRes.json() : null,
@@ -134,9 +153,11 @@ export default function HomePage() {
         if (!mounted) return;
 
         const todayKpis = Array.isArray(todayJson?.kpis) ? todayJson.kpis : [];
+        const nextShipKpis = Array.isArray(nextShipJson?.kpis) ? nextShipJson.kpis : [];
         const watchKpis = Array.isArray(watchJson?.kpis) ? watchJson.kpis : [];
 
         const shippedToday = findKpi(todayKpis, "shipped");
+        const shippedNext7 = findKpi(nextShipKpis, "shipped");
         const invoicedToday = findKpi(todayKpis, "invoiced");
         const ar = findKpi(watchKpis, "ar");
         const sampleOverdue = Number(watchJson?.sample_overdue ?? 0);
@@ -149,9 +170,11 @@ export default function HomePage() {
 
         setSummaryCards([
           {
-            title: "Shipments Today",
-            value: countText(shippedToday?.sub_value, " due"),
-            sub: `${money(shippedToday?.value_usd)} shipped`,
+            title: "Shipments",
+            value: countText(shippedToday?.sub_value),
+            sub: "due today",
+            detail: `Next 7 days: ${countText(shippedNext7?.sub_value)}`,
+            footer: `Scheduled: ${money(shippedNext7?.value_usd)}`,
             href: "/shipments/list",
           },
           {
@@ -258,7 +281,7 @@ export default function HomePage() {
         ) : (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             {(summaryCards.length ? summaryCards : [
-              { title: "Shipments Today", value: "-", sub: "No data loaded", href: "/shipments/list" },
+              { title: "Shipments", value: "-", sub: "due today", detail: "Next 7 days: -", footer: "Scheduled: -", href: "/shipments/list" },
               { title: "Open POs", value: "-", sub: "No data loaded", href: "/po/list" },
               { title: "Invoices Today", value: "-", sub: "No data loaded", href: "/invoices" },
               { title: "Receivable", value: "-", sub: "No data loaded", href: "/dashboards/ar-aging" },
@@ -273,10 +296,27 @@ export default function HomePage() {
                     <CardTitle className="text-sm">{card.title}</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <div className="text-2xl font-semibold tracking-normal text-slate-950">
-                      {card.value}
-                    </div>
-                    <p className="mt-1 text-xs text-slate-600">{card.sub}</p>
+                    {card.detail ? (
+                      <div className="flex items-end gap-2">
+                        <div className="text-2xl font-semibold tracking-normal text-slate-950">
+                          {card.value}
+                        </div>
+                        <p className="pb-1 text-sm text-slate-600">{card.sub}</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="text-2xl font-semibold tracking-normal text-slate-950">
+                          {card.value}
+                        </div>
+                        <p className="mt-1 text-xs text-slate-600">{card.sub}</p>
+                      </>
+                    )}
+                    {card.detail ? (
+                      <p className="mt-4 text-sm font-medium text-slate-700">{card.detail}</p>
+                    ) : null}
+                    {card.footer ? (
+                      <p className="mt-1 text-xs text-slate-500">{card.footer}</p>
+                    ) : null}
                   </CardContent>
                 </Card>
               </Link>
