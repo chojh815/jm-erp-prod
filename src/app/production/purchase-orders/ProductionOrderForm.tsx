@@ -63,6 +63,7 @@ export default function ProductionOrderForm({ orderId }: Props) {
 
   const [loading, setLoading] = React.useState(isEdit);
   const [saving, setSaving] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [messageTone, setMessageTone] = React.useState<"success" | "error">("success");
   const [vendors, setVendors] = React.useState<ProductionOrderVendor[]>([]);
@@ -261,6 +262,34 @@ export default function ProductionOrderForm({ orderId }: Props) {
     }
   }
 
+  async function handleDelete() {
+    if (!orderId || deleting) return;
+    const okDelete = window.confirm(
+      "Delete this production order?\n\nIt will be removed from the list."
+    );
+    if (!okDelete) return;
+
+    try {
+      setDeleting(true);
+      setMessage("");
+
+      const res = await fetch(`/api/production/purchase-orders/${orderId}`, {
+        method: "DELETE",
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || "Failed to delete production order");
+      }
+
+      router.replace("/production/purchase-orders");
+    } catch (e: any) {
+      setMessage(e?.message || "Failed to delete production order");
+      setMessageTone("error");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   function openPrintPage() {
     if (!orderId) return;
     window.open(`/production/purchase-orders/${orderId}/print`, "_blank", "noopener,noreferrer");
@@ -286,6 +315,12 @@ export default function ProductionOrderForm({ orderId }: Props) {
             <Button variant="outline" asChild>
               <Link href="/production/purchase-orders">Back to List</Link>
             </Button>
+            {isEdit ? (
+              <Button variant="outline" onClick={handleDelete} disabled={deleting || saving || loading}>
+                <Trash2 className="h-4 w-4" />
+                {deleting ? "Deleting..." : "Delete"}
+              </Button>
+            ) : null}
             {isEdit ? (
               <Button variant="outline" onClick={openPrintPage}>
                 <Printer className="h-4 w-4" />

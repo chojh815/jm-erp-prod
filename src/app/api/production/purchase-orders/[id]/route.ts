@@ -179,3 +179,23 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   }
 }
 
+export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
+  try {
+    const existing = await loadDetail(params.id);
+    if (!existing) return bad("Production order not found", 404);
+
+    const { error } = await supabaseAdmin
+      .from("production_order_headers")
+      .update({
+        is_deleted: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", params.id);
+
+    if (error) throw error;
+
+    return ok({ id: params.id });
+  } catch (e: any) {
+    return bad(e?.message || "Failed to delete production order", 500);
+  }
+}
