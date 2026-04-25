@@ -74,6 +74,9 @@ export const PERMISSIONS = [
 
   "work_order.view",
   "purchase_order.view",
+  "purchase_order.create",
+  "purchase_order.edit",
+  "purchase_order.delete",
   "production_batches.view",
 
   // ===== DASHBOARDS =====
@@ -146,6 +149,9 @@ export const PERMISSION_GROUPS: Array<{
       "work_sheet.delete",
       "work_order.view",
       "purchase_order.view",
+      "purchase_order.create",
+      "purchase_order.edit",
+      "purchase_order.delete",
       "production_batches.view",
     ],
   },
@@ -208,6 +214,9 @@ export const ROLE_DEFAULT_PERMISSIONS: Record<string, PermissionKey[]> = {
     "work_sheet.view",
     "work_sheet.create",
     "work_sheet.edit",
+    "purchase_order.view",
+    "purchase_order.create",
+    "purchase_order.edit",
   ],
 
   staff: [
@@ -226,6 +235,7 @@ export const ROLE_DEFAULT_PERMISSIONS: Record<string, PermissionKey[]> = {
 
     "production_status.view",
     "work_sheet.view",
+    "purchase_order.view",
   ],
 
   // user_profiles default가 viewer라서 넣어둠

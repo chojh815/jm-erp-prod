@@ -134,7 +134,7 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "work_order.view",
       },
       {
-        label: "Purchase Orders",
+        label: "Production Orders",
         href: "/production/purchase-orders",
         perm: "purchase_order.view",
       },

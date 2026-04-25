@@ -246,7 +246,7 @@ export default function HomePage() {
     {
       title: "Production",
       description:
-        "Manage work orders, purchase orders and production status.",
+        "Manage work sheets, production orders and production status.",
       href: "/production/status",
     },
     {

@@ -27,6 +27,8 @@ type WorkSheetHeader = {
   id: string;
   po_header_id: string | null;
   po_no: string | null;
+  work_sheet_no?: string | null;
+  ws_no?: string | null;
   buyer_id: string | null;
   buyer_name: string | null;
   buyer_code: string | null;
@@ -609,6 +611,27 @@ export default function WorkSheetDetailPage() {
     const n = (v.company_name ?? "").trim() || "Vendor";
     const c = (v.code ?? "").trim();
     return c ? `${n} (${c})` : n;
+  }
+
+  function openProductionOrderCreate() {
+    if (!header) return;
+    const params = new URLSearchParams();
+    if (header.po_no) params.set("buyerPoRef", header.po_no);
+    const workSheetRef = header.work_sheet_no || header.ws_no || id || "";
+    if (workSheetRef) params.set("workSheetRef", workSheetRef);
+
+    const activeLine = lines.find((row) => row.id === activeLineId) || null;
+    const lineDescription = [
+      activeLine?.buyer_style ?? "",
+      activeLine?.jm_style_no ?? "",
+      activeLine?.description ?? "",
+    ]
+      .map((value) => (value ?? "").toString().trim())
+      .filter(Boolean)
+      .join(" / ");
+    if (lineDescription) params.set("lineDescription", lineDescription);
+
+    router.push(`/production/purchase-orders/new?${params.toString()}`);
   }
 
   async function loadVendors() {
@@ -1458,75 +1481,102 @@ export default function WorkSheetDetailPage() {
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {didInitRef.current ? (
-                isDirty ? (
-                  <Badge variant="destructive">Unsaved</Badge>
+            <div className="grid grid-cols-[auto_max-content] items-start gap-x-3 gap-y-2 self-start">
+              <div className="flex w-max items-center gap-2">
+                {didInitRef.current ? (
+                  isDirty ? (
+                    <Badge variant="destructive">Unsaved</Badge>
+                  ) : (
+                    <Badge variant="secondary">Saved</Badge>
+                  )
                 ) : (
-                  <Badge variant="secondary">Saved</Badge>
-                )
-              ) : (
-                <Badge variant="outline">Loading...</Badge>
-              )}
+                  <Badge variant="outline">Loading...</Badge>
+                )}
 
-              <div className="min-w-[180px]">
-                <Select
-                  value={header?.status ?? "DRAFT"}
-                  onValueChange={(v) => updateHeader({ status: v })}
-                  disabled={!header}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Status" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="DRAFT">DRAFT</SelectItem>
-                    <SelectItem value="SENT">SENT</SelectItem>
-                    <SelectItem value="CLOSED">CLOSED</SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="min-w-[180px]">
+                  <Select
+                    value={header?.status ?? "DRAFT"}
+                    onValueChange={(v) => updateHeader({ status: v })}
+                    disabled={!header}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Status" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="DRAFT">DRAFT</SelectItem>
+                      <SelectItem value="SENT">SENT</SelectItem>
+                      <SelectItem value="CLOSED">CLOSED</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-
-              <Button onClick={() => void onSave()} disabled={saving || loading || !header}>
-              {saving ? "Saving..." : "Save"}
-              </Button>
 
               <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={uiView === "vendor" ? "default" : "ghost"}
-                  onClick={() => setUiView("vendor")}
-                >
-                  Vendor View
+                <div className="shrink-0">
+                <Button onClick={() => void onSave()} disabled={saving || loading || !header}>
+                {saving ? "Saving..." : "Save"}
                 </Button>
+                </div>
+
+                <div className="flex w-max items-center gap-2">
+                  <div className="shrink-0">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={uiView === "vendor" ? "default" : "ghost"}
+                    onClick={() => setUiView("vendor")}
+                  >
+                    Vendor View
+                  </Button>
+                  </div>
+                  <div className="shrink-0">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={uiView === "internal" ? "default" : "ghost"}
+                    onClick={() => setUiView("internal")}
+                  >
+                    Internal View
+                  </Button>
+                  </div>
+                </div>
+
+                <div className="shrink-0">
                 <Button
-                  type="button"
-                  size="sm"
-                  variant={uiView === "internal" ? "default" : "ghost"}
-                  onClick={() => setUiView("internal")}
+                  variant="outline"
+                  onClick={() => openPdf("vendor")}
+                  disabled={!header}
                 >
-                  Internal View
+                  PDF Vendor
                 </Button>
+                </div>
               </div>
 
-              <Button
-                variant="outline"
-                onClick={() => openPdf("vendor")}
-                disabled={!header}
-              >
-                PDF Vendor
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => openPdf("internal")}
-                disabled={!header}
-              >
-                PDF Internal
-              </Button>
+              <div />
 
-              <Button variant="outline" onClick={() => router.back()}>
-                Back
-              </Button>
+              <div className="flex w-max items-center gap-2">
+                <div className="shrink-0">
+                <Button
+                  variant="outline"
+                  onClick={() => openPdf("internal")}
+                  disabled={!header}
+                >
+                  PDF Internal
+                </Button>
+                </div>
+
+                <div className="shrink-0">
+                <Button variant="outline" onClick={openProductionOrderCreate} disabled={!header}>
+                  Create Production Order
+                </Button>
+                </div>
+
+                <div className="shrink-0">
+                <Button variant="outline" onClick={() => router.back()}>
+                  Back
+                </Button>
+                </div>
+              </div>
             </div>
           </CardHeader>
 
