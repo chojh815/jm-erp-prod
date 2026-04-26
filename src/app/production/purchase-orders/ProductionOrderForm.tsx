@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus, Printer, Save, Trash2 } from "lucide-react";
+import { ImagePlus, Plus, Printer, Save, Trash2, X } from "lucide-react";
 
 import AppShell from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/button";
@@ -16,11 +16,13 @@ import {
   calculateLineAmount,
   calculateOrderSubtotal,
   createEmptyProductionOrderLine,
+  createEmptyReferenceImage,
   fmtCny,
   isoToday,
   type ProductionOrderDetail,
   type ProductionOrderHeaderInput,
   type ProductionOrderLineInput,
+  type ProductionOrderReferenceImage,
   type ProductionOrderVendor,
 } from "@/lib/productionOrders";
 
@@ -40,6 +42,12 @@ function initialHeader(): ProductionOrderHeaderInput {
     work_sheet_ref: "",
     payment_terms: "",
     delivery_address: "",
+    reference_images: [
+      createEmptyReferenceImage("Front"),
+      createEmptyReferenceImage("Back"),
+      createEmptyReferenceImage("Detail"),
+      createEmptyReferenceImage("Color"),
+    ],
     currency: "CNY",
     material_supplied_by_jm: false,
     special_instructions: "",
@@ -56,6 +64,22 @@ const inputCls =
 const selectCls =
   "h-9 w-full rounded-md border border-slate-300 bg-white px-2.5 text-sm outline-none focus:border-slate-900";
 
+function normalizeReferenceImagesForForm(
+  rows: ProductionOrderReferenceImage[] | null | undefined
+) {
+  const base = [
+    createEmptyReferenceImage("Front"),
+    createEmptyReferenceImage("Back"),
+    createEmptyReferenceImage("Detail"),
+    createEmptyReferenceImage("Color"),
+  ];
+  const source = Array.isArray(rows) ? rows : [];
+  return base.map((item, index) => ({
+    ...item,
+    ...(source[index] || {}),
+  }));
+}
+
 export default function ProductionOrderForm({ orderId }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -64,6 +88,7 @@ export default function ProductionOrderForm({ orderId }: Props) {
   const [loading, setLoading] = React.useState(isEdit);
   const [saving, setSaving] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
+  const [uploadingSlot, setUploadingSlot] = React.useState<number | null>(null);
   const [message, setMessage] = React.useState("");
   const [messageTone, setMessageTone] = React.useState<"success" | "error">("success");
   const [vendors, setVendors] = React.useState<ProductionOrderVendor[]>([]);
@@ -71,6 +96,7 @@ export default function ProductionOrderForm({ orderId }: Props) {
   const [lines, setLines] = React.useState<ProductionOrderLineInput[]>([
     createEmptyProductionOrderLine(),
   ]);
+  const fileInputRefs = React.useRef<Array<HTMLInputElement | null>>([]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -123,6 +149,7 @@ export default function ProductionOrderForm({ orderId }: Props) {
           work_sheet_ref: detail.header.work_sheet_ref || "",
           payment_terms: detail.header.payment_terms || "",
           delivery_address: detail.header.delivery_address || "",
+          reference_images: normalizeReferenceImagesForForm(detail.header.reference_images),
           currency: detail.header.currency || "CNY",
           material_supplied_by_jm: Boolean(detail.header.material_supplied_by_jm),
           special_instructions: detail.header.special_instructions || "",
@@ -205,6 +232,61 @@ export default function ProductionOrderForm({ orderId }: Props) {
     setLines((prev) => prev.map((line, i) => (i === index ? { ...line, ...patch } : line)));
   }
 
+  function patchReferenceImage(
+    index: number,
+    patch: Partial<ProductionOrderReferenceImage>
+  ) {
+    setHeader((prev) => ({
+      ...prev,
+      reference_images: (prev.reference_images || []).map((image, i) =>
+        i === index ? { ...image, ...patch } : image
+      ),
+    }));
+  }
+
+  function openReferenceImagePicker(index: number) {
+    fileInputRefs.current[index]?.click();
+  }
+
+  function clearReferenceImage(index: number) {
+    patchReferenceImage(index, { url: "", path: "" });
+    const input = fileInputRefs.current[index];
+    if (input) input.value = "";
+  }
+
+  async function uploadReferenceImage(index: number, file: File | null) {
+    if (!file) return;
+
+    try {
+      setUploadingSlot(index);
+      setMessage("");
+
+      const form = new FormData();
+      form.append("file", file);
+
+      const res = await fetch("/api/production/purchase-orders/reference-images", {
+        method: "POST",
+        body: form,
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success || !json?.file?.url) {
+        throw new Error(json?.error || "Failed to upload image");
+      }
+
+      patchReferenceImage(index, {
+        url: json.file.url,
+        path: json.file.path || "",
+      });
+    } catch (e: any) {
+      setMessage(e?.message || "Failed to upload image");
+      setMessageTone("error");
+    } finally {
+      setUploadingSlot((prev) => (prev === index ? null : prev));
+      const input = fileInputRefs.current[index];
+      if (input) input.value = "";
+    }
+  }
+
   function addLine() {
     setLines((prev) => [...prev, createEmptyProductionOrderLine()]);
   }
@@ -228,6 +310,7 @@ export default function ProductionOrderForm({ orderId }: Props) {
       const payload = {
         header: {
           ...header,
+          reference_images: (header.reference_images || []).filter((item) => item.url.trim()),
           currency: "CNY",
         },
         lines,
@@ -441,6 +524,96 @@ export default function ProductionOrderForm({ orderId }: Props) {
                 value={header.delivery_address}
                 onChange={(e) => patchHeader("delivery_address", e.target.value)}
               />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>参考图片 / Reference Images</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+              Upload up to 4 reference images. These will appear below the supplier/reference block and above the line table on the printable form.
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {(header.reference_images || []).map((image, index) => (
+                <div key={index} className="rounded-xl border border-slate-200 bg-white p-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Slot {index + 1}
+                  </div>
+                  <div className="mb-3 flex aspect-[4/3] items-center justify-center overflow-hidden rounded-lg border border-dashed border-slate-300 bg-slate-50">
+                    {image.url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={image.url}
+                        alt={image.caption || `Reference ${index + 1}`}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <span className="px-3 text-center text-xs text-slate-400">
+                        Image preview
+                      </span>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <div className="space-y-1">
+                      <Label>Caption</Label>
+                      <Input
+                        value={image.caption}
+                        onChange={(e) =>
+                          patchReferenceImage(index, { caption: e.target.value })
+                        }
+                        placeholder="Front / Back / Detail / Color"
+                      />
+                    </div>
+                    <input
+                      ref={(node) => {
+                        fileInputRefs.current[index] = node;
+                      }}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) =>
+                        uploadReferenceImage(index, e.target.files?.[0] || null)
+                      }
+                    />
+                    <div className="space-y-2">
+                      <Label>Image File</Label>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => openReferenceImagePicker(index)}
+                          disabled={uploadingSlot === index}
+                        >
+                          <ImagePlus className="h-4 w-4" />
+                          {uploadingSlot === index
+                            ? "Uploading..."
+                            : image.url
+                              ? "Change Image"
+                              : "Upload Image"}
+                        </Button>
+                        {image.url ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => clearReferenceImage(index)}
+                            disabled={uploadingSlot === index}
+                          >
+                            <X className="h-4 w-4" />
+                            Remove
+                          </Button>
+                        ) : null}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        JPG, PNG, WEBP etc. Choose a file and it will upload automatically.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>

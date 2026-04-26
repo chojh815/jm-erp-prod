@@ -7,6 +7,12 @@ export type ProductionOrderVendor = {
   default_currency?: string | null;
 };
 
+export type ProductionOrderReferenceImage = {
+  url: string;
+  caption: string;
+  path?: string;
+};
+
 export type ProductionOrderLineInput = {
   id?: string;
   process_type: string;
@@ -28,6 +34,7 @@ export type ProductionOrderHeaderInput = {
   work_sheet_ref: string;
   payment_terms: string;
   delivery_address: string;
+  reference_images: ProductionOrderReferenceImage[];
   currency: string;
   material_supplied_by_jm: boolean;
   special_instructions: string;
@@ -113,3 +120,12 @@ export function isoToday() {
   return new Date().toISOString().slice(0, 10);
 }
 
+export function createEmptyReferenceImage(
+  caption = ""
+): ProductionOrderReferenceImage {
+  return {
+    url: "",
+    caption,
+    path: "",
+  };
+}

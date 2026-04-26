@@ -47,6 +47,7 @@ export default function ProductionOrderPrintPage({
 
   const header = detail?.header;
   const lines = detail?.lines || [];
+  const referenceImages = (header?.reference_images || []).filter((item) => item?.url);
 
   return (
     <div className="min-h-screen bg-slate-200 py-6 print:bg-white print:py-0">
@@ -148,6 +149,31 @@ export default function ProductionOrderPrintPage({
               </div>
             </div>
 
+            {referenceImages.length ? (
+              <div className="rounded-md border border-slate-300 bg-slate-50/70 p-3">
+                <div className="mb-3 text-[12px] font-semibold">
+                  参考图片 / Reference Images
+                </div>
+                <div className="grid grid-cols-4 gap-3">
+                  {referenceImages.map((image, index) => (
+                    <div key={`${image.url}-${index}`} className="rounded-md border border-slate-300 bg-white p-2">
+                      <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded border border-slate-200 bg-slate-50">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={image.url}
+                          alt={image.caption || `Reference ${index + 1}`}
+                          className="h-full w-full object-cover"
+                        />
+                      </div>
+                      <div className="mt-2 text-center text-[10px] font-medium text-slate-600">
+                        {image.caption || `Reference ${index + 1}`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             <table className="w-full border-collapse">
               <thead>
                 <tr className="bg-slate-100 text-left text-[11px] font-semibold text-slate-700">
@@ -245,4 +271,3 @@ export default function ProductionOrderPrintPage({
     </div>
   );
 }
-

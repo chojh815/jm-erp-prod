@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import type {
   ProductionOrderHeaderInput,
   ProductionOrderLineInput,
+  ProductionOrderReferenceImage,
   ProductionOrderStatus,
 } from "@/lib/productionOrders";
 
@@ -31,6 +32,17 @@ function normalizeStatus(value: any): ProductionOrderStatus {
   return "DRAFT";
 }
 
+function normalizeReferenceImages(input: any): ProductionOrderReferenceImage[] {
+  const rows = Array.isArray(input) ? input : [];
+  return rows
+    .map((row: any) => ({
+      url: safeTrim(row?.url),
+      caption: safeTrim(row?.caption),
+      path: safeTrim(row?.path),
+    }))
+    .filter((row) => row.url);
+}
+
 function normalizeHeader(input: any): ProductionOrderHeaderInput {
   return {
     order_no: safeTrim(input?.order_no) || undefined,
@@ -43,6 +55,7 @@ function normalizeHeader(input: any): ProductionOrderHeaderInput {
     work_sheet_ref: safeTrim(input?.work_sheet_ref),
     payment_terms: safeTrim(input?.payment_terms),
     delivery_address: safeTrim(input?.delivery_address),
+    reference_images: normalizeReferenceImages(input?.reference_images),
     currency: safeTrim(input?.currency) || "CNY",
     material_supplied_by_jm: Boolean(input?.material_supplied_by_jm),
     special_instructions: safeTrim(input?.special_instructions),
