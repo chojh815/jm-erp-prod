@@ -211,6 +211,21 @@ function pickAppliedUSD(row: any): number {
   return 0;
 }
 
+function pickWriteoffUSD(row: any): number {
+  const candidates = [
+    row?.writeoff_amount_usd,
+    row?.writeoff_usd,
+    row?.amount_writeoff_usd,
+    row?.writeoff_amount,
+    row?.amount_writeoff,
+  ];
+  for (const v of candidates) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+
 function bucketOf(overdueDays: number): BucketKey {
   if (overdueDays <= 0) return "current";
   if (overdueDays <= 30) return "b1_30";
@@ -342,20 +357,77 @@ export async function GET(req: Request) {
       return 30;
     };
 
+    const receiptHeaderById = new Map<string, any>();
+    for (const h of receiptHeadersScoped) {
+      const hid = String(pickReceiptId(h) ?? "").trim();
+      if (hid) receiptHeaderById.set(hid, h);
+    }
+
     const appliedByInvoiceId = new Map<string, number>();
     const appliedByInvoiceNo = new Map<string, number>();
+    const settledByInvoiceId = new Map<string, number>();
+    const settledByInvoiceNo = new Map<string, number>();
 
     const addApplied = (row: any) => {
       const amt = pickAppliedUSD(row);
-      if (!amt) return;
+      const writeoff = pickWriteoffUSD(row);
       const invId = String(pickInvoiceIdAny(row) ?? "").trim();
       const invNo = String(pickInvoiceNoAny(row) ?? "").trim();
-      if (invId) appliedByInvoiceId.set(invId, (appliedByInvoiceId.get(invId) || 0) + amt);
-      if (invNo) appliedByInvoiceNo.set(invNo, (appliedByInvoiceNo.get(invNo) || 0) + amt);
+      if (amt > 0) {
+        if (invId) appliedByInvoiceId.set(invId, (appliedByInvoiceId.get(invId) || 0) + amt);
+        if (invNo) appliedByInvoiceNo.set(invNo, (appliedByInvoiceNo.get(invNo) || 0) + amt);
+      }
+      if (writeoff > 0) {
+        if (invId) settledByInvoiceId.set(invId, (settledByInvoiceId.get(invId) || 0) + writeoff);
+        if (invNo) settledByInvoiceNo.set(invNo, (settledByInvoiceNo.get(invNo) || 0) + writeoff);
+      }
     };
 
     receiptAppsScoped.forEach(addApplied);
     receiptLinesScoped.forEach(addApplied);
+
+    const receiptLinesByHeaderId = new Map<string, any[]>();
+    for (const line of receiptLinesScoped) {
+      const hid = String(pickReceiptHeaderId(line) ?? "").trim();
+      if (!hid) continue;
+      const arr = receiptLinesByHeaderId.get(hid) || [];
+      arr.push(line);
+      receiptLinesByHeaderId.set(hid, arr);
+    }
+
+    for (const [headerId, rows] of receiptLinesByHeaderId.entries()) {
+      const header = receiptHeaderById.get(headerId);
+      if (!header) continue;
+
+      const totalAppliedForHeader = rows.reduce((sum, row) => sum + pickAppliedUSD(row), 0);
+      if (totalAppliedForHeader <= 0) continue;
+
+      for (const row of rows) {
+        const applied = pickAppliedUSD(row);
+        if (applied <= 0) continue;
+
+        const ratio = applied / totalAppliedForHeader;
+        const allocatedOurFee = ratio * Number(header?.bank_fee_amount || 0);
+        const allocatedBuyerFee =
+          ratio *
+          (Number(header?.buyer_bank_fee_amount || 0) +
+            Number(header?.buyer_wire_fee_writeoff_amount || 0));
+        const allocatedClaim = ratio * Number(header?.claim_deduction_amount || 0);
+        const settledExtra = allocatedOurFee + allocatedBuyerFee + allocatedClaim;
+
+        const invId = String(pickInvoiceIdAny(row) ?? "").trim();
+        const invNo = String(pickInvoiceNoAny(row) ?? "").trim();
+
+        if (settledExtra > 0) {
+          if (invId) {
+            settledByInvoiceId.set(invId, (settledByInvoiceId.get(invId) || 0) + settledExtra);
+          }
+          if (invNo) {
+            settledByInvoiceNo.set(invNo, (settledByInvoiceNo.get(invNo) || 0) + settledExtra);
+          }
+        }
+      }
+    }
 
     const today = end;
 
@@ -379,8 +451,18 @@ export async function GET(req: Request) {
           invNo ? (appliedByInvoiceNo.get(invNo) || 0) : 0,
           Number.isFinite(explicitPaid) ? explicitPaid : 0
         );
-        const fallbackBalance = Math.max(0, gross - applied);
-        const balance = Number.isFinite(explicitBalance) && explicitBalance > 0 ? explicitBalance : fallbackBalance;
+        const settled = applied + Math.max(
+          invId ? (settledByInvoiceId.get(invId) || 0) : 0,
+          invNo ? (settledByInvoiceNo.get(invNo) || 0) : 0
+        );
+        const fallbackBalance = Math.max(0, gross - settled);
+        const hasComputedSettlement = settled > 0.0001;
+        const balance =
+          hasComputedSettlement
+            ? fallbackBalance
+            : Number.isFinite(explicitBalance) && explicitBalance > 0
+              ? explicitBalance
+              : fallbackBalance;
         const bucket = bucketOf(overdue);
 
         return {
@@ -396,6 +478,7 @@ export async function GET(req: Request) {
           gross_usd: Number(gross.toFixed(2)),
           explicit_balance_usd: Number((Number.isFinite(explicitBalance) ? explicitBalance : 0).toFixed(2)),
           applied_usd: Number(applied.toFixed(2)),
+          settled_usd: Number(settled.toFixed(2)),
           fallback_balance_usd: Number(fallbackBalance.toFixed(2)),
           balance_usd: Number(balance.toFixed(2)),
           bucket,
