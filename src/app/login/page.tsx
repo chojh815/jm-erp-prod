@@ -111,7 +111,7 @@ export default function LoginPage() {
               JM International ERP
             </p>
             <p className="text-sm text-slate-300 italic">
-              Excellence in Every Detail
+              excellence in every detail
             </p>
           </div>
         </div>
