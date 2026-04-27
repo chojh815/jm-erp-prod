@@ -2,6 +2,8 @@
 
 import * as React from "react";
 import Link from "next/link";
+import html2canvas from "html2canvas";
+import jsPDF from "jspdf";
 
 import {
   fmtCny,
@@ -17,6 +19,8 @@ export default function ProductionOrderPrintPage({
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [detail, setDetail] = React.useState<ProductionOrderDetail | null>(null);
+  const [exportingPdf, setExportingPdf] = React.useState(false);
+  const printAreaRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -49,6 +53,58 @@ export default function ProductionOrderPrintPage({
   const lines = detail?.lines || [];
   const referenceImages = (header?.reference_images || []).filter((item) => item?.url);
 
+  async function handleDownloadPdf() {
+    if (!printAreaRef.current || !header) return;
+
+    try {
+      setExportingPdf(true);
+
+      const canvas = await html2canvas(printAreaRef.current, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+      });
+
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF("p", "mm", "a4");
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = pdf.internal.pageSize.getHeight();
+
+      const margin = 6;
+      const maxWidth = pdfWidth - margin * 2;
+      const maxHeight = pdfHeight - margin * 2;
+
+      let imgWidth = maxWidth;
+      let imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+      // If the document is only slightly taller than one page, shrink it to fit
+      // instead of splitting boxes/signature areas across pages.
+      if (imgHeight <= maxHeight * 1.12) {
+        if (imgHeight > maxHeight) {
+          const fitRatio = maxHeight / imgHeight;
+          imgHeight = maxHeight;
+          imgWidth = imgWidth * fitRatio;
+        }
+
+        const x = (pdfWidth - imgWidth) / 2;
+        pdf.addImage(imgData, "PNG", x, margin, imgWidth, imgHeight);
+      } else {
+        const totalPages = Math.max(1, Math.ceil(imgHeight / maxHeight));
+        for (let pageIndex = 0; pageIndex < totalPages; pageIndex += 1) {
+          if (pageIndex > 0) pdf.addPage();
+          const yOffset = margin - pageIndex * maxHeight;
+          pdf.addImage(imgData, "PNG", margin, yOffset, imgWidth, imgHeight);
+        }
+      }
+
+      pdf.save(`${header.order_no || "production-order"}.pdf`);
+    } catch (e: any) {
+      setError(e?.message || "Failed to generate PDF");
+    } finally {
+      setExportingPdf(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-slate-200 py-6 print:bg-white print:py-0">
       <style jsx global>{`
@@ -77,14 +133,18 @@ export default function ProductionOrderPrintPage({
           </Link>
           <button
             className="inline-flex h-9 items-center rounded-md bg-slate-900 px-4 text-sm text-white hover:bg-slate-800"
-            onClick={() => window.print()}
+            onClick={handleDownloadPdf}
+            disabled={loading || exportingPdf || !!error || !header}
           >
-            Print / Save PDF
+            {exportingPdf ? "Generating PDF..." : "Download PDF"}
           </button>
         </div>
       </div>
 
-      <div className="mx-auto w-[210mm] max-w-full bg-white px-[12mm] py-[12mm] shadow print:shadow-none">
+      <div
+        ref={printAreaRef}
+        className="mx-auto w-[210mm] max-w-full bg-white px-[12mm] py-[12mm] shadow print:shadow-none"
+      >
         {loading ? (
           <div className="py-24 text-center text-sm text-slate-500">Loading...</div>
         ) : error ? (
