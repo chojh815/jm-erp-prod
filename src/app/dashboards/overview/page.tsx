@@ -173,6 +173,7 @@ async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
 export default function OverviewDashboardPage() {
   const router = useRouter();
   const sp = useSearchParams();
+  const actionTabFromUrl = sp.get("action_tab") || "at_risk";
 
   // ---- Filters (URL-synced)
   const [preset, setPreset] = React.useState<DatePreset>(
@@ -203,6 +204,11 @@ export default function OverviewDashboardPage() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [data, setData] = React.useState<OverviewResponse | null>(null);
+  const [actionTab, setActionTab] = React.useState<string>(actionTabFromUrl);
+
+  React.useEffect(() => {
+    setActionTab(actionTabFromUrl);
+  }, [actionTabFromUrl]);
 
   function syncUrl(next: {
     preset?: DatePreset;
@@ -802,9 +808,10 @@ export default function OverviewDashboardPage() {
             <CardTitle className="text-base">Action List</CardTitle>
           </CardHeader>
           <CardContent>
-            <Tabs defaultValue="at_risk">
+            <Tabs value={actionTab} onValueChange={setActionTab}>
               <TabsList className="rounded-xl">
                 <TabsTrigger value="at_risk">At Risk</TabsTrigger>
+                <TabsTrigger value="today_ship">Today Ship Plan</TabsTrigger>
                 <TabsTrigger value="next_ship">Next 7 Days Ship Plan</TabsTrigger>
                 <TabsTrigger value="cash_watch">Cash Watch (AR Top)</TabsTrigger>
                 <TabsTrigger value="sample_overdue">Sample Overdue</TabsTrigger>
@@ -813,6 +820,9 @@ export default function OverviewDashboardPage() {
 
               <TabsContent value="at_risk" className="mt-3">
                 <AtRiskTable rows={data?.lists.at_risk || []} />
+              </TabsContent>
+              <TabsContent value="today_ship" className="mt-3">
+                <NextShipTable rows={data?.lists.next_ship || []} />
               </TabsContent>
               <TabsContent value="next_ship" className="mt-3">
                 <NextShipTable rows={data?.lists.next_ship || []} />

@@ -15,6 +15,9 @@ type SummaryCard = {
   detail?: string;
   footer?: string;
   href: string;
+  detailHref?: string;
+  footerHref?: string;
+  footerLabel?: string;
   tone?: "default" | "warning";
 };
 
@@ -183,7 +186,10 @@ export default function HomePage() {
             sub: "due today",
             detail: `Next 7 days: ${countText(next7ShipList.length)}`,
             footer: `Overdue: ${countText(atRisk?.sub_value ?? overdueShipList.length)} | Scheduled: ${money(next7ScheduledUsd)}`,
-            href: "/shipments/list",
+            href: `/dashboards/overview?preset=CUSTOM&start=${today}&end=${today}&action_tab=today_ship`,
+            detailHref: `/dashboards/overview?preset=CUSTOM&start=${next7Start}&end=${next7End}&action_tab=next_ship`,
+            footerHref: `/dashboards/overview?preset=CUSTOM&start=${today}&end=${today}&action_tab=today_ship`,
+            footerLabel: "View today shipment list",
             tone: overdueShipList.length > 0 ? "warning" : "default",
           },
           {
@@ -290,45 +296,56 @@ export default function HomePage() {
         ) : (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             {(summaryCards.length ? summaryCards : [
-              { title: "Shipments", value: "-", sub: "due today", detail: "Next 7 days: -", footer: "Scheduled: -", href: "/shipments/list" },
+              { title: "Shipments", value: "-", sub: "due today", detail: "Next 7 days: -", footer: "Scheduled: -", href: "/dashboards/overview" },
               { title: "Open POs", value: "-", sub: "No data loaded", href: "/po/list" },
               { title: "Invoices Today", value: "-", sub: "No data loaded", href: "/invoices" },
               { title: "Receivable", value: "-", sub: "No data loaded", href: "/dashboards/ar-aging" },
               { title: "Alerts", value: "-", sub: "No data loaded", href: "/dashboards/expected-profitability" },
             ]).map((card) => (
-              <Link key={card.title} href={card.href}>
-                <Card className={[
-                  "h-full cursor-pointer transition-shadow hover:shadow-md",
-                  card.tone === "warning" ? "border-amber-300 bg-amber-50/60" : "",
-                ].filter(Boolean).join(" ")}>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">{card.title}</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {card.detail ? (
-                      <div className="flex items-end gap-2">
-                        <div className="text-2xl font-semibold tracking-normal text-slate-950">
-                          {card.value}
-                        </div>
-                        <p className="pb-1 text-sm text-slate-600">{card.sub}</p>
-                      </div>
+              <Card key={card.title} className={[
+                "h-full transition-shadow hover:shadow-md",
+                card.tone === "warning" ? "border-amber-300 bg-amber-50/60" : "",
+              ].filter(Boolean).join(" ")}>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">{card.title}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {card.detail ? (
+                    <div className="flex items-end gap-2">
+                      <Link href={card.href} className="text-2xl font-semibold tracking-normal text-slate-950 hover:underline">
+                        {card.value}
+                      </Link>
+                      <p className="pb-1 text-sm text-slate-600">{card.sub}</p>
+                    </div>
+                  ) : (
+                    <>
+                      <Link href={card.href} className="text-2xl font-semibold tracking-normal text-slate-950 hover:underline">
+                        {card.value}
+                      </Link>
+                      <p className="mt-1 text-xs text-slate-600">{card.sub}</p>
+                    </>
+                  )}
+                  {card.detail ? (
+                    card.detailHref ? (
+                      <Link href={card.detailHref} className="mt-4 block text-sm font-medium text-blue-600 hover:text-blue-700 hover:underline">
+                        {card.detail}
+                      </Link>
                     ) : (
-                      <>
-                        <div className="text-2xl font-semibold tracking-normal text-slate-950">
-                          {card.value}
-                        </div>
-                        <p className="mt-1 text-xs text-slate-600">{card.sub}</p>
-                      </>
-                    )}
-                    {card.detail ? (
                       <p className="mt-4 text-sm font-medium text-slate-700">{card.detail}</p>
-                    ) : null}
-                    {card.footer ? (
+                    )
+                  ) : null}
+                  {card.footer ? (
+                    <>
                       <p className="mt-1 text-xs text-slate-500">{card.footer}</p>
-                    ) : null}
-                  </CardContent>
-                </Card>
-              </Link>
+                      {card.footerHref ? (
+                        <Link href={card.footerHref} className="mt-2 inline-block text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline">
+                          {card.footerLabel ?? "View details"}
+                        </Link>
+                      ) : null}
+                    </>
+                  ) : null}
+                </CardContent>
+              </Card>
             ))}
           </div>
         )}
