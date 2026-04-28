@@ -1,6 +1,6 @@
-const CACHE_NAME = "jm-erp-shell-v1";
+const CACHE_NAME = "jm-erp-shell-v2";
 const OFFLINE_URL = "/offline";
-const APP_SHELL = ["/login", OFFLINE_URL, "/manifest.webmanifest"];
+const APP_SHELL = [OFFLINE_URL, "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

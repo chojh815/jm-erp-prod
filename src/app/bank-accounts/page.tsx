@@ -285,13 +285,26 @@ export default function BankAccountsPage() {
                       <TableCell>
                         {r.is_active ? <Badge>ACTIVE</Badge> : <Badge variant="secondary">INACTIVE</Badge>}
                       </TableCell>
-                      <TableCell className="text-right space-x-2">
-                        <Button size="sm" variant="outline" onClick={() => openEdit(r)}>
-                          Edit
-                        </Button>
-                        <Button size="sm" variant="destructive" onClick={() => deactivate(r.id)} disabled={!r.is_active}>
-                          Deactivate
-                        </Button>
+                      <TableCell className="text-right">
+                        <div className="flex flex-col items-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="min-w-[110px] border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-800"
+                            onClick={() => openEdit(r)}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            className="min-w-[110px] bg-red-600 text-white hover:bg-red-700"
+                            onClick={() => deactivate(r.id)}
+                            disabled={!r.is_active}
+                          >
+                            Deactivate
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
