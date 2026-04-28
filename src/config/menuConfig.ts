@@ -129,11 +129,6 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "work_sheet.view",
       },
       {
-        label: "Work Orders",
-        href: "/production/work-orders",
-        perm: "work_order.view",
-      },
-      {
         label: "Production Orders",
         href: "/production/purchase-orders",
         perm: "purchase_order.view",
