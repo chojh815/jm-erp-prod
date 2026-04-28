@@ -182,6 +182,16 @@ export default function ReceiptsPage() {
     return unpaid.reduce((acc, u) => acc + (selected[u.invoice_id] ? 1 : 0), 0);
   }, [unpaid, selected]);
 
+  const selectedBalanceTotal = React.useMemo(() => {
+    let s = 0;
+    for (const inv of unpaid) {
+      if (selected[inv.invoice_id]) {
+        s += inv.balance;
+      }
+    }
+    return round2(s);
+  }, [unpaid, selected]);
+
   const canSave = React.useMemo(() => {
     if (!buyerId) return false;
     if (saving) return false;
@@ -719,6 +729,9 @@ export default function ReceiptsPage() {
               </div>
 
               <div className="flex gap-2 text-sm">
+                <span className="px-3 py-1 rounded-full bg-muted">
+                  Selected: {selectedCount} ({fmt2(selectedBalanceTotal)})
+                </span>
                 <span className="px-3 py-1 rounded-full bg-muted">Applied: {fmt2(appliedTotal)}</span>
                 <span className={`px-3 py-1 rounded-full ${hasMismatch ? "bg-red-600 text-white" : "bg-muted"}`}>
                   Net: {fmt2(netReceived)} {hasMismatch ? `(diff ${fmt2(diff)})` : ""}
