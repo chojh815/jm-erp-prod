@@ -95,17 +95,63 @@ export async function GET(req: NextRequest) {
 
     const { data: lines, error: lErr } = await supabaseAdmin
       .from("receipt_lines")
-      .select("invoice_id, applied_amount, is_deleted")
+      .select("receipt_header_id, invoice_id, applied_amount, writeoff_amount, is_deleted")
       .in("invoice_id", ids)
       .eq("is_deleted", false);
 
     if (lErr) throw lErr;
 
     const applied = new Map<string, number>();
+    const settledExtra = new Map<string, number>();
     for (const l of lines || []) {
       const invoiceId = String((l as any).invoice_id || "").trim();
       if (!invoiceId) continue;
       applied.set(invoiceId, (applied.get(invoiceId) || 0) + toNum((l as any).applied_amount));
+      settledExtra.set(invoiceId, (settledExtra.get(invoiceId) || 0) + toNum((l as any).writeoff_amount));
+    }
+
+    const receiptHeaderIds = Array.from(
+      new Set((lines || []).map((l: any) => String(l.receipt_header_id || "").trim()).filter(Boolean))
+    );
+
+    const { data: receiptHeaders, error: hdrErr } = receiptHeaderIds.length
+      ? await supabaseAdmin
+          .from("receipt_headers")
+          .select("id, bank_fee_amount, buyer_bank_fee_amount, buyer_wire_fee_writeoff_amount, claim_deduction_amount, is_deleted")
+          .in("id", receiptHeaderIds)
+          .eq("is_deleted", false)
+      : { data: [], error: null as any };
+
+    if (hdrErr) throw hdrErr;
+
+    const headerById = new Map<string, any>((receiptHeaders || []).map((h: any) => [String(h.id), h]));
+    const linesByHeader = new Map<string, any[]>();
+    for (const line of lines || []) {
+      const hid = String((line as any).receipt_header_id || "").trim();
+      if (!hid) continue;
+      const arr = linesByHeader.get(hid) || [];
+      arr.push(line);
+      linesByHeader.set(hid, arr);
+    }
+
+    for (const [headerId, rows] of linesByHeader.entries()) {
+      const header = headerById.get(headerId);
+      if (!header) continue;
+      const totalAppliedForHeader = rows.reduce((sum, row) => sum + toNum((row as any).applied_amount), 0);
+      if (totalAppliedForHeader <= 0) continue;
+      for (const row of rows) {
+        const appliedAmt = toNum((row as any).applied_amount);
+        if (appliedAmt <= 0) continue;
+        const ratio = appliedAmt / totalAppliedForHeader;
+        const extra =
+          ratio * toNum(header?.bank_fee_amount) +
+          ratio * (toNum(header?.buyer_bank_fee_amount) + toNum(header?.buyer_wire_fee_writeoff_amount)) +
+          ratio * toNum(header?.claim_deduction_amount);
+        if (extra <= 0) continue;
+        const invoiceId = String((row as any).invoice_id || "").trim();
+        if (!invoiceId) continue;
+        settledExtra.set(invoiceId, (settledExtra.get(invoiceId) || 0) + extra);
+      }
     }
 
     const rows = (invoices || []).map((inv: any) => {
@@ -118,7 +164,9 @@ export async function GET(req: NextRequest) {
 
       const fallbackApplied = applied.get(inv.id) || 0;
       const a = explicitPaidExists ? toNum(explicitPaidRaw) : fallbackApplied;
-      const bal = explicitBalanceExists ? toNum(explicitBalanceRaw) : Math.max(0, toNum(inv.total_amount) - a);
+      const settled = a + toNum(settledExtra.get(inv.id) || 0);
+      const fallbackBalance = Math.max(0, toNum(inv.total_amount) - settled);
+      const bal = settled > 0.0001 ? fallbackBalance : explicitBalanceExists ? toNum(explicitBalanceRaw) : fallbackBalance;
       const po_nos = poMap.get(inv.id) || [];
       return {
         id: inv.id,

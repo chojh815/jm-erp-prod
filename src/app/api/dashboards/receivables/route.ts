@@ -337,6 +337,12 @@ export async function GET(req: NextRequest) {
           ),
         }));
 
+        const appliedTotal = round2(receiptTrace.reduce((s, r) => s + num(r.applied_amount), 0));
+        const settledTotal = round2(receiptTrace.reduce((s, r) => s + num(r.settled_amount), 0));
+        const fallbackBalance = round2(Math.max(0, num(x.total_amount) - settledTotal));
+        const explicitBalance = round2(num(x.balance_amount));
+        const computedBalance = settledTotal > 0.0001 ? fallbackBalance : explicitBalance;
+
         return {
           id: x.id,
           invoice_no: x.invoice_no,
@@ -345,8 +351,8 @@ export async function GET(req: NextRequest) {
           buyer_name: buyerById.get(String(x.buyer_id))?.company_name || null,
           buyer_code: buyerById.get(String(x.buyer_id))?.code || null,
           total_amount: round2(num(x.total_amount)),
-          paid_amount: round2(num(x.paid_amount)),
-          balance_amount: round2(num(x.balance_amount)),
+          paid_amount: appliedTotal > 0.0001 ? appliedTotal : round2(num(x.paid_amount)),
+          balance_amount: computedBalance,
           currency: x.currency || null,
           status: x.status || null,
           receipt_trace_count: receiptTrace.length,

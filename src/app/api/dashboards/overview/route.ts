@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createSupabaseServerClient } from "../../_supabase";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const dynamic = "force-dynamic";
 
@@ -160,7 +160,16 @@ function pickBrand(row: any): string | null {
 }
 
 function pickReqShipDate(row: any): string | null {
-  return row?.req_ship_date ?? row?.required_ship_date ?? row?.ship_date ?? null;
+  return row?.req_ship_date ?? row?.requested_ship_date ?? row?.required_ship_date ?? row?.ship_date ?? null;
+}
+
+function pickFulfillmentStatus(row: any): string {
+  return String(row?.fulfillment_status ?? row?.status ?? "").trim().toUpperCase();
+}
+
+function isShipmentPending(row: any): boolean {
+  const status = pickFulfillmentStatus(row);
+  return !["SHIPPED", "CLOSED", "COMPLETED"].includes(status);
 }
 
 function pickShipMode(row: any): string | null {
@@ -197,6 +206,15 @@ function pickInvoiceNoAny(row: any): string | null {
 
 function pickAppliedUSD(row: any): number {
   const candidates = [row?.applied_amount_usd, row?.apply_amount_usd, row?.applied_usd, row?.amount_applied_usd, row?.amount_usd, row?.applied_amount, row?.apply_amount, row?.amount_applied, row?.amount];
+  for (const v of candidates) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+
+function pickWriteoffUSD(row: any): number {
+  const candidates = [row?.writeoff_amount_usd, row?.writeoff_usd, row?.writeoff_amount, row?.amount_writeoff_usd, row?.amount_writeoff];
   for (const v of candidates) {
     const n = Number(v);
     if (Number.isFinite(n) && n > 0) return n;
@@ -261,7 +279,7 @@ export async function GET(req: Request) {
     const siteIds = parseIds(url.searchParams.get("siteIds") ?? url.searchParams.get("site_ids"));
     const debug = url.searchParams.get("debug") === "1";
     const { start, end } = rangeFromPreset(preset, url.searchParams.get("start"), url.searchParams.get("end"));
-    const supabase = createSupabaseServerClient();
+    const supabase = supabaseAdmin;
 
     const [poRes, poLinesRes, invRes, shipRes, rchRes, rcaRes, rclRes, sampleRes, companiesRes] = await Promise.all([
       supabase.from("po_headers").select("*"),
@@ -311,7 +329,8 @@ export async function GET(req: Request) {
       return inRangeISO(d, start, end);
     };
 
-    const posF = pos.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
+    const posBaseF = pos.filter(notDeleted).filter(buyerOk).filter(siteOk);
+    const posF = posBaseF.filter(dateOk);
     const invPeriodF = invoices.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
     const invAsOfF = invoices.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(asOfOk);
     const shipF = shipments.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
@@ -345,7 +364,7 @@ export async function GET(req: Request) {
       return !!d && d.slice(0, 10) <= end;
     });
 
-    const poHeaderIdSet = new Set(posF.map((h: any) => pickPoHeaderId(h)).filter(Boolean));
+    const poHeaderIdSet = new Set(posBaseF.map((h: any) => pickPoHeaderId(h)).filter(Boolean));
     const poLineSumByHeader = new Map<string, number>();
     for (const ln of poLines.filter(notDeleted)) {
       const hid = pickPoHeaderIdFromLine(ln);
@@ -360,6 +379,44 @@ export async function GET(req: Request) {
       const hid = pickPoHeaderId(h);
       return hid ? (poLineSumByHeader.get(hid) || 0) : 0;
     };
+
+    const scheduleRows = posBaseF
+      .filter((r: any) => {
+        const reqShipDate = pickReqShipDate(r);
+        return !!pickPoNo(r) && !!reqShipDate && isShipmentPending(r);
+      })
+      .map((r: any) => {
+        return {
+          po_no: pickPoNo(r),
+          buyer_name: pickBuyerName(r),
+          brand: pickBrand(r),
+          req_ship_date: pickReqShipDate(r),
+          ship_mode: pickShipMode(r),
+          amount_usd: Number(amountForPoHeader(r).toFixed(2)),
+          stage: pickFulfillmentStatus(r) || null,
+        };
+      });
+
+    const next_ship = scheduleRows
+      .filter((r) => inRangeISO(r.req_ship_date, start, end))
+      .sort((a, b) => String(a.req_ship_date).localeCompare(String(b.req_ship_date)) || String(a.po_no).localeCompare(String(b.po_no)))
+      .slice(0, 100);
+
+    const at_risk = scheduleRows
+      .filter((r) => !!r.req_ship_date && String(r.req_ship_date) < end)
+      .map((r) => ({
+        ...r,
+        delay_days: Math.max(
+          1,
+          Math.floor(
+            (new Date(`${end}T00:00:00`).getTime() - new Date(`${String(r.req_ship_date).slice(0, 10)}T00:00:00`).getTime()) / 86400000
+          )
+        ),
+      }))
+      .sort((a, b) => (b.delay_days - a.delay_days) || String(a.req_ship_date).localeCompare(String(b.req_ship_date)))
+      .slice(0, 100);
+
+    const atRiskUsd = at_risk.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
 
     const ordersUsd = posF.reduce((s, r) => s + amountForPoHeader(r), 0);
     const poCount = new Set(posF.map((r: any) => r.id ?? pickPoNo(r)).filter(Boolean)).size;
@@ -409,16 +466,64 @@ export async function GET(req: Request) {
 
     const appliedByInvoiceIdAsOf = new Map<string, number>();
     const appliedByInvoiceNoAsOf = new Map<string, number>();
+    const settledByInvoiceIdAsOf = new Map<string, number>();
+    const settledByInvoiceNoAsOf = new Map<string, number>();
     const addAppliedAsOf = (row: any) => {
       const amt = pickAppliedUSD(row);
-      if (!amt) return;
+      const writeoff = pickWriteoffUSD(row);
       const invId = String(pickInvoiceIdAny(row) ?? "").trim();
       const invNo = String(pickInvoiceNoAny(row) ?? "").trim();
-      if (invId) appliedByInvoiceIdAsOf.set(invId, (appliedByInvoiceIdAsOf.get(invId) || 0) + amt);
-      if (invNo) appliedByInvoiceNoAsOf.set(invNo, (appliedByInvoiceNoAsOf.get(invNo) || 0) + amt);
+      if (amt > 0) {
+        if (invId) appliedByInvoiceIdAsOf.set(invId, (appliedByInvoiceIdAsOf.get(invId) || 0) + amt);
+        if (invNo) appliedByInvoiceNoAsOf.set(invNo, (appliedByInvoiceNoAsOf.get(invNo) || 0) + amt);
+      }
+      if (writeoff > 0) {
+        if (invId) settledByInvoiceIdAsOf.set(invId, (settledByInvoiceIdAsOf.get(invId) || 0) + writeoff);
+        if (invNo) settledByInvoiceNoAsOf.set(invNo, (settledByInvoiceNoAsOf.get(invNo) || 0) + writeoff);
+      }
     };
     rcaAsOfF.forEach(addAppliedAsOf);
     rclAsOfF.forEach(addAppliedAsOf);
+
+    const receiptHeaderByIdAsOf = new Map<string, any>();
+    for (const h of rchAsOfF) {
+      const hid = String(pickReceiptId(h) ?? "").trim();
+      if (hid) receiptHeaderByIdAsOf.set(hid, h);
+    }
+
+    const receiptLinesByHeaderIdAsOf = new Map<string, any[]>();
+    for (const row of rclAsOfF) {
+      const hid = String(pickReceiptHeaderId(row) ?? "").trim();
+      if (!hid) continue;
+      const arr = receiptLinesByHeaderIdAsOf.get(hid) || [];
+      arr.push(row);
+      receiptLinesByHeaderIdAsOf.set(hid, arr);
+    }
+
+    for (const [headerId, rows] of receiptLinesByHeaderIdAsOf.entries()) {
+      const header = receiptHeaderByIdAsOf.get(headerId);
+      if (!header) continue;
+      const totalAppliedForHeader = rows.reduce((sum, row) => sum + pickAppliedUSD(row), 0);
+      if (totalAppliedForHeader <= 0) continue;
+
+      for (const row of rows) {
+        const applied = pickAppliedUSD(row);
+        if (applied <= 0) continue;
+
+        const ratio = applied / totalAppliedForHeader;
+        const settledExtra =
+          ratio * Number(header?.bank_fee_amount || 0) +
+          ratio * (Number(header?.buyer_bank_fee_amount || 0) + Number(header?.buyer_wire_fee_writeoff_amount || 0)) +
+          ratio * Number(header?.claim_deduction_amount || 0);
+
+        if (settledExtra <= 0) continue;
+
+        const invId = String(pickInvoiceIdAny(row) ?? "").trim();
+        const invNo = String(pickInvoiceNoAny(row) ?? "").trim();
+        if (invId) settledByInvoiceIdAsOf.set(invId, (settledByInvoiceIdAsOf.get(invId) || 0) + settledExtra);
+        if (invNo) settledByInvoiceNoAsOf.set(invNo, (settledByInvoiceNoAsOf.get(invNo) || 0) + settledExtra);
+      }
+    }
 
     const today = iso(new Date());
 
@@ -434,8 +539,15 @@ export async function GET(req: Request) {
       const explicitBalance = Number(r?.balance_amount ?? r?.balance_usd);
       const explicitPaid = Number(r?.paid_amount);
       const applied = Math.max(invId ? (appliedByInvoiceIdAsOf.get(invId) || 0) : 0, invNo ? (appliedByInvoiceNoAsOf.get(invNo) || 0) : 0, Number.isFinite(explicitPaid) ? explicitPaid : 0);
-      const fallbackBalance = Math.max(0, total - applied);
-      const balance = Number.isFinite(explicitBalance) && explicitBalance > 0 ? explicitBalance : fallbackBalance;
+      const settled = applied + Math.max(invId ? (settledByInvoiceIdAsOf.get(invId) || 0) : 0, invNo ? (settledByInvoiceNoAsOf.get(invNo) || 0) : 0);
+      const fallbackBalance = Math.max(0, total - settled);
+      const hasComputedSettlement = settled > 0.0001;
+      const balance =
+        hasComputedSettlement
+          ? fallbackBalance
+          : Number.isFinite(explicitBalance) && explicitBalance > 0
+            ? explicitBalance
+            : fallbackBalance;
       return {
         buyer_name: pickBuyerName(r),
         buyer_id: pickBuyerId(r),
@@ -478,7 +590,7 @@ export async function GET(req: Request) {
       { key: "invoiced", label: "Invoiced", value_usd: invoicedUsd, delta_pct: null, sub_label: "Invoices", sub_value: String(invCount) },
       { key: "collected", label: "Collected", value_usd: collectedUsd, delta_pct: null, sub_label: "Receipts", sub_value: String(rcpCount) },
       { key: "ar", label: "AR Outstanding", value_usd: arUsd, delta_pct: null, sub_label: "Invoices", sub_value: String(arInvCount) },
-      { key: "at_risk", label: "At Risk", value_usd: 0, delta_pct: null, sub_label: "POs", sub_value: "0" },
+      { key: "at_risk", label: "At Risk", value_usd: atRiskUsd, delta_pct: null, sub_label: "POs", sub_value: String(at_risk.length) },
       { key: "sample_requests", label: "Sample Requests", value_usd: 0, delta_pct: null, sub_label: "Requests", sub_value: String(sampleCount) },
       { key: "sample_waiting_feedback", label: "Sample Waiting Feedback", value_usd: 0, delta_pct: null, sub_label: "Requests", sub_value: String(sampleWaitingFeedbackCount) },
       { key: "sample_overdue", label: "Sample Overdue", value_usd: 0, delta_pct: null, sub_label: "Requests", sub_value: String(sampleOverdueCount) },
@@ -528,16 +640,6 @@ export async function GET(req: Request) {
     }
     const status_dist = Array.from(statusMap.values()).map((r) => ({ status: r.status, amount_usd: Number(r.amount_usd.toFixed(2)), count: r.count })).sort((a, b) => b.amount_usd - a.amount_usd);
 
-    const at_risk: any[] = [];
-    const next_ship = posF.map((r) => ({
-      po_no: pickPoNo(r),
-      buyer_name: pickBuyerName(r),
-      brand: pickBrand(r),
-      req_ship_date: pickReqShipDate(r),
-      ship_mode: pickShipMode(r),
-      amount_usd: Number(amountForPoHeader(r).toFixed(2)),
-    })).filter((r) => !!r.po_no && !!r.req_ship_date).sort((a, b) => String(a.req_ship_date).localeCompare(String(b.req_ship_date))).slice(0, 100);
-
     const cash_watch = arRows.sort((a, b) => (b.overdue_days - a.overdue_days) || (b.balance_usd - a.balance_usd)).slice(0, 200);
 
     return NextResponse.json({
@@ -554,6 +656,10 @@ export async function GET(req: Request) {
       meta: {
         source: "route-computed-ar-unified-asof-v2",
         debug_counts: debug ? {
+          po_headers_total: pos.length,
+          po_headers_scope: posBaseF.length,
+          next_ship_count: next_ship.length,
+          at_risk_count: at_risk.length,
           invoices_period: invPeriodF.length,
           invoices_asof: invAsOfF.length,
           open_ar_rows: arRows.length,

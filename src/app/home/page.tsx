@@ -57,6 +57,11 @@ function findKpi(rows: any[], key: string) {
   return rows.find((x) => String(x?.key ?? "") === key) ?? null;
 }
 
+function sumAmount(rows: any[] | null | undefined, key: string) {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce((sum, row) => sum + Number(row?.[key] ?? 0), 0);
+}
+
 function fmtTotalsByCurrency(totals: Record<string, number> | null | undefined) {
   if (!totals) return money(0);
   const entries = Object.entries(totals).filter(([, v]) => Number.isFinite(Number(v)));
@@ -156,10 +161,13 @@ export default function HomePage() {
         const nextShipKpis = Array.isArray(nextShipJson?.kpis) ? nextShipJson.kpis : [];
         const watchKpis = Array.isArray(watchJson?.kpis) ? watchJson.kpis : [];
 
-        const shippedToday = findKpi(todayKpis, "shipped");
-        const shippedNext7 = findKpi(nextShipKpis, "shipped");
         const invoicedToday = findKpi(todayKpis, "invoiced");
         const ar = findKpi(watchKpis, "ar");
+        const atRisk = findKpi(watchKpis, "at_risk");
+        const todayShipList = Array.isArray(todayJson?.lists?.next_ship) ? todayJson.lists.next_ship : [];
+        const next7ShipList = Array.isArray(nextShipJson?.lists?.next_ship) ? nextShipJson.lists.next_ship : [];
+        const overdueShipList = Array.isArray(watchJson?.lists?.at_risk) ? watchJson.lists.at_risk : [];
+        const next7ScheduledUsd = sumAmount(next7ShipList, "amount_usd");
         const sampleOverdue = Number(watchJson?.sample_overdue ?? 0);
         const sampleWaiting = Number(watchJson?.sample_waiting_feedback ?? 0);
         const missingCost = Number(marginJson?.summary?.missing_count ?? 0);
@@ -171,11 +179,12 @@ export default function HomePage() {
         setSummaryCards([
           {
             title: "Shipments",
-            value: countText(shippedToday?.sub_value),
+            value: countText(todayShipList.length),
             sub: "due today",
-            detail: `Next 7 days: ${countText(shippedNext7?.sub_value)}`,
-            footer: `Scheduled: ${money(shippedNext7?.value_usd)}`,
+            detail: `Next 7 days: ${countText(next7ShipList.length)}`,
+            footer: `Overdue: ${countText(atRisk?.sub_value ?? overdueShipList.length)} | Scheduled: ${money(next7ScheduledUsd)}`,
             href: "/shipments/list",
+            tone: overdueShipList.length > 0 ? "warning" : "default",
           },
           {
             title: "Open POs",
