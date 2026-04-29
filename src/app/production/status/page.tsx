@@ -6,7 +6,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import ExcelJS from "exceljs";
 
-import { usePermissions } from "@/hooks/usePermissions";
+import { usePermissions } from "@/components/auth/PermissionsProvider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
