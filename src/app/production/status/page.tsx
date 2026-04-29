@@ -6,6 +6,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import ExcelJS from "exceljs";
 
+import { usePermissions } from "@/hooks/usePermissions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -181,7 +182,14 @@ function WorkSheetLink({ r }: { r: Row }) {
 }
 
 export default function ProductionStatusPage() {
-  const [role, setRole] = useState<Role>("viewer");
+  const { role: permissionRole } = usePermissions();
+  const role: Role =
+    permissionRole === "admin" ||
+    permissionRole === "manager" ||
+    permissionRole === "staff" ||
+    permissionRole === "viewer"
+      ? permissionRole
+      : "viewer";
 
   // filters
   const [q, setQ] = useState("");
@@ -236,17 +244,6 @@ export default function ProductionStatusPage() {
 
   const showUnitPrice = role !== "viewer";
   const showMargin = role === "admin"; // 관리자 전용
-
-  // load role
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/me", { cache: "no-store" });
-        const j = await r.json();
-        if (j?.success && j?.user?.role) setRole(j.user.role);
-      } catch {}
-    })();
-  }, []);
 
   const buildQuery = () => {
     const params = new URLSearchParams();
