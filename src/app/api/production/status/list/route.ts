@@ -2,7 +2,8 @@
  * src/app/api/production/status/list/route.ts
  *
  * Production Status list API
- * - Adds vendor_name resolved from companies table using po_lines.vendor_id
+ * - Adds vendor_name resolved from companies table using work_sheet_lines.vendor_id
+ *   first, then po_lines.vendor_id as fallback
  * - Adds order_date (best-effort from po_headers: order_date / po_date / created_at)
  * - Adds work_sheet_id resolved from work_sheet_lines using po_lines.id -> work_sheet_lines.po_line_id
  * - Filters: q, ship_mode, courier_carrier, from, to
@@ -10,7 +11,8 @@
  * Notes:
  * - Uses conservative select('*') to avoid hard dependency on optional column names.
  * - Resolves vendor_name with a second query to companies (no FK required).
- * - Resolves work_sheet_id with a second query to work_sheet_lines (no FK required).
+ * - Resolves work_sheet_id / vendor_id / production_mode with a second query to
+ *   work_sheet_lines (no FK required).
  */
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -106,29 +108,46 @@ let lineRes: any = await lineQ;
       for (const h of hdrRes.data || []) headersById.set(h.id, h);
     }
 
-    // 2.5) Resolve work_sheet_id by po_line_id (from work_sheet_lines)
-    // ✅ 너 스샷에서 확인된 구조: work_sheet_lines.po_line_id -> work_sheet_lines.work_sheet_id
+    // 2.5) Resolve work_sheet context by po_line_id (from work_sheet_lines)
+    // work_sheet_lines.po_line_id -> work_sheet_lines.work_sheet_id/vendor_id/production_mode
     const poLineIds = Array.from(new Set(lines.map((l) => l.id).filter(Boolean)));
     const wsByPoLineId = new Map<string, string>();
+    const wsVendorByPoLineId = new Map<string, string>();
+    const wsModeByPoLineId = new Map<string, string>();
 
     if (poLineIds.length) {
       const wsRes: any = await supabaseAdmin
         .from("work_sheet_lines")
-        .select("po_line_id, work_sheet_id")
+        .select("po_line_id, work_sheet_id, vendor_id, production_mode")
         .in("po_line_id", poLineIds);
 
       // 테이블/컬럼이 없거나 권한 문제면 조용히 스킵(WS 버튼은 new?po_line_id로 fallback)
       if (!wsRes?.error) {
         for (const w of wsRes.data || []) {
-          if (w?.po_line_id && w?.work_sheet_id) {
-            wsByPoLineId.set(w.po_line_id, w.work_sheet_id);
+          const poLineId = safeStr(w?.po_line_id);
+          if (!poLineId) continue;
+
+          if (w?.work_sheet_id) {
+            wsByPoLineId.set(poLineId, w.work_sheet_id);
+          }
+          if (w?.vendor_id) {
+            wsVendorByPoLineId.set(poLineId, w.vendor_id);
+          }
+          if (safeStr(w?.production_mode)) {
+            wsModeByPoLineId.set(poLineId, safeStr(w.production_mode));
           }
         }
       }
     }
 
     // 3) Resolve vendor_name
-    const vendorIds = Array.from(new Set(lines.map((l) => l.vendor_id).filter(Boolean)));
+    const vendorIds = Array.from(
+      new Set(
+        lines
+          .map((l) => wsVendorByPoLineId.get(safeStr(l.id)) ?? l.vendor_id)
+          .filter(Boolean)
+      )
+    );
     const vendorsById = new Map<string, any>();
     if (vendorIds.length) {
       const vRes: any = await supabaseAdmin
@@ -174,9 +193,20 @@ let lineRes: any = await lineQ;
       const qty = pickFirst(l, ["qty", "quantity"], null);
       const unit_price_usd = pickFirst(l, ["unit_price", "unit_price_usd"], null);
 
-      const vendor_id = l.vendor_id ?? null;
+      const production_mode =
+        safeStr(wsModeByPoLineId.get(safeStr(l.id))) ||
+        safeStr(pickFirst(l, ["production_mode"], null)) ||
+        null;
+
+      const vendor_id = wsVendorByPoLineId.get(safeStr(l.id)) ?? l.vendor_id ?? null;
       const v = vendor_id ? vendorsById.get(vendor_id) : null;
-      const vendor_name = v?.company_name ?? (vendor_id ? "(Unknown Vendor)" : "In-house");
+      const vendor_name =
+        v?.company_name ??
+        (vendor_id
+          ? "(Unknown Vendor)"
+          : upper(production_mode) === "OUTSOURCED"
+          ? "(No Vendor)"
+          : "In-house");
 
       // ✅ work_sheet_id resolve (po_line_id 기준)
       const work_sheet_id = wsByPoLineId.get(l.id) ?? null;
@@ -203,6 +233,7 @@ let lineRes: any = await lineQ;
         unit_price_usd: unit_price_usd ?? null,
         vendor_id,
         vendor_name,
+        production_mode,
 
         // ✅ WS direct jump data
         work_sheet_id,
