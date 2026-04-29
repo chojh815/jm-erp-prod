@@ -398,7 +398,8 @@ export async function GET(req: Request) {
     const productionRows = poLines
       .filter(notDeleted)
       .map((ln: any) => {
-        const header = posById.get(pickPoHeaderIdFromLine(ln));
+        const headerId = pickPoHeaderIdFromLine(ln);
+        const header = headerId ? posById.get(headerId) : undefined;
         const scopeRow = header ?? ln;
         const poLineId = String(ln?.id ?? "").trim();
         return {
