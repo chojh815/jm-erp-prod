@@ -421,10 +421,6 @@ export async function GET(req: Request) {
         isShipmentPending({ fulfillment_status: row.fulfillment_status })
       );
 
-    const productionRowsInRange = productionRows.filter((r) => inRangeISO(r.req_ship_date, start, end));
-    const productionUsd = productionRowsInRange.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
-    const productionLineCount = productionRowsInRange.length;
-
     const readyWindowEnd = addDaysISO(end, 7);
     const readyRows = productionRows.filter((r) => inRangeISO(r.req_ship_date, end, readyWindowEnd));
     const readyUsd = readyRows.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
@@ -477,8 +473,42 @@ export async function GET(req: Request) {
     const shipCount = shipmentIds.size;
     const shippedPoCount = new Set(shippedInvoices.map((r: any) => pickPoNo(r)).filter(Boolean)).size;
 
-    const pendingOrdersUsd = Math.max((ordersUsd || 0) - (shippedUsd || 0), 0);
-    const pendingPoCount = Math.max((poCount || 0) - (shippedPoCount || 0), 0);
+    const shippedByPoNo = new Map<string, number>();
+    for (const inv of shippedInvoices) {
+      const poNo = String(pickPoNo(inv) ?? "").trim();
+      if (!poNo) continue;
+      shippedByPoNo.set(poNo, (shippedByPoNo.get(poNo) || 0) + pickAmountUSD(inv));
+    }
+
+    const periodPoHeaderIds = new Set(posF.map((h: any) => pickPoHeaderId(h)).filter(Boolean));
+    const periodPoPendingRatioByHeaderId = new Map<string, number>();
+    const periodPoPendingAmountByHeaderId = new Map<string, number>();
+    for (const header of posF) {
+      const headerId = pickPoHeaderId(header);
+      const poNo = String(pickPoNo(header) ?? "").trim();
+      const total = amountForPoHeader(header);
+      const shipped = poNo ? (shippedByPoNo.get(poNo) || 0) : 0;
+      const remaining = Math.max(0, total - shipped);
+      const ratio = total > 0 ? Math.min(1, Math.max(0, remaining / total)) : 0;
+      if (headerId) {
+        periodPoPendingRatioByHeaderId.set(headerId, ratio);
+        periodPoPendingAmountByHeaderId.set(headerId, remaining);
+      }
+    }
+
+    const productionRowsInRange = productionRows.filter((r) => {
+      const headerId = pickPoHeaderId(r.scope_row);
+      return !!headerId && periodPoHeaderIds.has(headerId);
+    });
+    const productionUsd = productionRowsInRange.reduce((sum, row) => {
+      const headerId = pickPoHeaderId(row.scope_row);
+      const ratio = headerId ? (periodPoPendingRatioByHeaderId.get(headerId) ?? 1) : 1;
+      return sum + Number(row.amount_usd || 0) * ratio;
+    }, 0);
+    const productionLineCount = productionRowsInRange.length;
+
+    const pendingOrdersUsd = Array.from(periodPoPendingAmountByHeaderId.values()).reduce((sum, amount) => sum + amount, 0);
+    const pendingPoCount = Array.from(periodPoPendingAmountByHeaderId.values()).filter((amount) => amount > 0.0001).length;
 
     const invoicedUsd = invPeriodF.reduce((s, r) => s + pickAmountUSD(r), 0);
     const invCount = new Set(invPeriodF.map((r: any) => r.id ?? pickInvoiceNo(r)).filter(Boolean)).size;
