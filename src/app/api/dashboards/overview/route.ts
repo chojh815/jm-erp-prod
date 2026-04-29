@@ -167,6 +167,10 @@ function pickFulfillmentStatus(row: any): string {
   return String(row?.fulfillment_status ?? row?.status ?? "").trim().toUpperCase();
 }
 
+function isReadyWorkSheetStatus(v: any): boolean {
+  return String(v ?? "").trim().toUpperCase() === "READY";
+}
+
 function isShipmentPending(row: any): boolean {
   const status = pickFulfillmentStatus(row);
   return !["SHIPPED", "CLOSED", "COMPLETED"].includes(status);
@@ -281,10 +285,11 @@ export async function GET(req: Request) {
     const { start, end } = rangeFromPreset(preset, url.searchParams.get("start"), url.searchParams.get("end"));
     const supabase = supabaseAdmin;
 
-    const [poRes, poLinesRes, wsLinesRes, invRes, shipRes, rchRes, rcaRes, rclRes, sampleRes, companiesRes] = await Promise.all([
+    const [poRes, poLinesRes, wsLinesRes, wsHdrRes, invRes, shipRes, rchRes, rcaRes, rclRes, sampleRes, companiesRes] = await Promise.all([
       supabase.from("po_headers").select("*"),
       supabase.from("po_lines").select("*"),
       supabase.from("work_sheet_lines").select("po_line_id, work_sheet_id"),
+      supabase.from("work_sheet_headers").select("id, status"),
       supabase.from("invoice_headers").select("*"),
       supabase.from("shipments").select("*"),
       supabase.from("receipt_headers").select("*"),
@@ -297,6 +302,7 @@ export async function GET(req: Request) {
     const pos = poRes.error ? [] : (poRes.data || []);
     const poLines = poLinesRes.error ? [] : (poLinesRes.data || []);
     const workSheetLines = wsLinesRes.error ? [] : (wsLinesRes.data || []);
+    const workSheetHeaders = wsHdrRes.error ? [] : (wsHdrRes.data || []);
     const invoices = invRes.error ? [] : (invRes.data || []);
     const shipments = shipRes.error ? [] : (shipRes.data || []);
     const receiptHeaders = rchRes.error ? [] : (rchRes.data || []);
@@ -394,6 +400,20 @@ export async function GET(req: Request) {
         .map((r: any) => String(r?.po_line_id ?? "").trim())
         .filter(Boolean)
     );
+    const wsIdByPoLineId = new Map<string, string>();
+    for (const row of workSheetLines.filter(notDeleted)) {
+      const poLineId = String(row?.po_line_id ?? "").trim();
+      const wsId = String(row?.work_sheet_id ?? "").trim();
+      if (poLineId && wsId && !wsIdByPoLineId.has(poLineId)) {
+        wsIdByPoLineId.set(poLineId, wsId);
+      }
+    }
+    const wsStatusById = new Map<string, string>();
+    for (const hdr of workSheetHeaders.filter(notDeleted)) {
+      const wsId = String(hdr?.id ?? "").trim();
+      if (!wsId) continue;
+      wsStatusById.set(wsId, String(hdr?.status ?? "").trim().toUpperCase() || "DRAFT");
+    }
 
     const productionRows = poLines
       .filter(notDeleted)
@@ -402,6 +422,8 @@ export async function GET(req: Request) {
         const header = headerId ? posById.get(headerId) : undefined;
         const scopeRow = header ?? ln;
         const poLineId = String(ln?.id ?? "").trim();
+        const wsId = poLineId ? (wsIdByPoLineId.get(poLineId) ?? null) : null;
+        const wsStatus = wsId ? (wsStatusById.get(wsId) ?? "DRAFT") : null;
         return {
           po_line_id: poLineId,
           po_no: pickPoNo(scopeRow),
@@ -410,6 +432,8 @@ export async function GET(req: Request) {
           fulfillment_status: pickFulfillmentStatus(scopeRow),
           scope_row: scopeRow,
           has_work_sheet: poLineId ? wsPoLineIdSet.has(poLineId) : false,
+          work_sheet_status: wsStatus,
+          ready_to_ship: isReadyWorkSheetStatus(wsStatus),
         };
       })
       .filter((row) =>
@@ -421,8 +445,7 @@ export async function GET(req: Request) {
         isShipmentPending({ fulfillment_status: row.fulfillment_status })
       );
 
-    const readyWindowEnd = addDaysISO(end, 7);
-    const readyRows = productionRows.filter((r) => inRangeISO(r.req_ship_date, end, readyWindowEnd));
+    const readyRows = productionRows.filter((r) => r.ready_to_ship);
     const readyUsd = readyRows.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
     const readyPoCount = new Set(readyRows.map((r) => r.po_no).filter(Boolean)).size;
 
@@ -498,7 +521,7 @@ export async function GET(req: Request) {
 
     const productionRowsInRange = productionRows.filter((r) => {
       const headerId = pickPoHeaderId(r.scope_row);
-      return !!headerId && periodPoHeaderIds.has(headerId);
+      return !!headerId && periodPoHeaderIds.has(headerId) && !r.ready_to_ship;
     });
     const productionUsd = productionRowsInRange.reduce((sum, row) => {
       const headerId = pickPoHeaderId(row.scope_row);

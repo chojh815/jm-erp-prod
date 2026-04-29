@@ -75,6 +75,9 @@ function statusBadge(st?: string | null) {
   if (v === "SENT") {
     return <span className={`${base} bg-blue-100 text-blue-700`}>SENT</span>;
   }
+  if (v === "READY") {
+    return <span className={`${base} bg-amber-100 text-amber-700`}>READY</span>;
+  }
   if (v === "CLOSED") {
     return <span className={`${base} bg-gray-200 text-gray-700`}>CLOSED</span>;
   }
@@ -282,6 +285,7 @@ export default function WorkSheetsPage() {
                   <SelectContent>
                     <SelectItem value="ALL">All</SelectItem>
                     <SelectItem value="DRAFT">DRAFT</SelectItem>
+                    <SelectItem value="READY">READY</SelectItem>
                     <SelectItem value="SENT">SENT</SelectItem>
                     <SelectItem value="CLOSED">CLOSED</SelectItem>
                   </SelectContent>

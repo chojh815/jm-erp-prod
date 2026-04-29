@@ -5,6 +5,7 @@
  * - Adds vendor_name resolved from companies table using work_sheet_lines.vendor_id
  *   first, then po_lines.vendor_id as fallback
  * - Adds order_date (best-effort from po_headers: order_date / po_date / created_at)
+ * - Adds work_sheet_status / ready_to_ship from work_sheet_headers
  * - Adds work_sheet_id resolved from work_sheet_lines using po_lines.id -> work_sheet_lines.po_line_id
  * - Filters: q, ship_mode, courier_carrier, from, to
  *
@@ -46,6 +47,10 @@ function toISODateOnly(v: any): string | null {
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   if (/^\d{4}-\d{2}-\d{2}T/.test(s)) return s.slice(0, 10);
   return s;
+}
+
+function isReadyWorkSheetStatus(v: any) {
+  return safeStr(v).toUpperCase() === "READY";
 }
 
 export async function GET(req: Request) {
@@ -114,6 +119,7 @@ let lineRes: any = await lineQ;
     const wsByPoLineId = new Map<string, string>();
     const wsVendorByPoLineId = new Map<string, string>();
     const wsModeByPoLineId = new Map<string, string>();
+    const wsIds = new Set<string>();
 
     if (poLineIds.length) {
       const wsRes: any = await supabaseAdmin
@@ -129,6 +135,7 @@ let lineRes: any = await lineQ;
 
           if (w?.work_sheet_id) {
             wsByPoLineId.set(poLineId, w.work_sheet_id);
+            wsIds.add(String(w.work_sheet_id));
           }
           if (w?.vendor_id) {
             wsVendorByPoLineId.set(poLineId, w.vendor_id);
@@ -136,6 +143,21 @@ let lineRes: any = await lineQ;
           if (safeStr(w?.production_mode)) {
             wsModeByPoLineId.set(poLineId, safeStr(w.production_mode));
           }
+        }
+      }
+    }
+
+    const wsStatusById = new Map<string, string>();
+    if (wsIds.size) {
+      const wsHdrRes: any = await supabaseAdmin
+        .from("work_sheet_headers")
+        .select("id, status")
+        .in("id", Array.from(wsIds));
+      if (!wsHdrRes?.error) {
+        for (const w of wsHdrRes.data || []) {
+          const wsId = safeStr(w?.id);
+          if (!wsId) continue;
+          wsStatusById.set(wsId, safeStr(w?.status) || "DRAFT");
         }
       }
     }
@@ -210,6 +232,8 @@ let lineRes: any = await lineQ;
 
       // ✅ work_sheet_id resolve (po_line_id 기준)
       const work_sheet_id = wsByPoLineId.get(l.id) ?? null;
+      const work_sheet_status = work_sheet_id ? (wsStatusById.get(work_sheet_id) ?? "DRAFT") : null;
+      const ready_to_ship = !!work_sheet_status && isReadyWorkSheetStatus(work_sheet_status);
 
       // ✅ ADMIN only: unit_cost_usd best-effort
       const unit_cost_usd = isAdmin
@@ -234,6 +258,8 @@ let lineRes: any = await lineQ;
         vendor_id,
         vendor_name,
         production_mode,
+        work_sheet_status,
+        ready_to_ship,
 
         // ✅ WS direct jump data
         work_sheet_id,

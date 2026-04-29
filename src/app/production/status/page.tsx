@@ -43,6 +43,8 @@ type Row = {
   // ADMIN only (server may omit for non-admin)
   unit_cost_usd?: number | null;
   work_sheet_id?: string | null;
+  work_sheet_status?: string | null;
+  ready_to_ship?: boolean;
 };
 
 function n(v: any, fallback = 0) {
@@ -181,6 +183,20 @@ function WorkSheetLink({ r }: { r: Row }) {
   );
 }
 
+function isReadyWorkSheetStatus(v?: string | null) {
+  return String(v ?? "").trim().toUpperCase() === "READY";
+}
+
+function WorkSheetStatusBadge({ status }: { status?: string | null }) {
+  const v = String(status ?? "").trim().toUpperCase();
+  const base = "inline-block rounded px-2 py-0.5 text-xs font-medium";
+  if (!v) return <span className={`${base} bg-slate-100 text-slate-600`}>-</span>;
+  if (v === "READY") return <span className={`${base} bg-amber-100 text-amber-700`}>READY</span>;
+  if (v === "CLOSED") return <span className={`${base} bg-slate-200 text-slate-700`}>CLOSED</span>;
+  if (v === "SENT") return <span className={`${base} bg-blue-100 text-blue-700`}>SENT</span>;
+  return <span className={`${base} bg-green-100 text-green-700`}>{v}</span>;
+}
+
 export default function ProductionStatusPage() {
   const { role: permissionRole } = usePermissions();
   const role: Role =
@@ -206,6 +222,7 @@ export default function ProductionStatusPage() {
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [rows, setRows] = useState<Row[]>([]);
+  const [readyBusyByWsId, setReadyBusyByWsId] = useState<Record<string, boolean>>({});
   const [selectedVendor, setSelectedVendor] = useState<string | null>(null);
   const [selectedBuyer, setSelectedBuyer] = useState<string | null>(null);
   const [selectedBrand, setSelectedBrand] = useState<string | null>(null);
@@ -754,6 +771,50 @@ export default function ProductionStatusPage() {
     }
   };
 
+  const setReadyState = async (row: Row, ready: boolean) => {
+    const wsId = String(row.work_sheet_id ?? "").trim();
+    if (!wsId) return;
+    if (role === "viewer") return;
+    const ask = ready
+      ? "이 Work Sheet를 Ready to Ship으로 표시할까요?"
+      : "Ready to Ship 표시를 해제하고 다시 In Production으로 돌릴까요?";
+    if (!window.confirm(ask)) return;
+
+    setReadyBusyByWsId((prev) => ({ ...prev, [wsId]: true }));
+    try {
+      const res = await fetch(`/api/work-sheets/${wsId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          header: {
+            status: ready ? "READY" : "DRAFT",
+          },
+        }),
+      });
+      const json = await res.json().catch(() => ({} as any));
+      if (!res.ok || !json?.success) {
+        alert(json?.error || `Ready 상태 저장 실패 (HTTP ${res.status})`);
+        return;
+      }
+
+      setRows((prev) =>
+        prev.map((item) =>
+          item.work_sheet_id === wsId
+            ? {
+                ...item,
+                work_sheet_status: ready ? "READY" : "DRAFT",
+                ready_to_ship: ready,
+              }
+            : item
+        )
+      );
+    } catch (e: any) {
+      alert(e?.message || "Ready 상태 저장 중 오류가 발생했습니다.");
+    } finally {
+      setReadyBusyByWsId((prev) => ({ ...prev, [wsId]: false }));
+    }
+  };
+
   const exportExcel = async () => {
     setExporting(true);
     try {
@@ -1205,6 +1266,7 @@ export default function ProductionStatusPage() {
             <tr className="text-left">
               <th className="p-3 font-semibold text-center">PO</th>
               <th className="p-3 font-semibold text-center">WS</th>
+              <th className="p-3 font-semibold text-center">Ready</th>
               <th className="p-3 font-semibold">PO No</th>
               <th className="p-3 font-semibold">Buyer</th>
               <th className="p-3 font-semibold">Brand</th>
@@ -1213,6 +1275,7 @@ export default function ProductionStatusPage() {
               <th className="p-3 font-semibold">Order Date</th>
               <th className="p-3 font-semibold">Req Ship Date</th>
               <th className="p-3 font-semibold">Status</th>
+              <th className="p-3 font-semibold">WS Status</th>
               <th className="p-3 font-semibold">Style</th>
               {showUnitPrice && (
                 <th className="p-3 font-semibold text-right">Unit Price (USD)</th>
@@ -1234,7 +1297,7 @@ export default function ProductionStatusPage() {
               <tr>
                 <td
                   colSpan={
-                    14 +
+                    15 +
                     (showUnitPrice ? 1 : 0) +
                     (showMargin ? 3 : 0)
                   }
@@ -1261,6 +1324,28 @@ export default function ProductionStatusPage() {
                       <td className="p-3 text-center">
                         <WorkSheetLink r={r} />
                       </td>
+                      <td className="p-3 text-center">
+                        {r.work_sheet_id ? (
+                          role === "viewer" ? (
+                            <WorkSheetStatusBadge status={r.work_sheet_status} />
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant={isReadyWorkSheetStatus(r.work_sheet_status) ? "outline" : "default"}
+                              disabled={!!readyBusyByWsId[r.work_sheet_id]}
+                              onClick={() => setReadyState(r, !isReadyWorkSheetStatus(r.work_sheet_status))}
+                            >
+                              {readyBusyByWsId[r.work_sheet_id]
+                                ? "..."
+                                : isReadyWorkSheetStatus(r.work_sheet_status)
+                                ? "Undo Ready"
+                                : "Mark Ready"}
+                            </Button>
+                          )
+                        ) : (
+                          <span className="text-xs text-slate-400">No WS</span>
+                        )}
+                      </td>
 
                       <td className="p-3">{r.po_no ?? ""}</td>
                       <td className="p-3">{r.buyer_name ?? ""}</td>
@@ -1272,6 +1357,9 @@ export default function ProductionStatusPage() {
                         {fmtDate(r.requested_ship_date ?? null)}
                       </td>
                       <td className="p-3 text-center">{r.status ?? ""}</td>
+                      <td className="p-3 text-center">
+                        <WorkSheetStatusBadge status={r.work_sheet_status} />
+                      </td>
                       <td className="p-3 text-center">{style}</td>
 
                       {showUnitPrice && (
@@ -1313,9 +1401,8 @@ export default function ProductionStatusPage() {
                 <tr className="border-t bg-slate-50 font-semibold">
                   <td
                     colSpan={
-                      12 +
-                      (showUnitPrice ? 1 : 0) +
-                      (showMargin ? 3 : 0)
+                      13 +
+                      (showUnitPrice ? 1 : 0)
                     }
                     className="p-3 text-right"
                   >

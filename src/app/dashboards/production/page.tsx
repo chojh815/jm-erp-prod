@@ -37,6 +37,8 @@ type Row = {
   vendor_name?: string | null;
   unit_cost_usd?: number | null;
   work_sheet_id?: string | null;
+  work_sheet_status?: string | null;
+  ready_to_ship?: boolean;
 };
 
 type ProductionStatusResponse = {
@@ -330,7 +332,6 @@ export default function ProductionDashboardPage() {
   }, [allRows]);
 
   const today = todayIso();
-  const readyEnd = addDays(today, 7);
 
   const filteredRows = React.useMemo(() => {
     return allRows
@@ -344,19 +345,13 @@ export default function ProductionDashboardPage() {
   }, [allRows, query, buyerId, vendor, shipMode, dateFrom, dateTo]);
 
   const inProductionRows = React.useMemo(
-    () => filteredRows.filter((row) => !!row.work_sheet_id),
+    () => filteredRows.filter((row) => !!row.work_sheet_id && !row.ready_to_ship),
     [filteredRows]
   );
 
   const readyRows = React.useMemo(
-    () =>
-      inProductionRows.filter(
-        (row) =>
-          !!row.requested_ship_date &&
-          row.requested_ship_date >= today &&
-          row.requested_ship_date <= readyEnd
-      ),
-    [inProductionRows, readyEnd, today]
+    () => filteredRows.filter((row) => !!row.work_sheet_id && !!row.ready_to_ship),
+    [filteredRows]
   );
 
   const overdueRows = React.useMemo(
@@ -412,7 +407,7 @@ export default function ProductionDashboardPage() {
         // handled below through Set-like local map
       }
       if (!!row.requested_ship_date && row.requested_ship_date < today) current.overdueCount += 1;
-      if (!!row.work_sheet_id && !!row.requested_ship_date && row.requested_ship_date >= today && row.requested_ship_date <= readyEnd) current.readyCount += 1;
+      if (!!row.work_sheet_id && !!row.ready_to_ship) current.readyCount += 1;
       if (!row.work_sheet_id) current.noWsCount += 1;
       map.set(key, current);
     });
@@ -431,7 +426,7 @@ export default function ProductionDashboardPage() {
         poCount: poSeen.get(item.vendor)?.size || 0,
       }))
       .sort((a, b) => b.amountUsd - a.amountUsd);
-  }, [scopedRows, today, readyEnd]);
+  }, [scopedRows, today]);
 
   const shipModeMixText = React.useMemo(() => {
     const counts = new Map<string, number>();
@@ -598,7 +593,7 @@ export default function ProductionDashboardPage() {
           <KpiCard
             title="Ready to Ship"
             value={fmtMoney(readyAmount)}
-            sub={`${new Set(readyRows.map((row) => row.po_no).filter(Boolean)).size} POs within 7 days`}
+            sub={`${new Set(readyRows.map((row) => row.po_no).filter(Boolean)).size} ready POs`}
             tone="warn"
           />
           <KpiCard
@@ -699,7 +694,7 @@ export default function ProductionDashboardPage() {
               </TabsList>
 
               <TabsContent value="ready">
-                <ProductionTable rows={readyRows} emptyText={loading ? "Loading..." : "No ready-to-ship rows within 7 days."} />
+                <ProductionTable rows={readyRows} emptyText={loading ? "Loading..." : "No ready-to-ship rows."} />
               </TabsContent>
 
               <TabsContent value="no-ws">
