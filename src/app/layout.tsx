@@ -2,6 +2,7 @@
 import type { Metadata, Viewport } from "next";
 import Header from "@/components/layout/Header";
 import { PermissionsProvider } from "@/components/auth/PermissionsProvider";
+import InactivityGuard from "@/components/auth/InactivityGuard";
 import PwaRegistrar from "@/components/pwa/PwaRegistrar";
 import "./globals.css";
 
@@ -46,6 +47,7 @@ export default function RootLayout({
       <body>
         <PermissionsProvider>
           <PwaRegistrar />
+          <InactivityGuard />
           <Header />
           <main>{children}</main>
         </PermissionsProvider>
