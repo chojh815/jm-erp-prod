@@ -735,22 +735,22 @@ export default function OverviewDashboardPage() {
           <KpiCard
             title="Pending Orders"
             kpi={kpiMap.get("pending")}
-            onClick={() => go("/po/list")}
+            onClick={() => go("/po/list?status=OPEN")}
           />
           <KpiCard
             title="In Production"
             kpi={kpiMap.get("production")}
-            onClick={() => go("/production-status")}
+            onClick={() => go("/production/status")}
           />
           <KpiCard
             title="Ready to Ship"
             kpi={kpiMap.get("ready")}
-            onClick={() => go("/production-status?ready=true")}
+            onClick={() => go("/shipments/list")}
           />
           <KpiCard
             title="Shipped (MTD)"
             kpi={kpiMap.get("shipped")}
-            onClick={() => go("/shipments")}
+            onClick={() => go("/shipments/list")}
           />
           <KpiCard
             title="Invoiced (MTD)"
@@ -765,12 +765,13 @@ export default function OverviewDashboardPage() {
           <KpiCard
             title="AR Outstanding"
             kpi={kpiMap.get("ar")}
-            onClick={() => go("/finance/ar")}
+            onClick={() => go("/dashboards/receivables")}
           />
           <KpiCard
             title="At Risk"
             kpi={kpiMap.get("at_risk")}
             onClick={() => {
+              setActionTab("at_risk");
               const el = document.getElementById("action-list");
               if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
             }}
