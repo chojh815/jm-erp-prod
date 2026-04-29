@@ -51,6 +51,16 @@ type BuyerOptionsResponse = {
   items?: BuyerOption[];
 };
 
+type OverviewKpi = {
+  key: string;
+  value_usd?: number | null;
+  sub_value?: string | null;
+};
+
+type OverviewResponse = {
+  kpis?: OverviewKpi[];
+};
+
 type ScopeKey = "all" | "in_production" | "ready" | "overdue" | "no_ws";
 
 type VendorSummary = {
@@ -265,6 +275,7 @@ function ProductionTable({
 export default function ProductionDashboardPage() {
   const [allRows, setAllRows] = React.useState<Row[]>([]);
   const [buyers, setBuyers] = React.useState<BuyerOption[]>([]);
+  const [overviewKpis, setOverviewKpis] = React.useState<Record<string, OverviewKpi>>({});
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -284,13 +295,22 @@ export default function ProductionDashboardPage() {
         setLoading(true);
         setError(null);
 
+        const overviewUrl = new URL("/api/dashboards/overview", window.location.origin);
+        overviewUrl.searchParams.set("preset", dateFrom || dateTo ? "CUSTOM" : "CUSTOM");
+        overviewUrl.searchParams.set("start", dateFrom || "1970-01-01");
+        overviewUrl.searchParams.set("end", dateTo || todayIso());
+        overviewUrl.searchParams.set("buyerIds", buyerId);
+        overviewUrl.searchParams.set("siteIds", "ALL");
+
         const [rowsRes, buyersRes] = await Promise.all([
           fetch("/api/production/status/list", { cache: "no-store" }),
           fetch("/api/dashboards/options/buyers", { cache: "no-store" }),
         ]);
+        const overviewRes = await fetch(overviewUrl.toString(), { cache: "no-store" });
 
         const rowsJson = (await rowsRes.json()) as ProductionStatusResponse;
         const buyersJson = (await buyersRes.json().catch(() => ({ items: [] }))) as BuyerOptionsResponse;
+        const overviewJson = (await overviewRes.json().catch(() => ({ kpis: [] }))) as OverviewResponse;
 
         if (dead) return;
 
@@ -300,6 +320,13 @@ export default function ProductionDashboardPage() {
 
         setAllRows(Array.isArray(rowsJson.rows) ? rowsJson.rows : []);
         setBuyers(Array.isArray(buyersJson.items) ? buyersJson.items : []);
+        setOverviewKpis(
+          Object.fromEntries(
+            (Array.isArray(overviewJson.kpis) ? overviewJson.kpis : [])
+              .filter((kpi) => !!kpi?.key)
+              .map((kpi) => [kpi.key, kpi])
+          )
+        );
       } catch (e: any) {
         if (!dead) setError(e?.message || "Failed to load production dashboard.");
       } finally {
@@ -311,7 +338,7 @@ export default function ProductionDashboardPage() {
     return () => {
       dead = true;
     };
-  }, []);
+  }, [buyerId, dateFrom, dateTo]);
 
   const vendorOptions = React.useMemo(() => {
     const set = new Set<string>();
@@ -460,6 +487,33 @@ export default function ProductionDashboardPage() {
     [overdueRows]
   );
 
+  const canUseOverviewKpis =
+    !query.trim() &&
+    vendor === "ALL" &&
+    shipMode === "ALL" &&
+    scope === "all";
+
+  const pendingOrdersValue = canUseOverviewKpis
+    ? n(overviewKpis.pending?.value_usd)
+    : totalAmount;
+  const pendingOrdersSub = canUseOverviewKpis
+    ? `${overviewKpis.pending?.sub_value || "0"} POs / ${filteredRows.length} lines`
+    : `${new Set(filteredRows.map((row) => row.po_no).filter(Boolean)).size} POs / ${filteredRows.length} lines`;
+
+  const inProductionValue = canUseOverviewKpis
+    ? n(overviewKpis.production?.value_usd)
+    : inProductionAmount;
+  const inProductionSub = canUseOverviewKpis
+    ? `${overviewKpis.production?.sub_value || "0"} lines`
+    : `${new Set(inProductionRows.map((row) => row.po_no).filter(Boolean)).size} POs / ${inProductionRows.length} lines`;
+
+  const readyValue = canUseOverviewKpis
+    ? n(overviewKpis.ready?.value_usd)
+    : readyAmount;
+  const readySub = canUseOverviewKpis
+    ? `${overviewKpis.ready?.sub_value || "0"} ready POs`
+    : `${new Set(readyRows.map((row) => row.po_no).filter(Boolean)).size} ready POs`;
+
   const resetFilters = () => {
     setQuery("");
     setBuyerId("ALL");
@@ -582,18 +636,18 @@ export default function ProductionDashboardPage() {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             title="Pending Orders"
-            value={fmtMoney(totalAmount)}
-            sub={`${new Set(filteredRows.map((row) => row.po_no).filter(Boolean)).size} POs / ${filteredRows.length} lines`}
+            value={fmtMoney(pendingOrdersValue)}
+            sub={pendingOrdersSub}
           />
           <KpiCard
             title="In Production"
-            value={fmtMoney(inProductionAmount)}
-            sub={`${new Set(inProductionRows.map((row) => row.po_no).filter(Boolean)).size} POs / ${inProductionRows.length} lines`}
+            value={fmtMoney(inProductionValue)}
+            sub={inProductionSub}
           />
           <KpiCard
             title="Ready to Ship"
-            value={fmtMoney(readyAmount)}
-            sub={`${new Set(readyRows.map((row) => row.po_no).filter(Boolean)).size} ready POs`}
+            value={fmtMoney(readyValue)}
+            sub={readySub}
             tone="warn"
           />
           <KpiCard
