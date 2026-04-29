@@ -281,9 +281,10 @@ export async function GET(req: Request) {
     const { start, end } = rangeFromPreset(preset, url.searchParams.get("start"), url.searchParams.get("end"));
     const supabase = supabaseAdmin;
 
-    const [poRes, poLinesRes, invRes, shipRes, rchRes, rcaRes, rclRes, sampleRes, companiesRes] = await Promise.all([
+    const [poRes, poLinesRes, wsLinesRes, invRes, shipRes, rchRes, rcaRes, rclRes, sampleRes, companiesRes] = await Promise.all([
       supabase.from("po_headers").select("*"),
       supabase.from("po_lines").select("*"),
+      supabase.from("work_sheet_lines").select("po_line_id, work_sheet_id"),
       supabase.from("invoice_headers").select("*"),
       supabase.from("shipments").select("*"),
       supabase.from("receipt_headers").select("*"),
@@ -295,6 +296,7 @@ export async function GET(req: Request) {
 
     const pos = poRes.error ? [] : (poRes.data || []);
     const poLines = poLinesRes.error ? [] : (poLinesRes.data || []);
+    const workSheetLines = wsLinesRes.error ? [] : (wsLinesRes.data || []);
     const invoices = invRes.error ? [] : (invRes.data || []);
     const shipments = shipRes.error ? [] : (shipRes.data || []);
     const receiptHeaders = rchRes.error ? [] : (rchRes.data || []);
@@ -379,6 +381,53 @@ export async function GET(req: Request) {
       const hid = pickPoHeaderId(h);
       return hid ? (poLineSumByHeader.get(hid) || 0) : 0;
     };
+
+    const posById = new Map<string, any>();
+    for (const h of pos.filter(notDeleted)) {
+      const hid = pickPoHeaderId(h);
+      if (hid) posById.set(hid, h);
+    }
+
+    const wsPoLineIdSet = new Set(
+      workSheetLines
+        .filter(notDeleted)
+        .map((r: any) => String(r?.po_line_id ?? "").trim())
+        .filter(Boolean)
+    );
+
+    const productionRows = poLines
+      .filter(notDeleted)
+      .map((ln: any) => {
+        const header = posById.get(pickPoHeaderIdFromLine(ln));
+        const scopeRow = header ?? ln;
+        const poLineId = String(ln?.id ?? "").trim();
+        return {
+          po_line_id: poLineId,
+          po_no: pickPoNo(scopeRow),
+          req_ship_date: pickReqShipDate(scopeRow),
+          amount_usd: Number(pickLineAmountUSD(ln).toFixed(2)),
+          fulfillment_status: pickFulfillmentStatus(scopeRow),
+          scope_row: scopeRow,
+          has_work_sheet: poLineId ? wsPoLineIdSet.has(poLineId) : false,
+        };
+      })
+      .filter((row) =>
+        row.has_work_sheet &&
+        !!row.po_no &&
+        !!row.req_ship_date &&
+        buyerOk(row.scope_row) &&
+        siteOk(row.scope_row) &&
+        isShipmentPending({ fulfillment_status: row.fulfillment_status })
+      );
+
+    const productionRowsInRange = productionRows.filter((r) => inRangeISO(r.req_ship_date, start, end));
+    const productionUsd = productionRowsInRange.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
+    const productionLineCount = productionRowsInRange.length;
+
+    const readyWindowEnd = addDaysISO(end, 7);
+    const readyRows = productionRows.filter((r) => inRangeISO(r.req_ship_date, end, readyWindowEnd));
+    const readyUsd = readyRows.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
+    const readyPoCount = new Set(readyRows.map((r) => r.po_no).filter(Boolean)).size;
 
     const scheduleRows = posBaseF
       .filter((r: any) => {
@@ -584,8 +633,8 @@ export async function GET(req: Request) {
     const kpis = [
       { key: "orders", label: "Orders", value_usd: ordersUsd, delta_pct: null, sub_label: "POs", sub_value: String(poCount) },
       { key: "pending", label: "Pending Orders", value_usd: pendingOrdersUsd, delta_pct: null, sub_label: "POs", sub_value: String(pendingPoCount) },
-      { key: "production", label: "In Production", value_usd: 0, delta_pct: null, sub_label: "Lines", sub_value: "0" },
-      { key: "ready", label: "Ready", value_usd: 0, delta_pct: null, sub_label: "POs", sub_value: "0" },
+      { key: "production", label: "In Production", value_usd: productionUsd, delta_pct: null, sub_label: "Lines", sub_value: String(productionLineCount) },
+      { key: "ready", label: "Ready", value_usd: readyUsd, delta_pct: null, sub_label: "POs", sub_value: String(readyPoCount) },
       { key: "shipped", label: "Shipped", value_usd: shippedUsd, delta_pct: null, sub_label: "Shipments", sub_value: String(shipCount) },
       { key: "invoiced", label: "Invoiced", value_usd: invoicedUsd, delta_pct: null, sub_label: "Invoices", sub_value: String(invCount) },
       { key: "collected", label: "Collected", value_usd: collectedUsd, delta_pct: null, sub_label: "Receipts", sub_value: String(rcpCount) },
@@ -658,6 +707,10 @@ export async function GET(req: Request) {
         debug_counts: debug ? {
           po_headers_total: pos.length,
           po_headers_scope: posBaseF.length,
+          work_sheet_lines_total: workSheetLines.length,
+          production_rows_scope: productionRows.length,
+          production_rows_in_range: productionRowsInRange.length,
+          ready_rows_window: readyRows.length,
           next_ship_count: next_ship.length,
           at_risk_count: at_risk.length,
           invoices_period: invPeriodF.length,
@@ -671,6 +724,7 @@ export async function GET(req: Request) {
         missing_tables: {
           po_headers: poRes.error ? poRes.error.message : null,
           po_lines: poLinesRes.error ? poLinesRes.error.message : null,
+          work_sheet_lines: wsLinesRes.error ? wsLinesRes.error.message : null,
           invoice_headers: invRes.error ? invRes.error.message : null,
           shipments: shipRes.error ? shipRes.error.message : null,
           receipt_headers: rchRes.error ? rchRes.error.message : null,
