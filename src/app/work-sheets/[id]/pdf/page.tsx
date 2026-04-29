@@ -1070,25 +1070,45 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
   y = Math.max(y + imgH, tableEndY) + 4;
 
   /* ===== Bottom 3 boxes ===== */
-  const bottomH = 44;
-  // Try to keep bottom boxes on the same page if there is visually enough room.
-  // 최소 간격(2mm)까지 줄여보고 그래도 안되면 다음 페이지로 넘김
-  const minY = Math.max(y, (doc as any).lastAutoTable?.finalY ? ((doc as any).lastAutoTable.finalY + 2) : y);
-  y = minY;
-  if (y + bottomH > pageH - margin) {
-    // still doesn't fit -> new page
-    y = ensure(y, bottomH);
-  }
-
   const bGap = 8;
   const bW = (contentW - bGap * 2) / 3;
   const titles = L.BOTTOM_TITLES;
-
   const bottomValues = [
     normalizeMultiline(d.workNotes),
     normalizeMultiline(d.qcPoints),
     normalizeMultiline(d.packingNotes),
   ];
+  const bottomPadX = 5;
+  const bottomTextStartY = 15.8;
+  const bottomLineH = 4.3;
+  const bottomHeaderH = 10;
+  const bottomMinH = 44;
+
+  const bottomLinesByBox = bottomValues.map((value) => {
+    const textToPrint = String(value ?? "").trim() || "-";
+    const parts = textToPrint.split("\n");
+    let lines: string[] = [];
+    for (const part of parts) {
+      const chunk = doc.splitTextToSize(part, bW - bottomPadX * 2) as string[];
+      lines = lines.concat(chunk.length ? chunk : [""]);
+    }
+    return lines.length ? lines : ["-"];
+  });
+
+  const maxBottomLines = Math.max(...bottomLinesByBox.map((lines) => lines.length), 1);
+  const bottomH = Math.max(
+    bottomMinH,
+    bottomHeaderH + 6 + maxBottomLines * bottomLineH + 5
+  );
+
+  const minY = Math.max(
+    y,
+    (doc as any).lastAutoTable?.finalY ? (doc as any).lastAutoTable.finalY + 2 : y
+  );
+  y = minY;
+  if (y + bottomH > pageH - margin) {
+    y = ensure(y, bottomH);
+  }
 
   for (let i = 0; i < 3; i++) {
     const bx = margin + i * (bW + bGap);
@@ -1098,36 +1118,16 @@ async function buildPdf(d: PdfData, lang: Lang, mode: Mode) {
     rrect(doc, bx, y, bW, bottomH, 3.0, "S");
 
     doc.setFillColor(...COLORS.grayFill);
-    doc.rect(bx, y, bW, 10, "F");
+    doc.rect(bx, y, bW, bottomHeaderH, "F");
 
     doc.setFontSize(11.2);
     doc.setTextColor(0);
     doc.text(titles[i], bx + 4, y + 7.1);
 
-    const raw = String(bottomValues[i] ?? "").trim();
-    const textToPrint = raw || "-";
-
     doc.setFontSize(8.6);
     doc.setTextColor(60);
-
-    const padX = 5;
-    const textX = bx + padX;
-    const textY = y + 15.8;
-    const maxW = bW - padX * 2;
-
-    const parts = textToPrint.split("\n");
-    let lines: string[] = [];
-    for (const p of parts) {
-      const chunk = doc.splitTextToSize(p, maxW) as string[];
-      lines = lines.concat(chunk.length ? chunk : [""]);
-    }
-
-    const maxLines = 6;
-    if (lines.length > maxLines) lines = lines.slice(0, maxLines);
-
-    textSafe(doc, lines, textX, textY);
+    textSafe(doc, bottomLinesByBox[i], bx + bottomPadX, y + bottomTextStartY);
     doc.setTextColor(0);
-
   }
 
   return doc;
