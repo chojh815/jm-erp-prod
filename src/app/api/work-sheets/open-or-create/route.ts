@@ -37,6 +37,49 @@ function pickDate(...vals: any[]): string | null {
   return null;
 }
 
+function parseMissingColumn(message: string | undefined | null): string | null {
+  const s = String(message ?? "");
+  const m = s.match(/Could not find the '([^']+)' column of '([^']+)'/i);
+  if (m?.[1]) return m[1];
+  const m2 = s.match(/column\s+([a-zA-Z0-9_]+)\s+does not exist/i);
+  if (m2?.[1]) return m2[1];
+  return null;
+}
+
+async function safeUpdateRow(supabase: any, table: string, match: Record<string, any>, patch: Record<string, any>) {
+  const nextPatch: any = { ...(patch ?? {}) };
+  let tries = 0;
+  while (true) {
+    let q = supabase.from(table).update(nextPatch);
+    for (const [k, v] of Object.entries(match)) q = q.eq(k, v as any);
+    const { error } = await q;
+    if (!error) return { success: true };
+    const missing = parseMissingColumn(error.message);
+    if (missing && missing in nextPatch && tries < 20) {
+      delete nextPatch[missing];
+      tries++;
+      continue;
+    }
+    return { success: false, error };
+  }
+}
+
+async function safeInsertRow(supabase: any, table: string, payload: Record<string, any>) {
+  const nextPayload: any = { ...(payload ?? {}) };
+  let tries = 0;
+  while (true) {
+    const { error } = await supabase.from(table).insert(nextPayload);
+    if (!error) return { success: true };
+    const missing = parseMissingColumn(error.message);
+    if (missing && missing in nextPayload && tries < 20) {
+      delete nextPayload[missing];
+      tries++;
+      continue;
+    }
+    return { success: false, error };
+  }
+}
+
 async function fetchLineImages(supabase: any, po_line_id: string): Promise<string[] | null> {
   const { data, error } = await supabase
     .from("po_line_images")
@@ -260,7 +303,7 @@ export async function POST(req: Request) {
             updLine.image_urls = linePayload.image_urls;
           }
           if (Object.keys(updLine).length) {
-            await supabase.from("work_sheet_lines").update(updLine).eq("id", wsl.id);
+            await safeUpdateRow(supabase, "work_sheet_lines", { id: wsl.id }, updLine);
           }
         }
       } catch {}
@@ -289,17 +332,17 @@ export async function POST(req: Request) {
     }
 
     // 4) create line (with snapshot fields)
-    const { error: le } = await supabase.from("work_sheet_lines").insert({
+    const lineInsert = await safeInsertRow(supabase, "work_sheet_lines", {
       work_sheet_id: h.id,
       ...linePayload,
     });
 
-    if (le) {
+    if (!lineInsert.success) {
       try {
         await supabase.from("work_sheet_headers").delete().eq("id", h.id);
       } catch {}
       return NextResponse.json(
-        { success: false, error: le.message || "Failed to create Work Sheet line" },
+        { success: false, error: lineInsert.error?.message || "Failed to create Work Sheet line" },
         { status: 500 }
       );
     }
