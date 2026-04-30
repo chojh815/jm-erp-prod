@@ -388,6 +388,7 @@ export async function GET(req: NextRequest) {
     const wsLines = wsRes.data || [];
 
     const vendorIdsFromWs = Array.from(new Set(wsLines.map((x: any) => x.vendor_id).filter(Boolean)));
+    const poSiteIds = Array.from(new Set(poHeaders.map((x: any) => x.site_id).filter(Boolean)));
     const vendorRes = vendorIdsFromWs.length
       ? await supabaseAdmin
           .from("companies")
@@ -396,6 +397,14 @@ export async function GET(req: NextRequest) {
       : ({ data: [], error: null } as any);
     if (vendorRes.error) throw vendorRes.error;
     const vendors = vendorRes.data || [];
+    const siteRes = poSiteIds.length
+      ? await supabaseAdmin
+          .from("company_sites")
+          .select("id, site_name, name")
+          .in("id", poSiteIds)
+      : ({ data: [], error: null } as any);
+    if (siteRes.error) throw siteRes.error;
+    const sites = siteRes.data || [];
 
     const allocFilters: string[] = [];
     if (shipmentIds.length) allocFilters.push(`shipment_id.in.(${shipmentIds.join(",")})`);
@@ -432,7 +441,14 @@ export async function GET(req: NextRequest) {
     if (extraCostRes.error) throw extraCostRes.error;
     const extraCosts = extraCostRes.data || [];
 
-    const devStyleNos = Array.from(new Set(wsLines.map((x: any) => s((x as any).jm_style_no)).filter(Boolean)));
+    const devStyleNos = Array.from(
+      new Set(
+        wsLines
+          .map((x: any) => s((x as any).jm_style_no))
+          .concat(poLines.map((x: any) => s((x as any).jm_style_no)))
+          .filter(Boolean)
+      )
+    );
     const devHeaderRes = devStyleNos.length
       ? await supabaseAdmin
           .from("product_development_headers")
@@ -515,6 +531,7 @@ export async function GET(req: NextRequest) {
     const poHeaderById = new Map(poHeaders.map((x: any) => [x.id, x]));
     const wsByPoLineId = new Map(wsLines.map((x: any) => [x.po_line_id, x]));
     const vendorById = new Map(vendors.map((x: any) => [x.id, x]));
+    const siteById = new Map<string, any>(sites.map((x: any) => [String(x.id), x]));
     const expenseHeaderById = new Map(expenseHeaders.map((x: any) => [x.id, x]));
     const poHeaderIdsWithLineExpense = new Set<string>();
     for (const alloc of allocations) {
@@ -590,6 +607,7 @@ export async function GET(req: NextRequest) {
       if (!shipmentId) continue;
       const headerBuyerId = (shipment as any).buyer_id ?? null;
       const headerSiteId = (shipment as any).site_id ?? null;
+      const headerSite: any = headerSiteId ? siteById.get(String(headerSiteId)) : null;
 
       const linesForShipment = shipmentLines.filter((line: any) => s(line.shipment_id) === shipmentId);
       const invoicesForShipment = invoiceByShipmentId.get(shipmentId) || [];
@@ -609,7 +627,7 @@ export async function GET(req: NextRequest) {
           buyer_name: (shipment as any).buyer_name ?? null,
           brand_name: null,
           site_id: headerSiteId,
-          site_name: headerSiteId,
+          site_name: headerSite?.site_name ?? headerSite?.name ?? headerSiteId,
           po_count: 0,
           line_count: 0,
           revenue_usd: 0,
@@ -645,6 +663,7 @@ export async function GET(req: NextRequest) {
 
         const buyerId = (poHeader as any)?.buyer_id ?? headerBuyerId ?? null;
         const siteId = (poHeader as any)?.site_id ?? headerSiteId ?? null;
+        const site: any = siteId ? siteById.get(String(siteId)) : null;
         const vendorId = ws?.vendor_id ?? null;
 
         if (buyerIds !== "ALL" && (!buyerId || !(buyerIds as string[]).includes(String(buyerId)))) continue;
@@ -652,12 +671,14 @@ export async function GET(req: NextRequest) {
         if (vendorIds !== "ALL" && (!vendorId || !(vendorIds as string[]).includes(String(vendorId)))) continue;
 
         const poNo = (poHeader as any)?.po_no ?? (poLine as any)?.po_no ?? (line as any).po_no ?? null;
-        const styleNo = (line as any).style_no ?? (poLine as any)?.jm_style_no ?? null;
+        const styleNo =
+          (line as any).style_no ??
+          (poLine as any)?.jm_style_no ??
+          (poLine as any)?.jm_style_code ??
+          null;
         const buyerStyleNo = (poLine as any)?.buyer_style_no ?? null;
         const description = (line as any).description ?? (poLine as any)?.description ?? null;
-        const costingUnitUsd = styleNo ? costingUnitUsdByStyle.get(s(styleNo)) || 0 : 0;
-        const extraUnitUsd = poLineId ? extraUnitCostByPoLineId.get(poLineId) || 0 : 0;
-        const wsJmStyleNo = s(ws?.jm_style_no);
+        const wsJmStyleNo = s(ws?.jm_style_no || (poLine as any)?.jm_style_no || (poLine as any)?.jm_style_code || styleNo);
         const devUnitUsd = wsJmStyleNo ? devUnitUsdByStyle.get(wsJmStyleNo) || 0 : 0;
 
         const haystack = [
@@ -686,48 +707,19 @@ export async function GET(req: NextRequest) {
           shippedQty * num((line as any).unit_price ?? (poLine as any)?.unit_price);
 
         const productionMode = s(ws?.production_mode || (ws?.vendor_id ? "OUTSOURCED" : "IN_HOUSE")).toUpperCase();
-        const outsourcingType = s(ws?.outsourcing_type || "FULL").toUpperCase();
-        const vendorCurrency = s(ws?.vendor_currency || "CNY").toUpperCase();
-        const plannedFxRate = num(ws?.fx_rate);
-        const internalMaterialUnitLocal = num(ws?.internal_material_cost);
-        const plannedMaterialUnitUsd = convertLocalUnitToUsd(
-          internalMaterialUnitLocal,
-          productionMode === "IN_HOUSE" ? "CNY" : vendorCurrency,
-          plannedFxRate
-        );
-        const plannedVendorUnitUsd = num(ws?.vendor_unit_cost_usd);
-
-        // Match the simpler fallback behavior used by the existing profitability dashboard:
-        // use vendor_unit_cost_usd first when it exists, and only fall back to converted
-        // material cost when vendor cost is missing. This prevents IN_HOUSE shipment rows
-        // from showing zero cost just because internal_material_cost is blank.
-        const plannedUnitUsd =
-          productionMode === "OUTSOURCED"
-            ? outsourcingType === "PROCESSING"
-              ? plannedMaterialUnitUsd + plannedVendorUnitUsd || plannedVendorUnitUsd || plannedMaterialUnitUsd
-              : plannedVendorUnitUsd || plannedMaterialUnitUsd
-            : plannedVendorUnitUsd || plannedMaterialUnitUsd;
-
+        const plannedUnitUsd = num(ws?.vendor_unit_cost_usd) || devUnitUsd;
         const actualAmt = num(ws?.actual_amt);
         const actualUnitUsd =
-          actualAmt > 0 && orderQty > 0
-            ? actualAmt / orderQty
-            : num(ws?.actual_unit) || num(ws?.actual_vendor_unit_cost_usd);
-
-        const basePlannedUnitUsd = plannedUnitUsd || costingUnitUsd || devUnitUsd;
-        const plannedCogsUsd = basePlannedUnitUsd > 0 ? basePlannedUnitUsd * shippedQty : 0;
+          actualAmt > 0 && shippedQty > 0
+            ? actualAmt / shippedQty
+            : num(ws?.actual_vendor_unit_cost_usd) || num(ws?.actual_unit);
+        const plannedCogsUsd = plannedUnitUsd > 0 ? plannedUnitUsd * shippedQty : 0;
         const actualCogsUsd =
-          actualAmt > 0 && ratio > 0
-            ? actualAmt * ratio
-            : actualUnitUsd > 0
-            ? actualUnitUsd * shippedQty
-            : 0;
+          actualAmt > 0 ? actualAmt : actualUnitUsd > 0 ? actualUnitUsd * shippedQty : 0;
 
         const hasActual = actualCogsUsd > 0.0001;
         const useFallback = !hasActual && plannedCogsUsd > 0.0001;
-        const effectiveBaseCogsUsd = hasActual ? actualCogsUsd : useFallback ? plannedCogsUsd : 0;
-        const extraCogsUsd = extraUnitUsd > 0 ? extraUnitUsd * shippedQty : 0;
-        const effectiveCogsUsd = effectiveBaseCogsUsd + extraCogsUsd;
+        const effectiveCogsUsd = hasActual ? actualCogsUsd : useFallback ? plannedCogsUsd : 0;
         const actualCoverage = hasActual ? 100 : useFallback ? 0 : 0;
         const marginMode: ShipmentLineRow["margin_mode"] = hasActual
           ? "ACTUAL"
@@ -809,7 +801,8 @@ export async function GET(req: NextRequest) {
         shipmentSummary.brand_name =
           shipmentSummary.brand_name ?? (poHeader as any)?.buyer_brand_name ?? null;
         shipmentSummary.site_id = shipmentSummary.site_id ?? siteId ?? null;
-        shipmentSummary.site_name = shipmentSummary.site_name ?? siteId ?? null;
+        shipmentSummary.site_name =
+          shipmentSummary.site_name ?? site?.site_name ?? site?.name ?? siteId ?? null;
         shipmentSummary.line_count += 1;
         shipmentSummary.revenue_usd += revenueUsd;
         shipmentSummary.planned_cogs_usd += plannedCogsUsd;
@@ -971,7 +964,15 @@ export async function GET(req: NextRequest) {
       return row;
     });
 
-    const shipments = Array.from(shipmentMap.values())
+    const rawShipments = Array.from(shipmentMap.values()).filter((row) => row.line_count > 0);
+    const rawKpiRevenue = rawShipments.reduce((sum, row) => sum + row.revenue_usd, 0);
+    const rawKpiCogs = rawShipments.reduce((sum, row) => sum + row.effective_cogs_usd, 0);
+    const rawKpiFreight = rawShipments.reduce((sum, row) => sum + row.freight_usd, 0);
+    const rawKpiPacking = rawShipments.reduce((sum, row) => sum + row.packing_usd, 0);
+    const rawKpiOther = rawShipments.reduce((sum, row) => sum + row.other_expenses_usd, 0);
+    const rawKpiNet = rawKpiRevenue - rawKpiCogs - rawKpiFreight - rawKpiPacking - rawKpiOther;
+
+    const shipments = rawShipments
       .map((row) => {
         row.revenue_usd = round2(row.revenue_usd) ?? 0;
         row.planned_cogs_usd = round2(row.planned_cogs_usd) ?? 0;
@@ -999,21 +1000,17 @@ export async function GET(req: NextRequest) {
         });
         return row;
       })
-      .filter((row) => row.line_count > 0)
       .sort((a, b) => (b.ship_date || "").localeCompare(a.ship_date || ""));
 
     const kpis = {
       shipment_count: shipments.length,
-      revenue_usd: round2(shipments.reduce((sum, row) => sum + row.revenue_usd, 0)) ?? 0,
-      effective_cogs_usd: round2(shipments.reduce((sum, row) => sum + row.effective_cogs_usd, 0)) ?? 0,
-      freight_usd: round2(shipments.reduce((sum, row) => sum + row.freight_usd, 0)) ?? 0,
-      packing_usd: round2(shipments.reduce((sum, row) => sum + row.packing_usd, 0)) ?? 0,
-      other_expenses_usd: round2(shipments.reduce((sum, row) => sum + row.other_expenses_usd, 0)) ?? 0,
-      net_profit_usd: round2(shipments.reduce((sum, row) => sum + row.net_profit_usd, 0)) ?? 0,
-      net_margin_pct: pct(
-        shipments.reduce((sum, row) => sum + row.net_profit_usd, 0),
-        shipments.reduce((sum, row) => sum + row.revenue_usd, 0)
-      ),
+      revenue_usd: round2(rawKpiRevenue) ?? 0,
+      effective_cogs_usd: round2(rawKpiCogs) ?? 0,
+      freight_usd: round2(rawKpiFreight) ?? 0,
+      packing_usd: round2(rawKpiPacking) ?? 0,
+      other_expenses_usd: round2(rawKpiOther) ?? 0,
+      net_profit_usd: round2(rawKpiNet) ?? 0,
+      net_margin_pct: pct(rawKpiNet, rawKpiRevenue),
     };
 
     return NextResponse.json(
