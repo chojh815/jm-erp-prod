@@ -358,20 +358,31 @@ export default function ExpenseForm({
   React.useEffect(() => {
     if (!selectedType) return;
 
-    setHeader((prev) => ({
-      ...prev,
-      scope_type: (selectedType.default_scope as any) || prev.scope_type,
-      allocation_method: (selectedType.default_allocation as any) || prev.allocation_method,
-    }));
+    setHeader((prev) => {
+      if (mode === "edit") {
+        return {
+          ...prev,
+          allocation_method: prev.allocation_method || (selectedType.default_allocation as any) || "BY_REVENUE",
+        };
+      }
 
-    setAllocations((prev) => {
-      const scope = selectedType.default_scope;
-      if (scope === "FACTORY") return [{ target_type: "SITE" }];
-      if (scope === "SHIPMENT") return [{ target_type: "SHIPMENT" }];
-      if (scope === "LINE") return [{ target_type: "LINE" }];
-      if (scope === "GENERAL") return [{ target_type: "NONE" }];
-      return prev?.length ? prev : [{ target_type: "PO" }];
+      return {
+        ...prev,
+        scope_type: (selectedType.default_scope as any) || prev.scope_type,
+        allocation_method: (selectedType.default_allocation as any) || prev.allocation_method,
+      };
     });
+
+    if (mode === "create") {
+      setAllocations((prev) => {
+        const scope = selectedType.default_scope;
+        if (scope === "FACTORY") return [{ target_type: "SITE" }];
+        if (scope === "SHIPMENT") return [{ target_type: "SHIPMENT" }];
+        if (scope === "LINE") return [{ target_type: "LINE" }];
+        if (scope === "GENERAL") return [{ target_type: "NONE" }];
+        return prev?.length ? prev : [{ target_type: "PO" }];
+      });
+    }
   }, [header.expense_type_code, selectedType]);
 
   const usdPreview = React.useMemo(() => {
@@ -474,6 +485,10 @@ export default function ExpenseForm({
       if (!json?.ok) throw new Error(json?.error || "Save failed");
 
       const id = json?.data?.id || (initialHeader as any)?.id;
+      if (mode === "edit" && onSaved) {
+        onSaved(id);
+        return;
+      }
       if (onSaved) onSaved(id);
       router.push(`/finance/expenses/${id}`);
     } catch (e: any) {

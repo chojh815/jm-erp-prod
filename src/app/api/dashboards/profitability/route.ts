@@ -13,6 +13,7 @@ type ProfitRow = {
   buyer_code: string | null;
   brand_name: string | null;
   po_no: string | null;
+  po_line_id?: string | null;
   jm_style: string | null;
   buyer_style: string | null;
   vendor_id: string | null;
@@ -25,6 +26,7 @@ type ProfitRow = {
   revenue_usd: number | null;
   planned_cogs_usd: number | null;
   actual_cogs_usd: number | null;
+  freight_usd: number | null;
   other_expenses_usd: number | null;
   factory_overhead_usd: number | null;
   profit_usd: number | null;
@@ -37,6 +39,20 @@ type ProfitRow = {
   margin_mode?: "ACTUAL" | "PLANNED_FALLBACK" | "NO_COST";
   has_actual_cost?: boolean;
   using_planned_fallback?: boolean;
+};
+
+type DevHeaderLite = {
+  id: number;
+  style_no: string | null;
+  currency: string | null;
+  updated_at: string | null;
+  created_at: string | null;
+};
+
+type DevCostLineLite = {
+  product_id: number | null;
+  qty: number | null;
+  unit_cost: number | null;
 };
 
 function num(v: any): number {
@@ -59,10 +75,55 @@ function monthKey(iso: string | null): string {
   return iso ? iso.slice(0, 7) : "Unknown";
 }
 
+function classifyExpense(code: any): "freight" | "other" | "factory_overhead" {
+  const v = s(code).toUpperCase();
+  if (
+    v.includes("FORWARDER") ||
+    v.includes("FREIGHT") ||
+    v.includes("PORT_FEE") ||
+    v.includes("CUSTOMS")
+  ) {
+    return "freight";
+  }
+  if (v.includes("OVERHEAD")) return "factory_overhead";
+  return "other";
+}
+
+function s(v: any): string {
+  return String(v ?? "").trim();
+}
+
+function defaultFxPerUsd(currency: string | null): number {
+  const cur = s(currency || "USD").toUpperCase();
+  if (cur === "USD") return 1;
+  if (cur === "CNY") return 7.2;
+  if (cur === "KRW") return 1400;
+  if (cur === "VND") return 25000;
+  return 1;
+}
+
+function pickLatestDevByStyle(rows: DevHeaderLite[]): Map<string, DevHeaderLite> {
+  const out = new Map<string, DevHeaderLite>();
+  for (const row of rows) {
+    const key = s(row.style_no);
+    if (!key) continue;
+    const prev = out.get(key);
+    if (!prev) {
+      out.set(key, row);
+      continue;
+    }
+    const prevStamp = s(prev.updated_at || prev.created_at);
+    const nextStamp = s(row.updated_at || row.created_at);
+    if (nextStamp > prevStamp) out.set(key, row);
+  }
+  return out;
+}
+
 function withEffectiveCost(row: ProfitRow): ProfitRow {
   const revenue = num(row.revenue_usd);
   const planned = num(row.planned_cogs_usd);
   const actual = num(row.actual_cogs_usd);
+  const freight = num(row.freight_usd);
   const otherExp = num(row.other_expenses_usd);
   const factoryOH = num(row.factory_overhead_usd);
 
@@ -79,7 +140,7 @@ function withEffectiveCost(row: ProfitRow): ProfitRow {
   const profitUsd = revenue - effectiveCogs;
   const marginPct = marginMode === "NO_COST" ? null : pct(profitUsd, revenue);
 
-  const netProfitUsd = revenue - effectiveCogs - otherExp - factoryOH;
+  const netProfitUsd = revenue - effectiveCogs - freight - otherExp - factoryOH;
   const netMarginPct = marginMode === "NO_COST" ? null : pct(netProfitUsd, revenue);
 
   return {
@@ -152,7 +213,7 @@ async function loadFallbackRows(args: {
       poLineIds.length
         ? supabaseAdmin
             .from("work_sheet_lines")
-            .select("po_line_id, vendor_id, vendor_unit_cost_usd, actual_unit, actual_amt, actual_vendor_unit_cost_usd")
+            .select("po_line_id, jm_style_no, buyer_style, vendor_id, vendor_unit_cost_usd, actual_unit, actual_amt, actual_vendor_unit_cost_usd")
             .in("po_line_id", poLineIds)
             .eq("is_deleted", false)
         : Promise.resolve({ data: [], error: null } as any),
@@ -163,14 +224,22 @@ async function loadFallbackRows(args: {
   if (wsErr) throw wsErr;
 
   const vendorIds = Array.from(new Set((wsLines || []).map((x: any) => x.vendor_id).filter(Boolean)));
+  const devStyleNos = Array.from(
+    new Set(
+      (wsLines || [])
+        .map((x: any) => s(x.jm_style_no))
+        .concat((poLines || []).map((x: any) => s(x.jm_style_no)))
+        .filter(Boolean)
+    )
+  );
   const [{ data: vendors, error: vendorErr }, { data: expenses, error: expenseErr }] = await Promise.all([
     vendorIds.length
       ? supabaseAdmin.from("companies").select("id, company_name, name").in("id", vendorIds)
       : Promise.resolve({ data: [], error: null } as any),
     poLineIds.length || poHeaderIds.length
       ? supabaseAdmin
-          .from("expense_allocations")
-          .select("po_header_id, po_line_id, amount_usd, is_deleted")
+          .from("expense_allocation_results")
+          .select("expense_id, po_header_id, po_line_id, allocated_usd, is_deleted")
           .eq("is_deleted", false)
           .or(
             [
@@ -186,17 +255,123 @@ async function loadFallbackRows(args: {
   if (vendorErr) throw vendorErr;
   if (expenseErr) throw expenseErr;
 
+  const expenseHeaderIds = Array.from(
+    new Set((expenses || []).map((x: any) => s(x.expense_id)).filter(Boolean))
+  );
+  const expenseHeadersRes = expenseHeaderIds.length
+    ? await supabaseAdmin
+        .from("expense_headers")
+        .select("id, expense_type_code")
+        .in("id", expenseHeaderIds)
+    : ({ data: [], error: null } as any);
+  if (expenseHeadersRes.error) throw expenseHeadersRes.error;
+  const expenseHeadersById = new Map(
+    (expenseHeadersRes.data || []).map((x: any) => [String(x.id), x])
+  );
+
+  const devHeadersRes = devStyleNos.length
+    ? await supabaseAdmin
+        .from("product_development_headers")
+        .select("id, style_no, currency, updated_at, created_at")
+        .in("style_no", devStyleNos)
+    : ({ data: [], error: null } as any);
+  if (devHeadersRes.error) throw devHeadersRes.error;
+  const devHeaders = (devHeadersRes.data || []) as DevHeaderLite[];
+
+  const devIds = devHeaders.map((x) => x.id).filter(Boolean);
+  const [devMaterialsRes, devOperationsRes] = await Promise.all([
+    devIds.length
+      ? supabaseAdmin
+          .from("product_development_materials")
+          .select("product_id, qty, unit_cost")
+          .in("product_id", devIds)
+      : Promise.resolve({ data: [], error: null } as any),
+    devIds.length
+      ? supabaseAdmin
+          .from("product_development_operations")
+          .select("product_id, qty, unit_cost")
+          .in("product_id", devIds)
+      : Promise.resolve({ data: [], error: null } as any),
+  ]);
+  if (devMaterialsRes.error) throw devMaterialsRes.error;
+  if (devOperationsRes.error) throw devOperationsRes.error;
+  const devMaterials = (devMaterialsRes.data || []) as DevCostLineLite[];
+  const devOperations = (devOperationsRes.data || []) as DevCostLineLite[];
+
   const invById = new Map((invoices || []).map((x: any) => [x.id, x]));
   const poLineById = new Map((poLines || []).map((x: any) => [x.id, x]));
   const poHeaderById = new Map((poHeaders || []).map((x: any) => [x.id, x]));
   const wsByPoLine = new Map((wsLines || []).map((x: any) => [x.po_line_id, x]));
   const vendorById = new Map((vendors || []).map((x: any) => [x.id, x]));
+  const latestDevByStyle = pickLatestDevByStyle(devHeaders);
+  const devTotalLocalById = new Map<number, number>();
+  for (const row of devMaterials) {
+    const id = Number(row.product_id || 0);
+    if (!id) continue;
+    devTotalLocalById.set(id, (devTotalLocalById.get(id) || 0) + num(row.qty) * num(row.unit_cost));
+  }
+  for (const row of devOperations) {
+    const id = Number(row.product_id || 0);
+    if (!id) continue;
+    devTotalLocalById.set(id, (devTotalLocalById.get(id) || 0) + num(row.qty) * num(row.unit_cost));
+  }
+  const devUnitUsdByStyle = new Map<string, number>();
+  for (const [styleNo, header] of latestDevByStyle.entries()) {
+    const localTotal = devTotalLocalById.get(header.id) || 0;
+    if (localTotal <= 0) continue;
+    const fx = defaultFxPerUsd(header.currency);
+    const unitUsd = fx > 0 ? localTotal / fx : 0;
+    if (unitUsd > 0) devUnitUsdByStyle.set(styleNo, unitUsd);
+  }
 
-  const expenseByPoLine = new Map<string, number>();
-  const expenseByPoHeader = new Map<string, number>();
+  const freightByPoLine = new Map<string, number>();
+  const otherByPoLine = new Map<string, number>();
+  const freightByPoHeader = new Map<string, number>();
+  const otherByPoHeader = new Map<string, number>();
+  const poHeaderIdsWithLineFreight = new Set<string>();
+  const poHeaderIdsWithLineOther = new Set<string>();
   for (const e of expenses || []) {
-    if (e.po_line_id) expenseByPoLine.set(e.po_line_id, (expenseByPoLine.get(e.po_line_id) || 0) + num(e.amount_usd));
-    if (e.po_header_id) expenseByPoHeader.set(e.po_header_id, (expenseByPoHeader.get(e.po_header_id) || 0) + num(e.amount_usd));
+    const header: any = expenseHeadersById.get(s(e.expense_id));
+    const bucket = classifyExpense(header?.expense_type_code);
+    const poLineId = s(e.po_line_id);
+    const poHeaderIdDirect = s(e.po_header_id);
+    if (e.po_line_id) {
+      if (bucket === "freight") {
+        freightByPoLine.set(poLineId, (freightByPoLine.get(poLineId) || 0) + num(e.allocated_usd));
+      } else if (bucket === "other") {
+        otherByPoLine.set(poLineId, (otherByPoLine.get(poLineId) || 0) + num(e.allocated_usd));
+      }
+      const poLine: any = poLineById.get(poLineId);
+      const poHeaderId = s(poLine?.po_header_id || poHeaderIdDirect);
+      if (poHeaderId) {
+        if (bucket === "freight") poHeaderIdsWithLineFreight.add(poHeaderId);
+        if (bucket === "other") poHeaderIdsWithLineOther.add(poHeaderId);
+      }
+    }
+    if (e.po_header_id && !e.po_line_id) {
+      if (bucket === "freight") {
+        freightByPoHeader.set(
+          poHeaderIdDirect,
+          (freightByPoHeader.get(poHeaderIdDirect) || 0) + num(e.allocated_usd)
+        );
+      } else if (bucket === "other") {
+        otherByPoHeader.set(
+          poHeaderIdDirect,
+          (otherByPoHeader.get(poHeaderIdDirect) || 0) + num(e.allocated_usd)
+        );
+      }
+    }
+  }
+
+  const lineRevenueBaseByPoHeader = new Map<string, number>();
+  for (const line of lines || []) {
+    const poHeaderId = line.po_header_id ? String(line.po_header_id) : "";
+    if (!poHeaderId) continue;
+    const revenueUsd = line.amount == null ? num(line.qty) * num(line.unit_price) : num(line.amount);
+    lineRevenueBaseByPoHeader.set(
+      poHeaderId,
+      (lineRevenueBaseByPoHeader.get(poHeaderId) || 0) + revenueUsd
+    );
   }
 
   const rows: ProfitRow[] = [];
@@ -230,9 +405,29 @@ async function loadFallbackRows(args: {
     if (query && !hay.includes(query)) continue;
 
     const qty = num(line.qty) || num(poLine?.qty);
-    const plannedUnit = num(ws?.vendor_unit_cost_usd);
+    const wsJmStyleNo = s(ws?.jm_style_no || poLine?.jm_style_no);
+    const devUnitUsd = wsJmStyleNo ? devUnitUsdByStyle.get(wsJmStyleNo) || 0 : 0;
+    const plannedUnit = num(ws?.vendor_unit_cost_usd) || devUnitUsd;
     const actualUnit = num(ws?.actual_vendor_unit_cost_usd) || num(ws?.actual_unit);
     const actualAmt = num(ws?.actual_amt);
+
+    const revenueUsd = line.amount == null ? num(line.qty) * num(line.unit_price) : num(line.amount);
+    const poHeaderFreightUsd = line.po_header_id ? freightByPoHeader.get(line.po_header_id) || 0 : 0;
+    const poHeaderOtherUsd = line.po_header_id ? otherByPoHeader.get(line.po_header_id) || 0 : 0;
+    const hasLineLevelFreightForHeader =
+      !!line.po_header_id && poHeaderIdsWithLineFreight.has(String(line.po_header_id));
+    const hasLineLevelOtherForHeader =
+      !!line.po_header_id && poHeaderIdsWithLineOther.has(String(line.po_header_id));
+    const poHeaderRevenueBase =
+      line.po_header_id ? lineRevenueBaseByPoHeader.get(String(line.po_header_id)) || 0 : 0;
+    const poHeaderFreightShareUsd =
+      !hasLineLevelFreightForHeader && poHeaderFreightUsd > 0 && poHeaderRevenueBase > 0
+        ? poHeaderFreightUsd * (revenueUsd / poHeaderRevenueBase)
+        : 0;
+    const poHeaderOtherShareUsd =
+      !hasLineLevelOtherForHeader && poHeaderOtherUsd > 0 && poHeaderRevenueBase > 0
+        ? poHeaderOtherUsd * (revenueUsd / poHeaderRevenueBase)
+        : 0;
 
     rows.push({
       invoice_id: inv.id ?? null,
@@ -243,6 +438,7 @@ async function loadFallbackRows(args: {
       buyer_code: inv.buyer_code ?? null,
       brand_name: poHeader?.buyer_brand_name ?? null,
       po_no: line.po_no ?? null,
+      po_line_id: line.po_line_id ?? null,
       jm_style: line.style_no ?? poLine?.jm_style_no ?? poLine?.jm_style_code ?? null,
       buyer_style: line.buyer_style_no ?? poLine?.buyer_style_no ?? poLine?.buyer_style_code ?? null,
       vendor_id: ws?.vendor_id ?? null,
@@ -251,13 +447,12 @@ async function loadFallbackRows(args: {
       site_name: poHeader?.site_id ?? null,
       currency: inv.currency ?? null,
       fx_rate_to_usd: null,
-      revenue_local: line.amount == null ? null : num(line.amount),
-      revenue_usd: line.amount == null ? null : num(line.amount),
+      revenue_local: line.amount == null ? null : revenueUsd,
+      revenue_usd: line.amount == null ? null : revenueUsd,
       planned_cogs_usd: plannedUnit > 0 && qty > 0 ? plannedUnit * qty : null,
       actual_cogs_usd: actualAmt > 0 ? actualAmt : actualUnit > 0 && qty > 0 ? actualUnit * qty : null,
-      other_expenses_usd:
-        (line.po_line_id ? expenseByPoLine.get(line.po_line_id) || 0 : 0) +
-        (line.po_header_id ? expenseByPoHeader.get(line.po_header_id) || 0 : 0),
+      freight_usd: poHeaderFreightShareUsd,
+      other_expenses_usd: poHeaderOtherShareUsd,
       factory_overhead_usd: null,
       profit_usd: null,
       margin_pct: null,
@@ -265,6 +460,41 @@ async function loadFallbackRows(args: {
       net_margin_pct: null,
       actual_coverage: actualAmt > 0 || actualUnit > 0 ? 1 : 0,
     });
+  }
+
+  const rowsByPoLineId = new Map<string, ProfitRow[]>();
+  for (const row of rows) {
+    const poLineId = s((row as any).po_line_id);
+    if (!poLineId) continue;
+    const list = rowsByPoLineId.get(poLineId) || [];
+    list.push(row);
+    rowsByPoLineId.set(poLineId, list);
+  }
+
+  for (const [poLineId, amount] of freightByPoLine.entries()) {
+    const targetRows = rowsByPoLineId.get(poLineId) || [];
+    if (!targetRows.length) continue;
+    const revenueBase = targetRows.reduce((sum, row) => sum + num(row.revenue_usd), 0);
+    for (const row of targetRows) {
+      const share =
+        revenueBase > 0
+          ? amount * (num(row.revenue_usd) / revenueBase)
+          : amount / Math.max(targetRows.length, 1);
+      row.freight_usd = round2(num(row.freight_usd) + share);
+    }
+  }
+
+  for (const [poLineId, amount] of otherByPoLine.entries()) {
+    const targetRows = rowsByPoLineId.get(poLineId) || [];
+    if (!targetRows.length) continue;
+    const revenueBase = targetRows.reduce((sum, row) => sum + num(row.revenue_usd), 0);
+    for (const row of targetRows) {
+      const share =
+        revenueBase > 0
+          ? amount * (num(row.revenue_usd) / revenueBase)
+          : amount / Math.max(targetRows.length, 1);
+      row.other_expenses_usd = round2(num(row.other_expenses_usd) + share);
+    }
   }
 
   return rows.slice(0, args.limit);
@@ -293,29 +523,7 @@ export async function GET(req: NextRequest) {
       p_limit: limit,
     };
 
-    let { data, error } = await supabaseAdmin.rpc("profitability_fact_app", rpcArgs);
-
-    if (error?.code === "PGRST202") {
-      const legacy = await supabaseAdmin.rpc("profitability_fact", rpcArgs);
-      data = legacy.data;
-      error = legacy.error;
-    }
-
-    if (error && error.code !== "PGRST203") {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: error.message,
-          hint: "Check public.profitability_fact definition and refresh schema cache if needed.",
-        },
-        { status: 500 }
-      );
-    }
-
-    const sourceRows =
-      error?.code === "PGRST203"
-        ? await loadFallbackRows({ start, end, buyerIds, vendorIds, siteIds, q, limit })
-        : data || [];
+    const sourceRows = await loadFallbackRows({ start, end, buyerIds, vendorIds, siteIds, q, limit });
 
     const rawRows: ProfitRow[] = (sourceRows || []).map((r: any) => ({
       invoice_id: r.invoice_id ?? null,
@@ -326,6 +534,7 @@ export async function GET(req: NextRequest) {
       buyer_code: r.buyer_code ?? null,
       brand_name: r.brand_name ?? null,
       po_no: r.po_no ?? null,
+      po_line_id: r.po_line_id ?? null,
       jm_style: r.jm_style ?? r.jm_style_no ?? null,
       buyer_style: r.buyer_style ?? r.buyer_style_no ?? null,
       vendor_id: r.vendor_id ?? null,
@@ -338,6 +547,7 @@ export async function GET(req: NextRequest) {
       revenue_usd: r.revenue_usd == null ? null : round2(Number(r.revenue_usd)),
       planned_cogs_usd: r.planned_cogs_usd == null ? null : round2(Number(r.planned_cogs_usd)),
       actual_cogs_usd: r.actual_cogs_usd == null ? null : round2(Number(r.actual_cogs_usd)),
+      freight_usd: r.freight_usd == null ? null : round2(Number(r.freight_usd)),
       other_expenses_usd: r.other_expenses_usd == null ? null : round2(Number(r.other_expenses_usd)),
       factory_overhead_usd: r.factory_overhead_usd == null ? null : round2(Number(r.factory_overhead_usd)),
       profit_usd: r.profit_usd == null ? null : round2(Number(r.profit_usd)),
@@ -353,13 +563,18 @@ export async function GET(req: NextRequest) {
     const plannedCogsUsd = round2(rows.reduce((a, r) => a + num(r.planned_cogs_usd), 0));
     const actualCogsUsd = round2(rows.reduce((a, r) => a + num(r.actual_cogs_usd), 0));
     const effectiveCogsUsd = round2(rows.reduce((a, r) => a + num(r.effective_cogs_usd), 0));
+    const freightUsd = round2(rows.reduce((a, r) => a + num(r.freight_usd), 0));
     const otherExpensesUsd = round2(rows.reduce((a, r) => a + num(r.other_expenses_usd), 0));
     const factoryOverheadUsd = round2(rows.reduce((a, r) => a + num(r.factory_overhead_usd), 0));
 
     const profitUsd = round2(num(revenueUsd) - num(effectiveCogsUsd));
     const marginPct = round2(pct(num(profitUsd), num(revenueUsd)));
     const netProfitUsd = round2(
-      num(revenueUsd) - num(effectiveCogsUsd) - num(otherExpensesUsd) - num(factoryOverheadUsd)
+      num(revenueUsd) -
+        num(effectiveCogsUsd) -
+        num(freightUsd) -
+        num(otherExpensesUsd) -
+        num(factoryOverheadUsd)
     );
     const netMarginPct = round2(pct(num(netProfitUsd), num(revenueUsd)));
 
@@ -384,6 +599,7 @@ export async function GET(req: NextRequest) {
           actual_cogs_usd: 0,
           planned_cogs_usd: 0,
           effective_cogs_usd: 0,
+          freight_usd: 0,
           other_expenses_usd: 0,
           factory_overhead_usd: 0,
           net_profit_usd: 0,
@@ -393,10 +609,15 @@ export async function GET(req: NextRequest) {
       cur.actual_cogs_usd += num(r.actual_cogs_usd);
       cur.planned_cogs_usd += num(r.planned_cogs_usd);
       cur.effective_cogs_usd += num(r.effective_cogs_usd);
+      cur.freight_usd += num(r.freight_usd);
       cur.other_expenses_usd += num(r.other_expenses_usd);
       cur.factory_overhead_usd += num(r.factory_overhead_usd);
       cur.net_profit_usd =
-        cur.revenue_usd - cur.effective_cogs_usd - cur.other_expenses_usd - cur.factory_overhead_usd;
+        cur.revenue_usd -
+        cur.effective_cogs_usd -
+        cur.freight_usd -
+        cur.other_expenses_usd -
+        cur.factory_overhead_usd;
       cur.net_margin_pct = pct(cur.net_profit_usd, cur.revenue_usd);
       byMonth.set(m, cur);
     }
@@ -409,6 +630,7 @@ export async function GET(req: NextRequest) {
         actual_cogs_usd: round2(m.actual_cogs_usd),
         planned_cogs_usd: round2(m.planned_cogs_usd),
         effective_cogs_usd: round2(m.effective_cogs_usd),
+        freight_usd: round2(m.freight_usd),
         other_expenses_usd: round2(m.other_expenses_usd),
         factory_overhead_usd: round2(m.factory_overhead_usd),
         net_profit_usd: round2(m.net_profit_usd),
@@ -491,6 +713,7 @@ export async function GET(req: NextRequest) {
           planned_cogs_usd: plannedCogsUsd,
           actual_cogs_usd: actualCogsUsd,
           effective_cogs_usd: effectiveCogsUsd,
+          freight_usd: freightUsd,
           other_expenses_usd: otherExpensesUsd,
           factory_overhead_usd: factoryOverheadUsd,
           profit_usd: profitUsd,

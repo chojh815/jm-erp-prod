@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { rebuildExpenseAllocationResults } from "../_lib/rebuildAllocationResults";
+import { resolveExpenseTypeCodeForSave } from "../_lib/expenseTypeHelpers";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +26,42 @@ function makeLineLabel(args: {
     args.jm_style_no || "",
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : null;
+}
+
+function dedupeAllocationResults(rows: any[]) {
+  const picked = new Map<string, any>();
+
+  const keyOf = (row: any) =>
+    [
+      row.posting_month ?? "",
+      row.po_header_id ?? "",
+      row.po_line_id ?? "",
+      row.shipment_id ?? "",
+      row.buyer_id ?? "",
+      row.brand_name ?? "",
+      row.vendor_id ?? "",
+      row.site_id ?? "",
+      row.allocated_basis ?? "",
+      row.basis_value ?? "",
+      row.allocated_usd ?? "",
+    ].join("|");
+
+  for (const row of rows || []) {
+    const key = keyOf(row);
+    const prev = picked.get(key);
+    if (!prev) {
+      picked.set(key, row);
+      continue;
+    }
+
+    const prevStamp = String(prev.created_at || "");
+    const nextStamp = String(row.created_at || "");
+    if (nextStamp >= prevStamp) {
+      picked.set(key, row);
+    }
+  }
+
+  return Array.from(picked.values());
 }
 
 /**
@@ -171,6 +209,8 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
   try {
     const id = String(ctx.params.id || "").trim();
     if (!id) return bad("Missing id", 400);
+    const url = new URL(_req.url);
+    const includeDeleted = url.searchParams.get("include_deleted") === "1";
 
     const { data: header, error: hErr } = await supabaseAdmin
       .from("expense_headers")
@@ -226,12 +266,16 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
       .from("expense_allocation_results")
       .select("*")
       .eq("expense_id", id)
-      .eq("is_deleted", false)
       .order("created_at", { ascending: true });
 
     if (rErr) return bad(rErr.message, 500);
 
-    const results = await hydrateResults(resultsRaw || []);
+    const filteredResults = includeDeleted
+      ? (resultsRaw || [])
+      : dedupeAllocationResults(
+          (resultsRaw || []).filter((row: any) => row.is_deleted === false)
+        );
+    const results = await hydrateResults(filteredResults);
 
     return NextResponse.json({
       ok: true,
@@ -251,6 +295,10 @@ export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
     const header =
       body?.header && typeof body.header === "object" ? body.header : body;
     const allocations = Array.isArray(body?.allocations) ? body.allocations : [];
+    const expenseTypeCode = await resolveExpenseTypeCodeForSave(
+      header.expense_type_code ?? header.category ?? header.type ?? ""
+    );
+    if (!expenseTypeCode) return bad("Invalid expense type", 400);
 
     const { data: current, error: cErr } = await supabaseAdmin
       .from("expense_headers")
@@ -261,8 +309,6 @@ export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
 
     if (cErr) return bad(cErr.message, 500);
     if (!current) return bad("Expense not found", 404);
-    if (current.status === "CONFIRMED")
-      return bad("Confirmed expense is locked", 409);
 
     const totalOriginal =
       num(header.total_amount_original ?? header.amount_original ?? header.amount_local) ?? 0;
@@ -272,10 +318,11 @@ export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
       num(header.total_amount_usd ?? header.amount_usd) ??
       (currency === "USD" ? totalOriginal : fxRate > 0 ? totalOriginal / fxRate : 0);
 
+    const nextStatus = String(header.status || current.status || "DRAFT").toUpperCase();
     const { data: updated, error: uErr } = await supabaseAdmin
       .from("expense_headers")
       .update({
-        expense_type_code: header.expense_type_code ?? null,
+        expense_type_code: expenseTypeCode,
         vendor_id: header.vendor_id || null,
         expense_date: header.expense_date || null,
         posting_month: header.posting_month || null,
@@ -288,7 +335,7 @@ export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
         scope_type: header.scope_type || "PO",
         allocation_method: header.allocation_method || "BY_REVENUE",
         note: header.note || null,
-        status: header.status || "DRAFT",
+        status: nextStatus,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id)
@@ -324,6 +371,18 @@ export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
         .from("expense_allocations")
         .insert(rows);
       if (insErr) return bad(insErr.message, 500);
+    }
+
+    if (nextStatus === "CONFIRMED") {
+      try {
+        await rebuildExpenseAllocationResults({
+          expenseId: id,
+          header: updated,
+          allocations,
+        });
+      } catch (e: any) {
+        return bad(e?.message || String(e), 500);
+      }
     }
 
     return NextResponse.json({ ok: true, data: { id: updated.id, header: updated } });

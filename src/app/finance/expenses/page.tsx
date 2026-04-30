@@ -274,9 +274,16 @@ export default function ExpensesListPage() {
                         </td>
                         <td className="p-2">{fmtDate(row.updated_at || row.created_at)}</td>
                         <td className="p-2 text-right">
-                          <Button asChild size="sm" variant="outline">
-                            <Link href={`/finance/expenses/${row.id}`}>Detail</Link>
-                          </Button>
+                          <div className="flex justify-end gap-2">
+                            <Button asChild size="sm" variant="outline">
+                              <Link href={`/finance/expenses/${row.id}`}>Detail</Link>
+                            </Button>
+                            {row.status !== "VOID" ? (
+                              <Button asChild size="sm">
+                                <Link href={`/finance/expenses/${row.id}?edit=1`}>Edit</Link>
+                              </Button>
+                            ) : null}
+                          </div>
                         </td>
                       </tr>
                     ))

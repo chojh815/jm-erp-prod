@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import AppShell from "@/components/layout/AppShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -50,7 +50,9 @@ function formatBasisLabel(basis: string | null | undefined, basisValue: number |
 export default function ExpenseDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const id = String(params.id);
+  const [editing, setEditing] = React.useState(searchParams.get("edit") === "1");
 
   const [loading, setLoading] = React.useState(false);
   const [data, setData] = React.useState<any>(null);
@@ -156,6 +158,15 @@ export default function ExpenseDetailPage() {
               <Button variant="outline" onClick={load} disabled={loading}>
                 Refresh
               </Button>
+              {header?.status && header.status !== "VOID" ? (
+                <Button
+                  variant="outline"
+                  onClick={() => setEditing((v) => !v)}
+                  disabled={loading}
+                >
+                  {editing ? "Close Edit" : "Edit"}
+                </Button>
+              ) : null}
               {header?.status === "DRAFT" ? (
                 <>
                   <Button onClick={confirm} disabled={loading}>
@@ -198,11 +209,15 @@ export default function ExpenseDetailPage() {
           </CardContent>
         </Card>
 
-        {header?.status === "DRAFT" ? (
+        {header && (header.status === "DRAFT" || editing) ? (
           <ExpenseForm
             mode="edit"
             initialHeader={header as Partial<ExpenseHeaderDraft>}
             initialAllocations={allocations}
+            onSaved={async () => {
+              setEditing(false);
+              await load();
+            }}
           />
         ) : null}
 

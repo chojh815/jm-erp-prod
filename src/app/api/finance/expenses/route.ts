@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolveExpenseTypeCodeForSave } from "./_lib/expenseTypeHelpers";
 
 export const dynamic = "force-dynamic";
 
@@ -11,27 +12,6 @@ function num(v: any): number | null {
 
 function bad(error: string, status = 400, extra?: any) {
   return NextResponse.json({ ok: false, error, ...(extra || {}) }, { status });
-}
-
-async function resolveExpenseTypeCode(raw: any): Promise<string | null> {
-  const input = String(raw ?? "").trim();
-  if (!input) return null;
-
-  const exactCode = await supabaseAdmin.from("expense_types").select("code").ilike("code", input).limit(1);
-  if (!exactCode.error && exactCode.data?.[0]?.code) return exactCode.data[0].code;
-
-  const exactName = await supabaseAdmin.from("expense_types").select("code").ilike("name", input).limit(1);
-  if (!exactName.error && exactName.data?.[0]?.code) return exactName.data[0].code;
-
-  const safe = input.replace(/%/g, "");
-  const loose = await supabaseAdmin
-    .from("expense_types")
-    .select("code")
-    .or(`code.ilike.%${safe}%,name.ilike.%${safe}%`)
-    .limit(1);
-  if (!loose.error && loose.data?.[0]?.code) return loose.data[0].code;
-
-  return null;
 }
 
 async function generateExpenseNo(expenseDate?: string | null) {
@@ -129,7 +109,7 @@ export async function POST(req: NextRequest) {
     const header = body?.header && typeof body.header === "object" ? body.header : body;
     const allocations = Array.isArray(body?.allocations) ? body.allocations : [];
 
-    const expenseTypeCode = await resolveExpenseTypeCode(
+    const expenseTypeCode = await resolveExpenseTypeCodeForSave(
       header.expense_type_code ?? header.category ?? header.type ?? ""
     );
     if (!expenseTypeCode) return bad("Invalid expense type", 400);

@@ -44,10 +44,33 @@ export async function GET() {
       origin_code: s.origin_code ?? null,
     }));
 
+    const expenseTypes = [...(expenseTypesRes.data || [])].map((row: any) => {
+      if (row.code === "FORWARDER") {
+        return {
+          ...row,
+          name: "Forwarder Service",
+        };
+      }
+      return row;
+    });
+
+    if (!expenseTypes.some((row: any) => row.code === "FREIGHT")) {
+      const forwarder = expenseTypes.find((row: any) => row.code === "FORWARDER");
+      expenseTypes.push({
+        code: "FREIGHT",
+        name: "Freight / Air / Ocean",
+        category: forwarder?.category || "LOGISTICS",
+        default_scope: forwarder?.default_scope || "SHIPMENT",
+        default_allocation: forwarder?.default_allocation || "BY_CBM",
+      });
+    }
+
+    expenseTypes.sort((a: any, b: any) => String(a.name || "").localeCompare(String(b.name || "")));
+
     return NextResponse.json({
       ok: true,
       data: {
-        expense_types: expenseTypesRes.data || [],
+        expense_types: expenseTypes,
         companies: companiesRes.data || [],
         sites,
       },
