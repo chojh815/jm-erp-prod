@@ -539,20 +539,6 @@ export default function ProfitabilityClient() {
     doc.save(`profitability_${start}_${end}.pdf`);
   };
 
-  const toggleId = (cur: string, id: string) => {
-    if (cur === "ALL") return id;
-    const arr = splitIds(cur);
-    const has = arr.includes(id);
-    const next = has ? arr.filter((x) => x !== id) : [...arr, id];
-    return next.length ? next.join(",") : "ALL";
-  };
-
-  const chipList = (cur: string, opts: OptionItem[]) => {
-    if (cur === "ALL") return [];
-    const ids = new Set(splitIds(cur));
-    return opts.filter((o) => ids.has(o.id));
-  };
-
   const k = data?.kpis;
 
   return (
@@ -642,119 +628,56 @@ export default function ProfitabilityClient() {
 
             <Separator />
 
-            {/* Multi filters (simple clickable chips list) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label>Buyers</Label>
-                  <Button size="sm" variant="ghost" onClick={() => setBuyerIds("ALL")}>
-                    All
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {chipList(buyerIds, options.buyers).map((o) => (
-                    <Badge key={o.id} variant="secondary" className="cursor-pointer" onClick={() => setBuyerIds(toggleId(buyerIds, o.id))}>
-                      {o.name} ✕
-                    </Badge>
-                  ))}
-                  {buyerIds === "ALL" && (
-                    <span className="text-sm text-muted-foreground">All Buyers</span>
-                  )}
-                </div>
-                <div className="max-h-28 overflow-auto border rounded-md p-2">
-                  <div className="flex flex-wrap gap-1">
-                    {options.buyers.slice(0, 200).map((o) => {
-                      const active = buyerIds !== "ALL" && splitIds(buyerIds).includes(o.id);
-                      return (
-                        <Badge
-                          key={o.id}
-                          variant={active ? "default" : "outline"}
-                          className="cursor-pointer"
-                          onClick={() => setBuyerIds(toggleId(buyerIds, o.id))}
-                        >
-                          {o.name}
-                        </Badge>
-                      );
-                    })}
-                  </div>
-                  {options.buyers.length > 200 && (
-                    <div className="text-xs text-muted-foreground mt-2">
-                      Showing first 200 buyers in selector (type Search to narrow).
-                    </div>
-                  )}
-                </div>
+              <div className="space-y-1">
+                <Label>Buyer</Label>
+                <Select value={buyerIds} onValueChange={setBuyerIds}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="All Buyers" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">All Buyers</SelectItem>
+                    {options.buyers.map((o) => (
+                      <SelectItem key={o.id} value={o.id}>
+                        {o.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label>Vendors</Label>
-                  <Button size="sm" variant="ghost" onClick={() => setVendorIds("ALL")}>
-                    All
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {chipList(vendorIds, options.vendors).map((o) => (
-                    <Badge key={o.id} variant="secondary" className="cursor-pointer" onClick={() => setVendorIds(toggleId(vendorIds, o.id))}>
-                      {o.name} ✕
-                    </Badge>
-                  ))}
-                  {vendorIds === "ALL" && (
-                    <span className="text-sm text-muted-foreground">All Vendors</span>
-                  )}
-                </div>
-                <div className="max-h-28 overflow-auto border rounded-md p-2">
-                  <div className="flex flex-wrap gap-1">
-                    {options.vendors.slice(0, 200).map((o) => {
-                      const active = vendorIds !== "ALL" && splitIds(vendorIds).includes(o.id);
-                      return (
-                        <Badge
-                          key={o.id}
-                          variant={active ? "default" : "outline"}
-                          className="cursor-pointer"
-                          onClick={() => setVendorIds(toggleId(vendorIds, o.id))}
-                        >
-                          {o.name}
-                        </Badge>
-                      );
-                    })}
-                  </div>
-                </div>
+              <div className="space-y-1">
+                <Label>Vendor</Label>
+                <Select value={vendorIds} onValueChange={setVendorIds}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="All Vendors" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">All Vendors</SelectItem>
+                    {options.vendors.map((o) => (
+                      <SelectItem key={o.id} value={o.id}>
+                        {o.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label>Sites</Label>
-                  <Button size="sm" variant="ghost" onClick={() => setSiteIds("ALL")}>
-                    All
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {chipList(siteIds, options.sites).map((o) => (
-                    <Badge key={o.id} variant="secondary" className="cursor-pointer" onClick={() => setSiteIds(toggleId(siteIds, o.id))}>
-                      {o.name} ✕
-                    </Badge>
-                  ))}
-                  {siteIds === "ALL" && (
-                    <span className="text-sm text-muted-foreground">All Sites</span>
-                  )}
-                </div>
-                <div className="max-h-28 overflow-auto border rounded-md p-2">
-                  <div className="flex flex-wrap gap-1">
-                    {options.sites.slice(0, 200).map((o) => {
-                      const active = siteIds !== "ALL" && splitIds(siteIds).includes(o.id);
-                      return (
-                        <Badge
-                          key={o.id}
-                          variant={active ? "default" : "outline"}
-                          className="cursor-pointer"
-                          onClick={() => setSiteIds(toggleId(siteIds, o.id))}
-                        >
-                          {o.name}
-                        </Badge>
-                      );
-                    })}
-                  </div>
-                </div>
+              <div className="space-y-1">
+                <Label>Site</Label>
+                <Select value={siteIds} onValueChange={setSiteIds}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="All Sites" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">All Sites</SelectItem>
+                    {options.sites.map((o) => (
+                      <SelectItem key={o.id} value={o.id}>
+                        {o.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 

@@ -224,6 +224,7 @@ async function loadFallbackRows(args: {
   if (wsErr) throw wsErr;
 
   const vendorIds = Array.from(new Set((wsLines || []).map((x: any) => x.vendor_id).filter(Boolean)));
+  const poSiteIds = Array.from(new Set((poHeaders || []).map((x: any) => x.site_id).filter(Boolean)));
   const devStyleNos = Array.from(
     new Set(
       (wsLines || [])
@@ -232,7 +233,11 @@ async function loadFallbackRows(args: {
         .filter(Boolean)
     )
   );
-  const [{ data: vendors, error: vendorErr }, { data: expenses, error: expenseErr }] = await Promise.all([
+  const [
+    { data: vendors, error: vendorErr },
+    { data: expenses, error: expenseErr },
+    { data: sites, error: sitesErr },
+  ] = await Promise.all([
     vendorIds.length
       ? supabaseAdmin.from("companies").select("id, company_name, name").in("id", vendorIds)
       : Promise.resolve({ data: [], error: null } as any),
@@ -250,10 +255,17 @@ async function loadFallbackRows(args: {
               .join(",")
           )
       : Promise.resolve({ data: [], error: null } as any),
+    poSiteIds.length
+      ? supabaseAdmin
+          .from("company_sites")
+          .select("id, site_name, name")
+          .in("id", poSiteIds)
+      : Promise.resolve({ data: [], error: null } as any),
   ]);
 
   if (vendorErr) throw vendorErr;
   if (expenseErr) throw expenseErr;
+  if (sitesErr) throw sitesErr;
 
   const expenseHeaderIds = Array.from(
     new Set((expenses || []).map((x: any) => s(x.expense_id)).filter(Boolean))
@@ -303,6 +315,7 @@ async function loadFallbackRows(args: {
   const poHeaderById = new Map((poHeaders || []).map((x: any) => [x.id, x]));
   const wsByPoLine = new Map((wsLines || []).map((x: any) => [x.po_line_id, x]));
   const vendorById = new Map((vendors || []).map((x: any) => [x.id, x]));
+  const siteById = new Map((sites || []).map((x: any) => [x.id, x]));
   const latestDevByStyle = pickLatestDevByStyle(devHeaders);
   const devTotalLocalById = new Map<number, number>();
   for (const row of devMaterials) {
@@ -385,6 +398,7 @@ async function loadFallbackRows(args: {
     const poHeader: any = line.po_header_id ? poHeaderById.get(line.po_header_id) : null;
     const ws: any = line.po_line_id ? wsByPoLine.get(line.po_line_id) : null;
     const vendor: any = ws?.vendor_id ? vendorById.get(ws.vendor_id) : null;
+    const site: any = poHeader?.site_id ? siteById.get(poHeader.site_id) : null;
 
     if (vendorFilter && (!ws?.vendor_id || !vendorFilter.includes(String(ws.vendor_id)))) continue;
     if (siteFilter && (!poHeader?.site_id || !siteFilter.includes(String(poHeader.site_id)))) continue;
@@ -444,7 +458,7 @@ async function loadFallbackRows(args: {
       vendor_id: ws?.vendor_id ?? null,
       vendor_name: vendor?.company_name ?? vendor?.name ?? null,
       site_id: poHeader?.site_id ?? null,
-      site_name: poHeader?.site_id ?? null,
+      site_name: site?.site_name ?? site?.name ?? poHeader?.site_id ?? null,
       currency: inv.currency ?? null,
       fx_rate_to_usd: null,
       revenue_local: line.amount == null ? null : revenueUsd,
