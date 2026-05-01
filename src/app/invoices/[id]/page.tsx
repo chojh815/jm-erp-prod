@@ -911,8 +911,17 @@ export default function InvoiceDetailPage() {
       const payTerm = header.payment_term || "-";
 
       const remarksText = (header.remarks || "").trim();
+      const remarksFontSize = 10;
+      const remarksLineH = 4.5;
       const remarksLinesRaw = remarksText
-        ? doc.splitTextToSize(`Remarks: ${remarksText}`, half - 4)
+        ? (() => {
+            doc.setFontSize(remarksFontSize);
+            doc.setFont("helvetica", "bold");
+            const lines = doc.splitTextToSize(`Remarks: ${remarksText}`, half - 4);
+            doc.setFontSize(9);
+            doc.setFont("helvetica", "normal");
+            return lines;
+          })()
         : [];
       const remarksLines = remarksLinesRaw.slice(0, 2);
 
@@ -925,8 +934,8 @@ export default function InvoiceDetailPage() {
       ];
 
       const topBoxH = Math.max(
-        22 + remarksLines.length * 4,
-        9 + infoBase.length * 3.5 + (remarksLines.length > 0 ? 1 + remarksLines.length * 4 : 0) + 4
+        22 + remarksLines.length * remarksLineH,
+        9 + infoBase.length * 3.5 + (remarksLines.length > 0 ? 1 + remarksLines.length * remarksLineH : 0) + 4
       );
 
       doc.rect(margin, y, half, topBoxH);
@@ -953,7 +962,11 @@ ${shipperAddress}` : `${shipperName}`,
 
       if (remarksLines.length > 0) {
         infoY += 1;
+        doc.setFontSize(remarksFontSize);
+        doc.setFont("helvetica", "bold");
         doc.text(remarksLines, margin + half + 2, infoY);
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "normal");
       }
 
       y += topBoxH;
