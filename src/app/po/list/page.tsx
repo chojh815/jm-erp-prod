@@ -96,6 +96,8 @@ type ListStateSnapshot = {
   vendorId: string;
   dateFrom: string;
   dateTo: string;
+  shipDateFrom: string;
+  shipDateTo: string;
   pendingOnly: boolean;
   lateOnly: boolean;
   s1Field: SortField;
@@ -508,6 +510,8 @@ export default function PurchaseOrderListPage() {
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
+  const [shipDateFrom, setShipDateFrom] = useState<string>("");
+  const [shipDateTo, setShipDateTo] = useState<string>("");
   const [vendorFilter, setVendorFilter] = useState<string>("ALL");
   const [vendorOptions, setVendorOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [pendingOnly, setPendingOnly] = useState(false);
@@ -566,6 +570,8 @@ export default function PurchaseOrderListPage() {
     vendorId: "ALL",
     dateFrom: "",
     dateTo: "",
+    shipDateFrom: "",
+    shipDateTo: "",
     pendingOnly: false,
     lateOnly: false,
     s1Field: "REQ_SHIP_DATE",
@@ -587,6 +593,8 @@ export default function PurchaseOrderListPage() {
       vendorId: qs.get("vendor_id") ?? "ALL",
       dateFrom: qs.get("dateFrom") ?? "",
       dateTo: qs.get("dateTo") ?? "",
+      shipDateFrom: qs.get("shipDateFrom") ?? "",
+      shipDateTo: qs.get("shipDateTo") ?? "",
       pendingOnly: qs.get("pending_only") === "true",
       lateOnly: qs.get("late_only") === "true",
       s1Field: ((qs.get("s1Field") as SortField) ?? "REQ_SHIP_DATE"),
@@ -605,6 +613,8 @@ export default function PurchaseOrderListPage() {
     setVendorFilter(snap.vendorId || "ALL");
     setDateFrom(snap.dateFrom || "");
     setDateTo(snap.dateTo || "");
+    setShipDateFrom(snap.shipDateFrom || "");
+    setShipDateTo(snap.shipDateTo || "");
     setPendingOnly(!!snap.pendingOnly);
     setLateOnly(!!snap.lateOnly);
     setS1Field(snap.s1Field || "REQ_SHIP_DATE");
@@ -622,6 +632,8 @@ export default function PurchaseOrderListPage() {
     vendorId: vendorFilter || "ALL",
     dateFrom,
     dateTo,
+    shipDateFrom,
+    shipDateTo,
     pendingOnly,
     lateOnly,
     s1Field,
@@ -631,7 +643,7 @@ export default function PurchaseOrderListPage() {
     s3Field,
     s3Dir,
     page: pageOverride ?? page ?? 1,
-  }), [searchText, statusFilter, vendorFilter, dateFrom, dateTo, pendingOnly, lateOnly, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir, page]);
+  }), [searchText, statusFilter, vendorFilter, dateFrom, dateTo, shipDateFrom, shipDateTo, pendingOnly, lateOnly, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir, page]);
 
   const buildListUrl = React.useCallback((
     snap: ListStateSnapshot,
@@ -644,6 +656,8 @@ export default function PurchaseOrderListPage() {
     if (snap.vendorId && snap.vendorId !== "ALL") params.set("vendor_id", snap.vendorId);
     if (snap.dateFrom) params.set("dateFrom", snap.dateFrom);
     if (snap.dateTo) params.set("dateTo", snap.dateTo);
+    if (snap.shipDateFrom) params.set("shipDateFrom", snap.shipDateFrom);
+    if (snap.shipDateTo) params.set("shipDateTo", snap.shipDateTo);
     if (snap.pendingOnly) params.set("pending_only", "true");
     if (snap.lateOnly) params.set("late_only", "true");
     params.set("s1Field", snap.s1Field);
@@ -729,6 +743,8 @@ export default function PurchaseOrderListPage() {
       if (snapshot.status && snapshot.status !== "ALL") params.set("status", snapshot.status);
       if (snapshot.dateFrom) params.set("dateFrom", snapshot.dateFrom);
       if (snapshot.dateTo) params.set("dateTo", snapshot.dateTo);
+      if (snapshot.shipDateFrom) params.set("shipDateFrom", snapshot.shipDateFrom);
+      if (snapshot.shipDateTo) params.set("shipDateTo", snapshot.shipDateTo);
       if (snapshot.vendorId && snapshot.vendorId !== "ALL") params.set("vendor_id", snapshot.vendorId);
       if (snapshot.pendingOnly) params.set("pending_only", "true");
       if (snapshot.lateOnly) params.set("late_only", "true");
@@ -820,6 +836,8 @@ export default function PurchaseOrderListPage() {
     setStatusFilter("ALL");
     setDateFrom("");
     setDateTo("");
+    setShipDateFrom("");
+    setShipDateTo("");
     setVendorFilter("ALL");
     setPendingOnly(false);
     setLateOnly(false);
@@ -960,6 +978,8 @@ export default function PurchaseOrderListPage() {
       if (statusFilter && statusFilter !== "ALL") params.set("status", statusFilter);
       if (dateFrom) params.set("dateFrom", dateFrom);
       if (dateTo) params.set("dateTo", dateTo);
+      if (shipDateFrom) params.set("shipDateFrom", shipDateFrom);
+      if (shipDateTo) params.set("shipDateTo", shipDateTo);
       if (vendorFilter && vendorFilter !== "ALL") params.set("vendor_id", vendorFilter);
       if (pendingOnly) params.set("pending_only", "true");
       if (lateOnly) params.set("late_only", "true");
@@ -1674,7 +1694,6 @@ export default function PurchaseOrderListPage() {
           <CardHeader className="flex flex-row items-center justify-between gap-3">
             <div>
               <CardTitle className="text-2xl">Purchase Order List</CardTitle>
-              <div className="text-xs text-red-500 mt-1">PO_LIST_PAGE_ACTIVE</div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -1689,8 +1708,8 @@ export default function PurchaseOrderListPage() {
 
           <CardContent className="space-y-4">
             {/* Filters + Sort */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end">
-              <div className="space-y-1 lg:col-span-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-12 gap-4 items-end">
+              <div className="space-y-1 xl:col-span-3">
                 <Label>Search</Label>
                 <Input
                   placeholder="PO No or Buyer Name"
@@ -1700,7 +1719,7 @@ export default function PurchaseOrderListPage() {
                 />
               </div>
 
-              <div className="space-y-1 lg:col-span-2">
+              <div className="space-y-1 xl:col-span-3">
                 <Label>Status</Label>
                 <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v)}>
                   <SelectTrigger>
@@ -1718,7 +1737,7 @@ export default function PurchaseOrderListPage() {
                 </Select>
               </div>
 
-              <div className="space-y-1 lg:col-span-2">
+              <div className="space-y-1 xl:col-span-3">
                 <Label>Vendor</Label>
                 <Select value={vendorFilter} onValueChange={(v) => setVendorFilter(v)}>
                   <SelectTrigger>
@@ -1735,20 +1754,10 @@ export default function PurchaseOrderListPage() {
                 </Select>
               </div>
 
-              <div className="space-y-1 lg:col-span-2">
-                <Label>Order Date (From)</Label>
-                <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-              </div>
-
-              <div className="space-y-1 lg:col-span-2">
-                <Label>Order Date (To)</Label>
-                <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-              </div>
-
-              <div className="space-y-1 lg:col-span-2">
+              <div className="space-y-1 xl:col-span-3">
                 <Label className="opacity-0">Options</Label>
-                <div className="flex flex-col gap-2 rounded-md border px-3 py-2">
-                  <label className="flex items-center gap-2 text-sm whitespace-nowrap">
+                <div className="flex flex-col gap-2 rounded-md border px-2.5 py-2">
+                  <label className="flex items-center gap-1.5 text-xs whitespace-nowrap">
                     <input
                       type="checkbox"
                       checked={pendingOnly}
@@ -1756,7 +1765,7 @@ export default function PurchaseOrderListPage() {
                     />
                     <span>Pending Only</span>
                   </label>
-                  <label className="flex items-center gap-2 text-sm whitespace-nowrap">
+                  <label className="flex items-center gap-1.5 text-xs whitespace-nowrap">
                     <input
                       type="checkbox"
                       checked={lateOnly}
@@ -1767,7 +1776,27 @@ export default function PurchaseOrderListPage() {
                 </div>
               </div>
 
-              <div className="flex gap-2 justify-end lg:col-span-12">
+              <div className="space-y-1 xl:col-span-3">
+                <Label>Order Date (From)</Label>
+                <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+              </div>
+
+              <div className="space-y-1 xl:col-span-3">
+                <Label>Order Date (To)</Label>
+                <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+              </div>
+
+              <div className="space-y-1 xl:col-span-3">
+                <Label>Ship Date (From)</Label>
+                <Input type="date" value={shipDateFrom} onChange={(e) => setShipDateFrom(e.target.value)} />
+              </div>
+
+              <div className="space-y-1 xl:col-span-3">
+                <Label>Ship Date (To)</Label>
+                <Input type="date" value={shipDateTo} onChange={(e) => setShipDateTo(e.target.value)} />
+              </div>
+
+              <div className="flex gap-2 justify-end md:col-span-2 xl:col-span-12">
                 <Button
                   type="button"
                   variant="outline"

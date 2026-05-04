@@ -545,6 +545,19 @@ export async function GET(req: Request) {
         ""
     );
     const dateToExclusive = addOneDay(dateTo);
+    const shipDateFrom = normalizeDateOnly(
+      url.searchParams.get("shipDateFrom") ??
+        url.searchParams.get("ship_date_from") ??
+        url.searchParams.get("req_ship_date_from") ??
+        ""
+    );
+    const shipDateTo = normalizeDateOnly(
+      url.searchParams.get("shipDateTo") ??
+        url.searchParams.get("ship_date_to") ??
+        url.searchParams.get("req_ship_date_to") ??
+        ""
+    );
+    const shipDateToExclusive = addOneDay(shipDateTo);
     const vendorId = (url.searchParams.get("vendor_id") ?? "").trim();
     const pendingOnly = (url.searchParams.get("pending_only") ?? "").trim().toLowerCase() === "true";
     const lateOnly = (url.searchParams.get("late_only") ?? "").trim().toLowerCase() === "true";
@@ -607,6 +620,12 @@ export async function GET(req: Request) {
       q = q.lt("order_date", dateToExclusive);
     } else if (dateTo) {
       q = q.lte("order_date", dateTo);
+    }
+    if (shipDateFrom) q = q.gte("requested_ship_date", shipDateFrom);
+    if (shipDateToExclusive) {
+      q = q.lt("requested_ship_date", shipDateToExclusive);
+    } else if (shipDateTo) {
+      q = q.lte("requested_ship_date", shipDateTo);
     }
 
     const listRes = await q.order("order_date", { ascending: false, nullsFirst: false });
