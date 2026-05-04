@@ -113,6 +113,7 @@ type OverviewResponse = {
   statusDist?: StatusDistItem[];
   lists: {
     at_risk: AtRiskRow[];
+    today_ship?: NextShipRow[];
     next_ship: NextShipRow[];
     cash_watch: CashWatchRow[];
     sample_overdue?: SampleListRow[];
@@ -341,6 +342,7 @@ export default function OverviewDashboardPage() {
 
   const lists = {
     at_risk: raw?.lists?.at_risk ?? [],
+    today_ship: (raw as any)?.lists?.today_ship ?? [],
     next_ship: raw?.lists?.next_ship ?? [],
     cash_watch: raw?.lists?.cash_watch ?? [],
     sample_overdue: (raw as any)?.lists?.sample_overdue ?? [],
@@ -823,7 +825,7 @@ export default function OverviewDashboardPage() {
                 <AtRiskTable rows={data?.lists.at_risk || []} />
               </TabsContent>
               <TabsContent value="today_ship" className="mt-3">
-                <NextShipTable rows={data?.lists.next_ship || []} />
+                <NextShipTable rows={data?.lists.today_ship || []} />
               </TabsContent>
               <TabsContent value="next_ship" className="mt-3">
                 <NextShipTable rows={data?.lists.next_ship || []} />

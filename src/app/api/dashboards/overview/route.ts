@@ -14,6 +14,14 @@ function iso(d: Date) {
   return `${y}-${m}-${da}`;
 }
 
+function isoTodayKST() {
+  const d = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const da = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${da}`;
+}
+
 function addDaysISO(baseISO: string, deltaDays: number) {
   const d = new Date(baseISO + "T00:00:00");
   d.setDate(d.getDate() + deltaDays);
@@ -466,8 +474,16 @@ export async function GET(req: Request) {
         };
       });
 
+    const today = isoTodayKST();
+    const nextShipEnd = addDaysISO(today, 7);
+
+    const today_ship = scheduleRows
+      .filter((r) => inRangeISO(r.req_ship_date, today, today))
+      .sort((a, b) => String(a.req_ship_date).localeCompare(String(b.req_ship_date)) || String(a.po_no).localeCompare(String(b.po_no)))
+      .slice(0, 100);
+
     const next_ship = scheduleRows
-      .filter((r) => inRangeISO(r.req_ship_date, start, end))
+      .filter((r) => inRangeISO(r.req_ship_date, today, nextShipEnd))
       .sort((a, b) => String(a.req_ship_date).localeCompare(String(b.req_ship_date)) || String(a.po_no).localeCompare(String(b.po_no)))
       .slice(0, 100);
 
@@ -628,8 +644,6 @@ export async function GET(req: Request) {
       }
     }
 
-    const today = iso(new Date());
-
     const arRows = invAsOfF.map((r: any) => {
       const invId = String(r?.id ?? "").trim();
       const invNo = String(pickInvoiceNo(r) ?? "").trim();
@@ -755,7 +769,7 @@ export async function GET(req: Request) {
       sample_requests: sampleCount,
       sample_waiting_feedback: sampleWaitingFeedbackCount,
       sample_overdue: sampleOverdueCount,
-      lists: { at_risk, next_ship, cash_watch, sample_overdue, sample_waiting_feedback },
+      lists: { at_risk, today_ship, next_ship, cash_watch, sample_overdue, sample_waiting_feedback },
       meta: {
         source: "route-computed-ar-unified-asof-v2",
         debug_counts: debug ? {
@@ -765,6 +779,7 @@ export async function GET(req: Request) {
           production_rows_scope: productionRows.length,
           production_rows_in_range: productionRowsInRange.length,
           ready_rows_window: readyRows.length,
+          today_ship_count: today_ship.length,
           next_ship_count: next_ship.length,
           at_risk_count: at_risk.length,
           invoices_period: invPeriodF.length,
