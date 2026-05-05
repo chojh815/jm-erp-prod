@@ -965,6 +965,7 @@ export async function GET(req: Request) {
             asText(it.buyerName),
             asText(it.destination),
             asText(it.buyerBrandName),
+            asText(it.buyerDeptName),
             asText(it.mainBuyerStyleNo),
             asText(it.mainJmStyleNo),
             ...((it.allBuyerStyleNos as string[]) ?? []),

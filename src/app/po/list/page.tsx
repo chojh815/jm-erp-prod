@@ -1712,7 +1712,7 @@ export default function PurchaseOrderListPage() {
               <div className="space-y-1 xl:col-span-3">
                 <Label>Search</Label>
                 <Input
-                  placeholder="PO No or Buyer Name"
+                  placeholder="PO No, Buyer, Brand, or Dept"
                   value={searchText}
                   onChange={(e) => setSearchText(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleApply()}
