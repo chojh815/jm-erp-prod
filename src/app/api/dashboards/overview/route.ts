@@ -512,42 +512,16 @@ export async function GET(req: Request) {
     const shipCount = shipmentIds.size;
     const shippedPoCount = new Set(shippedInvoices.map((r: any) => pickPoNo(r)).filter(Boolean)).size;
 
-    const shippedByPoNo = new Map<string, number>();
-    for (const inv of shippedInvoices) {
-      const poNo = String(pickPoNo(inv) ?? "").trim();
-      if (!poNo) continue;
-      shippedByPoNo.set(poNo, (shippedByPoNo.get(poNo) || 0) + pickAmountUSD(inv));
-    }
-
-    const periodPoHeaderIds = new Set(posF.map((h: any) => pickPoHeaderId(h)).filter(Boolean));
-    const periodPoPendingRatioByHeaderId = new Map<string, number>();
-    const periodPoPendingAmountByHeaderId = new Map<string, number>();
-    for (const header of posF) {
-      const headerId = pickPoHeaderId(header);
-      const poNo = String(pickPoNo(header) ?? "").trim();
-      const total = amountForPoHeader(header);
-      const shipped = poNo ? (shippedByPoNo.get(poNo) || 0) : 0;
-      const remaining = Math.max(0, total - shipped);
-      const ratio = total > 0 ? Math.min(1, Math.max(0, remaining / total)) : 0;
-      if (headerId) {
-        periodPoPendingRatioByHeaderId.set(headerId, ratio);
-        periodPoPendingAmountByHeaderId.set(headerId, remaining);
-      }
-    }
-
-    const productionRowsInRange = productionRows.filter((r) => {
-      const headerId = pickPoHeaderId(r.scope_row);
-      return !!headerId && periodPoHeaderIds.has(headerId) && !r.ready_to_ship;
+    const pendingOrderRows = posBaseF.filter((r: any) => {
+      const total = amountForPoHeader(r);
+      return total > 0.0001 && isShipmentPending(r);
     });
-    const productionUsd = productionRowsInRange.reduce((sum, row) => {
-      const headerId = pickPoHeaderId(row.scope_row);
-      const ratio = headerId ? (periodPoPendingRatioByHeaderId.get(headerId) ?? 1) : 1;
-      return sum + Number(row.amount_usd || 0) * ratio;
-    }, 0);
-    const productionLineCount = productionRowsInRange.length;
+    const pendingOrdersUsd = pendingOrderRows.reduce((sum, row) => sum + amountForPoHeader(row), 0);
+    const pendingPoCount = new Set(pendingOrderRows.map((r: any) => pickPoHeaderId(r) ?? pickPoNo(r)).filter(Boolean)).size;
 
-    const pendingOrdersUsd = Array.from(periodPoPendingAmountByHeaderId.values()).reduce((sum, amount) => sum + amount, 0);
-    const pendingPoCount = Array.from(periodPoPendingAmountByHeaderId.values()).filter((amount) => amount > 0.0001).length;
+    const productionRowsActive = productionRows.filter((r) => !r.ready_to_ship);
+    const productionUsd = productionRowsActive.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
+    const productionLineCount = productionRowsActive.length;
 
     const invoicedUsd = invPeriodF.reduce((s, r) => s + pickAmountUSD(r), 0);
     const invCount = new Set(invPeriodF.map((r: any) => r.id ?? pickInvoiceNo(r)).filter(Boolean)).size;
@@ -777,7 +751,7 @@ export async function GET(req: Request) {
           po_headers_scope: posBaseF.length,
           work_sheet_lines_total: workSheetLines.length,
           production_rows_scope: productionRows.length,
-          production_rows_in_range: productionRowsInRange.length,
+          production_rows_active: productionRowsActive.length,
           ready_rows_window: readyRows.length,
           today_ship_count: today_ship.length,
           next_ship_count: next_ship.length,
