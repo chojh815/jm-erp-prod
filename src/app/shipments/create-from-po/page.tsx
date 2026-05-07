@@ -99,6 +99,8 @@ function clamp(n: number, min: number, max: number) {
 }
 
 const CANCELLED_SHIPMENT_STATUSES = new Set(["CANCELLED", "DELETED"]);
+const SHIPMENT_CREATE_DRAFT_KEY = "jm.shipments.createFromPo.draft.v1";
+const SHIPMENT_CREATE_DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 type PoHeader = any;
 type PoLine = any;
@@ -141,6 +143,16 @@ type AllocationRow = {
   tracking_no: string;
 };
 
+type ShipmentCreateDraft = {
+  version: 1;
+  savedAt: string;
+  searchText: string;
+  poList: PoHeader[];
+  selectedPoIds: string[];
+  selectedHeaders: PoHeader[];
+  allocs: AllocationRow[];
+};
+
 async function resolveIncotermFallback(supabase: any, buyerId: string | null): Promise<string | null> {
   if (!buyerId) return null;
   const { data, error } = await supabase
@@ -172,6 +184,76 @@ export default function ShipmentsCreateFromPoPage() {
   const [selectedPoIds, setSelectedPoIds] = React.useState<string[]>([]);
   const [selectedHeaders, setSelectedHeaders] = React.useState<PoHeader[]>([]);
   const [allocs, setAllocs] = React.useState<AllocationRow[]>([]);
+  const [draftLoaded, setDraftLoaded] = React.useState(false);
+
+  React.useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SHIPMENT_CREATE_DRAFT_KEY);
+      if (!raw) return;
+
+      const draft = JSON.parse(raw) as Partial<ShipmentCreateDraft>;
+      const savedAtMs = Date.parse(String(draft?.savedAt ?? ""));
+      if (
+        draft?.version !== 1 ||
+        !Number.isFinite(savedAtMs) ||
+        Date.now() - savedAtMs > SHIPMENT_CREATE_DRAFT_TTL_MS
+      ) {
+        window.localStorage.removeItem(SHIPMENT_CREATE_DRAFT_KEY);
+        return;
+      }
+
+      setSearchText(typeof draft.searchText === "string" ? draft.searchText : "");
+      setPoList(Array.isArray(draft.poList) ? draft.poList : []);
+      setSelectedPoIds(Array.isArray(draft.selectedPoIds) ? draft.selectedPoIds : []);
+      setSelectedHeaders(Array.isArray(draft.selectedHeaders) ? draft.selectedHeaders : []);
+      setAllocs(Array.isArray(draft.allocs) ? draft.allocs : []);
+    } catch (e) {
+      console.warn("Failed to restore shipment draft:", e);
+      window.localStorage.removeItem(SHIPMENT_CREATE_DRAFT_KEY);
+    } finally {
+      setDraftLoaded(true);
+    }
+  }, []);
+
+  const hasDraftData = React.useMemo(
+    () =>
+      searchText.trim() !== "" ||
+      poList.length > 0 ||
+      selectedPoIds.length > 0 ||
+      selectedHeaders.length > 0 ||
+      allocs.length > 0,
+    [searchText, poList, selectedPoIds, selectedHeaders, allocs]
+  );
+
+  React.useEffect(() => {
+    if (!draftLoaded) return;
+
+    try {
+      if (!hasDraftData) {
+        window.localStorage.removeItem(SHIPMENT_CREATE_DRAFT_KEY);
+        return;
+      }
+
+      const draft: ShipmentCreateDraft = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        searchText,
+        poList,
+        selectedPoIds,
+        selectedHeaders,
+        allocs,
+      };
+      window.localStorage.setItem(SHIPMENT_CREATE_DRAFT_KEY, JSON.stringify(draft));
+    } catch (e) {
+      console.warn("Failed to save shipment draft:", e);
+    }
+  }, [draftLoaded, hasDraftData, searchText, poList, selectedPoIds, selectedHeaders, allocs]);
+
+  const discardDraft = React.useCallback(() => {
+    try {
+      window.localStorage.removeItem(SHIPMENT_CREATE_DRAFT_KEY);
+    } catch {}
+  }, []);
 
   const selectedBuyerId = React.useMemo(() => {
     const h = selectedHeaders?.[0];
@@ -649,6 +731,13 @@ export default function ShipmentsCreateFromPoPage() {
 
       const created = json?.created ?? [];
       const ids = created.map((x: any) => x.shipment_id).filter(Boolean);
+
+      discardDraft();
+      setSearchText("");
+      setPoList([]);
+      setSelectedPoIds([]);
+      setSelectedHeaders([]);
+      setAllocs([]);
 
       alert(`Saved. Created Shipment(s): ${created.length}`);
       if (ids.length === 1) {

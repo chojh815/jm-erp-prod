@@ -47,6 +47,7 @@ const ORIGIN_LABEL: Record<ShippingOriginCode, string> = {
 
 // 🔑 Create PO 자동 임시저장 localStorage 키
 const DRAFT_KEY = "jm-erp-po-create-draft-v1";
+const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface POLine {
   id: string;
@@ -118,6 +119,37 @@ type PoSummary = {
   subtotal: number | null;
   status: POStatus;
   destination?: string | null;
+};
+
+type POCreateDraft = {
+  version: 1;
+  savedAt: string;
+  poNo: string;
+  poHeaderId: string | null;
+  loadedPoNo: string | null;
+  loadedHeaderId: string | null;
+  orderType: OrderType;
+  status: POStatus;
+  buyerId: string;
+  dept: string;
+  brand: string;
+  currency: string;
+  incoterm: string;
+  paymentTermId: string | null;
+  paymentTermName: string;
+  shipMode: string;
+  courierCarrier: string;
+  destination: string;
+  orderDate: string;
+  reqShipDate: string;
+  cancelDate: string;
+  cancelReason: string;
+  selectedOrigin?: ShippingOriginCode;
+  approvalTarget: string;
+  ppTarget: string;
+  topTarget: string;
+  finalTarget: string;
+  lines: POLine[];
 };
 
 const supabaseBrowser = createSupabaseBrowserClient();
@@ -226,6 +258,7 @@ React.useEffect(() => {
   // ----------------------
   const [poNo, setPoNo] = React.useState("");
   const [poHeaderId, setPoHeaderId] = React.useState<string | null>(null);
+  const [draftLoaded, setDraftLoaded] = React.useState(false);
 
   // ✅ Track the loaded PO identity to prevent accidental overwrite when PO No changes
   const loadedPoNoRef = React.useRef<string | null>(null);
@@ -1572,18 +1605,43 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
   React.useEffect(() => {
     if (typeof window === "undefined") return;
     // URL로 기존 PO를 여는 경우에는 Draft 복원하지 않음
-    if (initialPoNo) return;
+    if (initialPoNo) {
+      setDraftLoaded(true);
+      return;
+    }
 
     try {
       const raw = window.localStorage.getItem(DRAFT_KEY);
       if (!raw) return;
 
-      const draft = JSON.parse(raw) as any;
+      const draft = JSON.parse(raw) as Partial<POCreateDraft> & Record<string, any>;
+      const savedAtMs = Date.parse(String(draft?.savedAt ?? ""));
+      if (
+        draft?.version !== 1 ||
+        !Number.isFinite(savedAtMs) ||
+        Date.now() - savedAtMs > DRAFT_TTL_MS
+      ) {
+        window.localStorage.removeItem(DRAFT_KEY);
+        return;
+      }
 
-      if (draft.poNo) setPoNo(draft.poNo);
+      if (typeof draft.poHeaderId === "string") {
+        setPoHeaderId(draft.poHeaderId);
+        loadedHeaderIdRef.current = draft.loadedHeaderId || draft.poHeaderId;
+      }
+      if (typeof draft.loadedPoNo === "string") {
+        loadedPoNoRef.current = draft.loadedPoNo;
+      }
+      if (typeof draft.loadedHeaderId === "string") {
+        loadedHeaderIdRef.current = draft.loadedHeaderId;
+      }
+      if (typeof draft.poNo === "string") setPoNo(draft.poNo);
       if (draft.orderType) setOrderType(draft.orderType as OrderType);
       if (draft.status) setStatus(draft.status as POStatus);
-      if (draft.buyerId) setBuyerId(draft.buyerId);
+      if (typeof draft.buyerId === "string") {
+        skipNextBuyerDefaultsRef.current = true;
+        setBuyerId(draft.buyerId);
+      }
       if (typeof draft.dept === "string") setDept(draft.dept);
       if (typeof draft.brand === "string") setBrand(draft.brand);
       if (typeof draft.currency === "string")
@@ -1636,6 +1694,9 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
         "Failed to restore PO draft from localStorage:",
         err
       );
+      window.localStorage.removeItem(DRAFT_KEY);
+    } finally {
+      setDraftLoaded(true);
     }
   }, [initialPoNo, makeEmptyLine]);
 
@@ -1644,6 +1705,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
   // ----------------------
   React.useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!draftLoaded) return;
 
     // 완전히 빈 상태면 Draft 삭제
     const firstLine = lines[0];
@@ -1666,8 +1728,13 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
       return;
     }
 
-    const draft = {
+    const draft: POCreateDraft = {
+      version: 1,
+      savedAt: new Date().toISOString(),
       poNo,
+      poHeaderId,
+      loadedPoNo: loadedPoNoRef.current,
+      loadedHeaderId: loadedHeaderIdRef.current,
       orderType,
       status,
       buyerId,
@@ -1699,6 +1766,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
     }
   }, [
     poNo,
+    poHeaderId,
     orderType,
     status,
     buyerId,
@@ -1714,12 +1782,14 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
     orderDate,
     reqShipDate,
     cancelDate,
+    cancelReason,
     selectedOrigin,
     approvalTarget,
     ppTarget,
     topTarget,
     finalTarget,
     lines,
+    draftLoaded,
   ]);
 
   const handleCancel = () => {
