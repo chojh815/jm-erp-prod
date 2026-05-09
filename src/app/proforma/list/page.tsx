@@ -311,7 +311,7 @@ export default function ProformaListPage() {
 
       sheet.columns = [
         { width: 14 }, { width: 18 }, { width: 22 }, { width: 14 },
-        { width: 12 }, { width: 10 }, { width: 14 }, { width: 16 },
+        { width: 14 }, { width: 18 }, { width: 22 }, { width: 14 },
       ];
 
       const border = { style: "thin", color: { argb: "FF000000" } } as const;

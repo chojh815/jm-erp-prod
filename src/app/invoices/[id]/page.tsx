@@ -1187,11 +1187,6 @@ ${shipperAddress}` : `${shipperName}`,
         views: [{ showGridLines: false }],
       });
 
-      sheet.columns = [
-        { width: 14 }, { width: 18 }, { width: 24 }, { width: 14 },
-        { width: 12 }, { width: 10 }, { width: 14 }, { width: 16 },
-      ];
-
       const border = { style: "thin", color: { argb: "FF000000" } } as const;
       const lightBorder = { style: "thin", color: { argb: "FF999999" } } as const;
       const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFF3F7" } } as const;
@@ -1220,66 +1215,89 @@ ${shipperAddress}` : `${shipperName}`,
       const portOfLoading = s(header.port_of_loading) || "-";
       const finalDestination = s(header.final_destination || header.destination) || "-";
       const cooText = s(header.coo_text) || originCodeToCooText(header.shipping_origin_code) || "-";
+      const showMatHs = shouldShowMaterialHS(header, lines);
+      const lastCol = showMatHs ? 8 : 6;
+      const leftEndCol = showMatHs ? 4 : 3;
+      const rightStartCol = leftEndCol + 1;
+      const rightStartLetter = showMatHs ? "E" : "D";
+      const lastColLetter = showMatHs ? "H" : "F";
 
-      sheet.mergeCells("A1:H1");
+      sheet.columns = showMatHs
+        ? [
+            { width: 14 }, { width: 18 }, { width: 24 }, { width: 14 },
+            { width: 14 }, { width: 18 }, { width: 24 }, { width: 14 },
+          ]
+        : [
+            { width: 14 }, { width: 18 }, { width: 24 },
+            { width: 14 }, { width: 18 }, { width: 24 },
+          ];
+
+      sheet.mergeCells(1, 1, 1, lastCol);
       sheet.getCell("A1").value = "Commercial Invoice";
       sheet.getCell("A1").font = { bold: true, size: 18 };
       sheet.getCell("A1").alignment = { horizontal: "center" };
       sheet.getRow(1).height = 28;
 
-      sheet.mergeCells("A2:D2");
-      sheet.mergeCells("E2:H2");
-      sheet.mergeCells("A3:D3");
-      sheet.mergeCells("E3:H3");
+      sheet.mergeCells(2, 1, 2, leftEndCol);
+      sheet.mergeCells(2, rightStartCol, 2, lastCol);
+      sheet.mergeCells(3, 1, 3, leftEndCol);
+      sheet.mergeCells(3, rightStartCol, 3, lastCol);
       sheet.getCell("A2").value = `Buyer: ${header.buyer_name || "-"}`;
-      sheet.getCell("E2").value = `Invoice No: ${invoiceNo}`;
+      sheet.getCell(2, rightStartCol).value = `Invoice No: ${invoiceNo}`;
       sheet.getCell("A3").value = `PO No: ${poText}`;
-      sheet.getCell("E3").value = `Date: ${invoiceDate}`;
-      sheet.getCell("E2").alignment = { horizontal: "right" };
-      sheet.getCell("E3").alignment = { horizontal: "right" };
+      sheet.getCell(3, rightStartCol).value = `Date: ${invoiceDate}`;
+      sheet.getCell(2, rightStartCol).alignment = { horizontal: "right" };
+      sheet.getCell(3, rightStartCol).alignment = { horizontal: "right" };
 
-      sheet.mergeCells("A5:D5");
-      sheet.mergeCells("E5:H5");
-      sheet.mergeCells("A6:D7");
-      sheet.mergeCells("E6:H7");
+      sheet.mergeCells(5, 1, 5, leftEndCol);
+      sheet.mergeCells(5, rightStartCol, 5, lastCol);
+      sheet.mergeCells(6, 1, 7, leftEndCol);
+      sheet.mergeCells(6, rightStartCol, 7, lastCol);
       sheet.getCell("A5").value = "Shipper / Exporter";
-      sheet.getCell("E5").value = "Invoice & Terms";
+      sheet.getCell(5, rightStartCol).value = "Invoice & Terms";
       sheet.getCell("A6").value = [shipperName, shipperAddress].filter(Boolean).join("\n");
-      sheet.getCell("E6").value = `Terms: ${header.payment_term || "-"}\nIncoterm: ${header.incoterm || "-"}\nCurrency: ${currency}`;
-      boxRange("A5", "H7");
+      sheet.getCell(6, rightStartCol).value = `Terms: ${header.payment_term || "-"}\nIncoterm: ${header.incoterm || "-"}\nCurrency: ${currency}`;
+      boxRange("A5", `${lastColLetter}7`);
 
-      sheet.mergeCells("A9:D9");
-      sheet.mergeCells("E9:H9");
-      sheet.mergeCells("A10:D12");
-      sheet.mergeCells("E10:H12");
+      sheet.mergeCells(9, 1, 9, leftEndCol);
+      sheet.mergeCells(9, rightStartCol, 9, lastCol);
+      sheet.mergeCells(10, 1, 12, leftEndCol);
+      sheet.mergeCells(10, rightStartCol, 12, lastCol);
       sheet.getCell("A9").value = "Consignee";
-      sheet.getCell("E9").value = "Notify Party";
+      sheet.getCell(9, rightStartCol).value = "Notify Party";
       sheet.getCell("A10").value = consignee;
-      sheet.getCell("E10").value = notify;
-      boxRange("A9", "H12");
+      sheet.getCell(10, rightStartCol).value = notify;
+      boxRange("A9", `${lastColLetter}12`);
 
-      sheet.mergeCells("A14:D14");
-      sheet.mergeCells("E14:H14");
-      sheet.mergeCells("A15:D15");
-      sheet.mergeCells("E15:H15");
+      sheet.mergeCells(14, 1, 14, leftEndCol);
+      sheet.mergeCells(14, rightStartCol, 14, lastCol);
+      sheet.mergeCells(15, 1, 15, leftEndCol);
+      sheet.mergeCells(15, rightStartCol, 15, lastCol);
       sheet.getCell("A14").value = "Port of Loading";
-      sheet.getCell("E14").value = "Final Destination";
+      sheet.getCell(14, rightStartCol).value = "Final Destination";
       sheet.getCell("A15").value = portOfLoading;
-      sheet.getCell("E15").value = finalDestination;
-      boxRange("A14", "H15");
+      sheet.getCell(15, rightStartCol).value = finalDestination;
+      boxRange("A14", `${lastColLetter}15`);
 
-      sheet.mergeCells("A17:H17");
-      sheet.mergeCells("A18:H19");
+      sheet.mergeCells(17, 1, 17, lastCol);
+      sheet.mergeCells(18, 1, 19, lastCol);
       sheet.getCell("A17").value = "COO / Certification";
       sheet.getCell("A18").value = `${cooText}\nWE CERTIFY THERE IS NO WOOD PACKING MATERIAL USED IN THIS SHIPMENT.`;
-      boxRange("A17", "H19");
+      boxRange("A17", `${lastColLetter}19`);
 
-      for (const addr of ["A5", "E5", "A9", "E9", "A14", "E14", "A17"]) {
-        sheet.getCell(addr).font = { bold: true };
-        sheet.getCell(addr).fill = headerFill;
+      for (const cell of [
+        sheet.getCell("A5"),
+        sheet.getCell(5, rightStartCol),
+        sheet.getCell("A9"),
+        sheet.getCell(9, rightStartCol),
+        sheet.getCell("A14"),
+        sheet.getCell(14, rightStartCol),
+        sheet.getCell("A17"),
+      ]) {
+        cell.font = { bold: true };
+        cell.fill = headerFill;
       }
 
-      const showMatHs = shouldShowMaterialHS(header, lines);
       const tableStart = 21;
       const tableHeader = [
         "PO #",
@@ -1339,9 +1357,9 @@ ${shipperAddress}` : `${shipperName}`,
       sheet.getCell(totalRowNo, tableHeader.length).numFmt = `"${currency} "#,##0.00`;
 
       const signRowNo = totalRowNo + 4;
-      sheet.mergeCells(signRowNo, 6, signRowNo, 8);
-      sheet.getCell(signRowNo, 6).value = "Signed by";
-      sheet.getCell(signRowNo, 6).alignment = { horizontal: "center" };
+      sheet.mergeCells(signRowNo, rightStartCol, signRowNo, lastCol);
+      sheet.getCell(signRowNo, rightStartCol).value = "Signed by";
+      sheet.getCell(signRowNo, rightStartCol).alignment = { horizontal: "center" };
 
       const stamp = getCompanyStampByOrigin(header.shipping_origin_code);
       try {
@@ -1352,16 +1370,16 @@ ${shipperAddress}` : `${shipperName}`,
           extension: stamp.format === "JPEG" ? "jpeg" : "png",
         });
         sheet.addImage(imageId, {
-          tl: { col: 5.65, row: signRowNo },
+          tl: { col: rightStartCol - 0.35, row: signRowNo },
           ext: { width: stamp.boxW * 3.5, height: stamp.boxH * 3.5 },
         });
       } catch (e) {
         console.warn("Failed to add invoice stamp to Excel:", e);
       }
 
-      sheet.mergeCells(signRowNo + 8, 6, signRowNo + 8, 8);
-      sheet.getCell(signRowNo + 8, 6).value = stamp.companyName;
-      sheet.getCell(signRowNo + 8, 6).alignment = { horizontal: "center" };
+      sheet.mergeCells(signRowNo + 8, rightStartCol, signRowNo + 8, lastCol);
+      sheet.getCell(signRowNo + 8, rightStartCol).value = stamp.companyName;
+      sheet.getCell(signRowNo + 8, rightStartCol).alignment = { horizontal: "center" };
 
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], {

@@ -1012,7 +1012,7 @@ export default function PackingListDetailPage() {
 
       sheet.columns = [
         { width: 13 }, { width: 15 }, { width: 18 }, { width: 24 },
-        { width: 10 }, { width: 10 }, { width: 10 }, { width: 10 }, { width: 10 },
+        { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 },
       ];
 
       const border = { style: "thin", color: { argb: "FF000000" } } as const;
