@@ -625,7 +625,7 @@ export async function GET(req: Request) {
       const due = (r?.due_date ?? r?.invoice_due_date ?? null) as string | null;
       const termDays = resolveInvoiceTermDays(r);
       const dueISO = due ? due.slice(0, 10) : (invDate ? addDaysISO(invDate, termDays) : null);
-      const overdue = dueISO ? Math.floor((new Date(end).getTime() - new Date(dueISO).getTime()) / 86400000) : 0;
+      const overdue = dueISO ? Math.floor((new Date(today).getTime() - new Date(dueISO).getTime()) / 86400000) : 0;
       const total = pickAmountUSD(r);
       const explicitBalance = Number(r?.balance_amount ?? r?.balance_usd);
       const explicitPaid = Number(r?.paid_amount);
