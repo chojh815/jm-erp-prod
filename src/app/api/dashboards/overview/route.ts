@@ -48,7 +48,7 @@ function monthsAgoStartISO(anyISO: string, monthsAgo: number) {
 }
 
 function rangeFromPreset(preset: Preset, startParam: string | null, endParam: string | null) {
-  const end = endParam && endParam.length >= 10 ? endParam.slice(0, 10) : iso(new Date());
+  const end = endParam && endParam.length >= 10 ? endParam.slice(0, 10) : isoTodayKST();
   if (preset === "CUSTOM") {
     const start = startParam && startParam.length >= 10 ? startParam.slice(0, 10) : end;
     return { start, end };

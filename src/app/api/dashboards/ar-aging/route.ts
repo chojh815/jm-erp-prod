@@ -15,6 +15,14 @@ function iso(d: Date) {
   return `${y}-${m}-${da}`;
 }
 
+function isoTodayKST() {
+  const d = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const da = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${da}`;
+}
+
 function addDaysISO(baseISO: string, deltaDays: number) {
   const d = new Date(baseISO + "T00:00:00");
   d.setDate(d.getDate() + deltaDays);
@@ -49,7 +57,7 @@ function parseIds(raw: string | null): string[] | "ALL" {
 }
 
 function rangeFromPreset(preset: Preset, startParam: string | null, endParam: string | null) {
-  const end = endParam && endParam.length >= 10 ? endParam.slice(0, 10) : iso(new Date());
+  const end = endParam && endParam.length >= 10 ? endParam.slice(0, 10) : isoTodayKST();
   if (preset === "CUSTOM") {
     const start = startParam && startParam.length >= 10 ? startParam.slice(0, 10) : end;
     return { start, end };
