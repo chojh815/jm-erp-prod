@@ -472,7 +472,14 @@ export default function PackingListDetailPage() {
 
       const draft = readPackingListDraft(id);
       if (draft) {
-        setHeader(draft.header);
+        setHeader({
+          ...h,
+          ...draft.header,
+          invoice_id: (draft.header as any).invoice_id ?? (h as any).invoice_id ?? null,
+          invoice_no: (draft.header as any).invoice_no ?? (h as any).invoice_no ?? null,
+          invoice_date: (draft.header as any).invoice_date ?? (h as any).invoice_date ?? null,
+          invoiceDate: (draft.header as any).invoiceDate ?? (h as any).invoiceDate ?? (h as any).invoice_date ?? null,
+        } as PackingListHeader);
         setLines(draft.lines.map(recomputeLine));
         setAutoCtnEnabled(draft.autoCtnEnabled ?? true);
       } else {
@@ -801,6 +808,7 @@ export default function PackingListDetailPage() {
       const invNo = s((header as any).invoice_no) || s(invoiceLink?.invoice_no) || "-";
       const invDate =
         fmtDate10((header as any).invoice_date ?? null) ||
+        fmtDate10((header as any).invoiceDate ?? null) ||
         fmtDate10(invoiceLink?.invoice_date || null) ||
         "-";
 
@@ -1078,6 +1086,7 @@ export default function PackingListDetailPage() {
       const invNo = s((header as any).invoice_no) || s(invoiceLink?.invoice_no) || "-";
       const invDate =
         fmtDate10((header as any).invoice_date ?? null) ||
+        fmtDate10((header as any).invoiceDate ?? null) ||
         fmtDate10(invoiceLink?.invoice_date || null) ||
         "-";
       const consignee = s(header.consignee_text || "-");
