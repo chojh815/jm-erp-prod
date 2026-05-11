@@ -526,6 +526,8 @@ export async function PUT(
         shipper_address: headerIn.shipper_address ?? header.shipper_address ?? null,
         port_of_loading: headerIn.port_of_loading ?? header.port_of_loading ?? null,
         final_destination: headerIn.final_destination ?? header.final_destination ?? null,
+        etd: headerIn.etd ?? header.etd ?? null,
+        eta: headerIn.eta ?? header.eta ?? null,
         coo_text: headerIn.coo_text ?? header.coo_text ?? null,
         updated_at: new Date().toISOString(),
       })
