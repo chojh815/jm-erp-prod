@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -242,71 +243,26 @@ function fmtCartonRange(from?: any, to?: any) {
   return `${fRaw}-${tRaw}`;
 }
 
-// Shipment 전체 기준 C/T 자동 연속
+// Shipment 전체 기준 C/T 자동 연속.
+// 화면의 라인 순서를 기준으로 매번 다시 번호를 잡아 split LAST CTN도 자연스럽게 이어진다.
 function autoFillCartonNos(input: PackingListLine[]) {
   const next = input.map((l) => ({ ...l }));
 
-  const idxs = next
-    .map((_, i) => i)
-    .filter((i) => !next[i].is_deleted)
-    .sort((ia, ib) => {
-      const a = next[ia];
-      const b = next[ib];
-
-      const apo = (a.po_no || "").trim();
-      const bpo = (b.po_no || "").trim();
-      const poCmp = apo.localeCompare(bpo, undefined, { numeric: true });
-      if (poCmp !== 0) return poCmp;
-
-      const af = isEmptyNumber(a.carton_no_from)
-        ? Number.POSITIVE_INFINITY
-        : n(a.carton_no_from, 0);
-      const bf = isEmptyNumber(b.carton_no_from)
-        ? Number.POSITIVE_INFINITY
-        : n(b.carton_no_from, 0);
-      if (af !== bf) return af - bf;
-
-      const at = isEmptyNumber(a.carton_no_to)
-        ? Number.POSITIVE_INFINITY
-        : n(a.carton_no_to, 0);
-      const bt = isEmptyNumber(b.carton_no_to)
-        ? Number.POSITIVE_INFINITY
-        : n(b.carton_no_to, 0);
-      if (at !== bt) return at - bt;
-
-      const asn = (a.style_no || "").toUpperCase();
-      const bsn = (b.style_no || "").toUpperCase();
-      if (asn !== bsn) return asn < bsn ? -1 : 1;
-
-      const ad = (a.description || "").toUpperCase();
-      const bd = (b.description || "").toUpperCase();
-      if (ad !== bd) return ad < bd ? -1 : 1;
-
-      return 0;
-    });
-
   let cur = 1;
-  for (const i of idxs) {
+  for (let i = 0; i < next.length; i++) {
     const l = next[i];
+    if (l.is_deleted) continue;
+
     const cartons = Math.max(0, Math.floor(n(l.cartons, 0)));
-    if (!cartons) continue;
-
-    const hasFrom = !isEmptyNumber(l.carton_no_from);
-    const hasTo = !isEmptyNumber(l.carton_no_to);
-
-    if (!hasFrom && !hasTo) {
-      l.carton_no_from = cur;
-      l.carton_no_to = cur + cartons - 1;
-      cur = (l.carton_no_to || cur) + 1;
+    if (!cartons) {
+      l.carton_no_from = null;
+      l.carton_no_to = null;
       continue;
     }
 
-    // 이미 입력되어 있으면 그 범위를 기준으로 다음 cur을 밀어줌
-    const f = hasFrom ? n(l.carton_no_from, cur) : cur;
-    const t = hasTo ? n(l.carton_no_to, f + cartons - 1) : f + cartons - 1;
-    l.carton_no_from = f;
-    l.carton_no_to = t;
-    cur = t + 1;
+    l.carton_no_from = cur;
+    l.carton_no_to = cur + cartons - 1;
+    cur = l.carton_no_to + 1;
   }
 
   return next;
@@ -406,6 +362,7 @@ export default function PackingListDetailPage() {
   const [invoiceLink, setInvoiceLink] = React.useState<ShipmentLinkInvoice | null>(
     null
   );
+  const [autoCtnEnabled, setAutoCtnEnabled] = React.useState(true);
 
   // split LAST CTN
   const [splitOpen, setSplitOpen] = React.useState(false);
@@ -1473,6 +1430,20 @@ export default function PackingListDetailPage() {
         <Card>
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle>Lines</CardTitle>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="auto-ctn-no" className="text-sm text-muted-foreground">
+                Auto C/T No
+              </Label>
+              <Switch
+                id="auto-ctn-no"
+                checked={autoCtnEnabled}
+                onCheckedChange={(checked) => {
+                  setAutoCtnEnabled(checked);
+                  if (checked) setLines((prev) => autoFillCartonNos(prev));
+                }}
+                disabled={saving || exporting || !!header.is_deleted}
+              />
+            </div>
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="overflow-auto border rounded-md">
@@ -1506,20 +1477,22 @@ export default function PackingListDetailPage() {
                             <Input
                               className="w-[90px]"
                               value={isEmptyNumber(r.carton_no_from) ? "" : String(r.carton_no_from)}
-                              onChange={(e) =>
+                              onChange={(e) => {
+                                setAutoCtnEnabled(false);
                                 onLineChange(idx, {
                                   carton_no_from: e.target.value === "" ? null : n(e.target.value, 0),
-                                })
-                              }
+                                });
+                              }}
                             />
                             <Input
                               className="w-[90px]"
                               value={isEmptyNumber(r.carton_no_to) ? "" : String(r.carton_no_to)}
-                              onChange={(e) =>
+                              onChange={(e) => {
+                                setAutoCtnEnabled(false);
                                 onLineChange(idx, {
                                   carton_no_to: e.target.value === "" ? null : n(e.target.value, 0),
-                                })
-                              }
+                                });
+                              }}
                             />
                             <div className="text-xs text-muted-foreground self-center">{ct}</div>
                           </div>
@@ -1549,7 +1522,15 @@ export default function PackingListDetailPage() {
                                 Math.max(0, Math.round(baseQtyPerCtn)) *
                                 Math.max(0, nextCartons);
 
-                              onLineChange(idx, { cartons: nextCartons, qty: nextQty });
+                              setLines((prev) => {
+                                const next = prev.slice();
+                                next[idx] = recomputeLine({
+                                  ...next[idx],
+                                  cartons: nextCartons,
+                                  qty: nextQty,
+                                });
+                                return autoCtnEnabled ? autoFillCartonNos(next) : next;
+                              });
                             }}
                           />
                         </td>
@@ -1718,7 +1699,7 @@ export default function PackingListDetailPage() {
                                 setLines((prev) => {
                                   const next = prev.slice();
                                   next[idx] = { ...next[idx], is_deleted: !next[idx].is_deleted };
-                                  return next;
+                                  return autoCtnEnabled ? autoFillCartonNos(next) : next;
                                 })
                               }
                               disabled={saving || exporting || !!header.is_deleted}
