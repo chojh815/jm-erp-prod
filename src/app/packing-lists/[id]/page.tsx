@@ -385,6 +385,44 @@ function pickPerValue(r: any, base: "gw" | "nw" | "cbm"): number | null {
   return null;
 }
 
+async function resolveInvoiceInfoForPackingList(
+  header: PackingListHeader,
+  invoiceLink: ShipmentLinkInvoice | null
+) {
+  const invNo = s((header as any).invoice_no) || s(invoiceLink?.invoice_no);
+  let invDate =
+    fmtDate10((header as any).invoice_date ?? null) ||
+    fmtDate10((header as any).invoiceDate ?? null) ||
+    fmtDate10(invoiceLink?.invoice_date || null);
+
+  if (!invDate) {
+    const invoiceId = s((header as any).invoice_id) || s(invoiceLink?.id);
+    const qs = new URLSearchParams();
+    if (invoiceId) qs.set("id", invoiceId);
+    else if (invNo) qs.set("invoice_no", invNo);
+
+    if (qs.toString()) {
+      try {
+        const res = await fetch(`/api/invoices/detail?${qs.toString()}`, { cache: "no-store" });
+        const json = await res.json().catch(() => null);
+        if (res.ok && json?.success) {
+          invDate =
+            fmtDate10(json?.header?.invoice_date ?? null) ||
+            fmtDate10(json?.header?.invoiceDate ?? null) ||
+            invDate;
+        }
+      } catch (err) {
+        console.error("Failed to resolve packing list invoice date:", err);
+      }
+    }
+  }
+
+  return {
+    invoiceNo: invNo || "-",
+    invoiceDate: invDate || "-",
+  };
+}
+
 export default function PackingListDetailPage() {
   const role: AppRole = "admin";
   const params = useParams<{ id: string }>();
@@ -805,12 +843,9 @@ export default function PackingListDetailPage() {
       const packingNo = header.packing_list_no || "-";
       const packingDate = fmtDate10(header.packing_date) || "-";
 
-      const invNo = s((header as any).invoice_no) || s(invoiceLink?.invoice_no) || "-";
-      const invDate =
-        fmtDate10((header as any).invoice_date ?? null) ||
-        fmtDate10((header as any).invoiceDate ?? null) ||
-        fmtDate10(invoiceLink?.invoice_date || null) ||
-        "-";
+      const invoiceInfo = await resolveInvoiceInfoForPackingList(header, invoiceLink);
+      const invNo = invoiceInfo.invoiceNo;
+      const invDate = invoiceInfo.invoiceDate;
 
       const topH = 28;
       const row2H = 30;
@@ -1083,12 +1118,9 @@ export default function PackingListDetailPage() {
       const shipperAddr = s(header.shipper_address || "");
       const packingNo = s(header.packing_list_no) || "packing-list";
       const packingDate = fmtDate10(header.packing_date) || "-";
-      const invNo = s((header as any).invoice_no) || s(invoiceLink?.invoice_no) || "-";
-      const invDate =
-        fmtDate10((header as any).invoice_date ?? null) ||
-        fmtDate10((header as any).invoiceDate ?? null) ||
-        fmtDate10(invoiceLink?.invoice_date || null) ||
-        "-";
+      const invoiceInfo = await resolveInvoiceInfoForPackingList(header, invoiceLink);
+      const invNo = invoiceInfo.invoiceNo;
+      const invDate = invoiceInfo.invoiceDate;
       const consignee = s(header.consignee_text || "-");
       const notify = s(header.notify_party_text || "-");
       const portOfLoading = s(header.port_of_loading || "-");
