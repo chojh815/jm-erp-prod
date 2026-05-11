@@ -108,6 +108,49 @@ type ShipmentLinkInvoice = {
   status: string | null;
 };
 
+const PACKING_LIST_DRAFT_PREFIX = "jm-erp-packing-list-draft-v1";
+const PACKING_LIST_DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+type PackingListDraft = {
+  version: 1;
+  packingListId: string;
+  savedAt: string;
+  header: PackingListHeader;
+  lines: PackingListLine[];
+  autoCtnEnabled: boolean;
+};
+
+function packingListDraftKey(id: string) {
+  return `${PACKING_LIST_DRAFT_PREFIX}:${id}`;
+}
+
+function readPackingListDraft(id: string): PackingListDraft | null {
+  if (typeof window === "undefined" || !id) return null;
+  try {
+    const raw = window.localStorage.getItem(packingListDraftKey(id));
+    if (!raw) return null;
+
+    const draft = JSON.parse(raw) as Partial<PackingListDraft>;
+    const savedAtMs = Date.parse(String(draft.savedAt || ""));
+    const expired = !Number.isFinite(savedAtMs) || Date.now() - savedAtMs > PACKING_LIST_DRAFT_TTL_MS;
+    if (draft.version !== 1 || draft.packingListId !== id || expired || !draft.header || !Array.isArray(draft.lines)) {
+      window.localStorage.removeItem(packingListDraftKey(id));
+      return null;
+    }
+
+    return draft as PackingListDraft;
+  } catch (err) {
+    console.error("Failed to restore packing list draft:", err);
+    window.localStorage.removeItem(packingListDraftKey(id));
+    return null;
+  }
+}
+
+function removePackingListDraft(id: string) {
+  if (typeof window === "undefined" || !id) return;
+  window.localStorage.removeItem(packingListDraftKey(id));
+}
+
 function n(v: any, fallback = 0) {
   if (v === null || v === undefined || v === "") return fallback;
   const x = Number(v);
@@ -351,6 +394,7 @@ export default function PackingListDetailPage() {
   const searchParams = useSearchParams();
   const printedRef = React.useRef(false);
   const excelRanRef = React.useRef(false);
+  const draftReadyRef = React.useRef(false);
 
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -363,6 +407,7 @@ export default function PackingListDetailPage() {
     null
   );
   const [autoCtnEnabled, setAutoCtnEnabled] = React.useState(true);
+  const [draftReady, setDraftReady] = React.useState(false);
 
   // split LAST CTN
   const [splitOpen, setSplitOpen] = React.useState(false);
@@ -425,8 +470,18 @@ export default function PackingListDetailPage() {
         })
       );
 
-      setHeader(h);
-      setLines(ls);
+      const draft = readPackingListDraft(id);
+      if (draft) {
+        setHeader(draft.header);
+        setLines(draft.lines.map(recomputeLine));
+        setAutoCtnEnabled(draft.autoCtnEnabled ?? true);
+      } else {
+        setHeader(h);
+        setLines(ls);
+        setAutoCtnEnabled(true);
+      }
+      draftReadyRef.current = true;
+      setDraftReady(true);
 
       // shipment invoice link (for Invoice No/Date on header)
       if (h?.shipment_id) {
@@ -542,9 +597,17 @@ export default function PackingListDetailPage() {
       const json = await res.json();
       if (!res.ok || !json?.success) throw new Error(json?.error || "Save failed.");
 
+      removePackingListDraft(header.id);
+      draftReadyRef.current = false;
+      setDraftReady(false);
+
       setHeader(json.header);
 
       setLines((prev) => prev.map(recomputeLine));
+      window.setTimeout(() => {
+        draftReadyRef.current = true;
+        setDraftReady(true);
+      }, 0);
 
       alert("Saved.");
     } catch (e: any) {
@@ -554,6 +617,26 @@ export default function PackingListDetailPage() {
       setSaving(false);
     }
   }, [header, lines, totals]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!id || !header || !draftReady || !draftReadyRef.current) return;
+
+    const draft: PackingListDraft = {
+      version: 1,
+      packingListId: id,
+      savedAt: new Date().toISOString(),
+      header,
+      lines: lines.map(recomputeLine),
+      autoCtnEnabled,
+    };
+
+    try {
+      window.localStorage.setItem(packingListDraftKey(id), JSON.stringify(draft));
+    } catch (err) {
+      console.error("Failed to save packing list draft:", err);
+    }
+  }, [id, header, lines, autoCtnEnabled, draftReady]);
 
   const openSplitDialog = (idx: number) => {
     const l = lines[idx];
