@@ -8,7 +8,7 @@ try {
   const path = require("path");
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const fs = require("fs");
-  const fontPath = path.join(process.cwd(), "public", "fonts", "NotoSans-Regular.ttf");
+  const fontPath = path.join(process.cwd(), "public", "fonts", "NotoSansSC-Regular.ttf");
   if (fs.existsSync(fontPath)) {
     Font.register({ family: "NotoSans", src: fontPath });
   }

@@ -40,6 +40,8 @@ type ReceiptDetail = {
   invoice_no?: string | null;
   invoice_date?: string | null;
   invoice_total?: number;
+  invoice_paid?: number;
+  invoice_balance?: number;
   applied_amount?: number;
   writeoff_amount?: number;
   allocated_our_fee?: number;
@@ -122,10 +124,47 @@ function downloadText(filename: string, content: string, mime = "text/csv;charse
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
+function normalizeUnpaidInvoice(r: any): UnpaidInvoice {
+  return {
+    invoice_id: String(r.invoice_id ?? r.id),
+    invoice_no: String(r.invoice_no ?? r.no ?? ""),
+    invoice_date: (r.invoice_date ?? r.created_at ?? null) as any,
+    total_amount: toNum(r.total_amount),
+    received_amount: toNum(r.received_amount ?? r.paid_amount),
+    balance: toNum(r.balance ?? r.balance_amount),
+  };
+}
+
+function mergeReceiptDetailsIntoUnpaid(rows: UnpaidInvoice[], details: ReceiptDetail[]): UnpaidInvoice[] {
+  const byId = new Map(rows.map((r) => [r.invoice_id, r]));
+
+  for (const detail of details || []) {
+    const invoiceId = String(detail.invoice_id || "");
+    if (!invoiceId || byId.has(invoiceId)) continue;
+
+    const applied = toNum(detail.applied_amount);
+    const balance = toNum(detail.invoice_balance);
+    const total = toNum(detail.invoice_total);
+    const paid = toNum(detail.invoice_paid);
+
+    byId.set(invoiceId, {
+      invoice_id: invoiceId,
+      invoice_no: String(detail.invoice_no || ""),
+      invoice_date: detail.invoice_date ?? null,
+      total_amount: total,
+      received_amount: Math.max(0, round2(paid - applied)),
+      balance: round2(balance + applied),
+    });
+  }
+
+  return Array.from(byId.values());
+}
+
 export default function ReceiptsPage() {
   const role: DevRole = "admin" as DevRole;
   const router = useRouter();
   const supabase = React.useMemo(() => createSupabaseBrowserClient(), []);
+  const skipBuyerReloadRef = React.useRef(false);
 
   const [buyers, setBuyers] = React.useState<BuyerRow[]>([]);
   const [buyersLoading, setBuyersLoading] = React.useState(false);
@@ -154,6 +193,8 @@ export default function ReceiptsPage() {
   const [receipts, setReceipts] = React.useState<ReceiptRow[]>([]);
   const [receiptsLoading, setReceiptsLoading] = React.useState(false);
   const [deletingId, setDeletingId] = React.useState<string>("");
+  const [editingReceiptId, setEditingReceiptId] = React.useState<string>("");
+  const [loadingEditId, setLoadingEditId] = React.useState<string>("");
 
   const [saving, setSaving] = React.useState(false);
   const [lastSavedReceiptId, setLastSavedReceiptId] = React.useState<string>("");
@@ -284,6 +325,33 @@ export default function ReceiptsPage() {
     setApplyAmount({});
   }, []);
 
+  const fetchUnpaidInvoices = React.useCallback(async (bId: string) => {
+    const res = await fetch(`/api/receipts/bulk/unpaid?buyer_id=${encodeURIComponent(bId)}`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j?.error || `Failed to load unpaid invoices (${res.status})`);
+    }
+
+    const j = await res.json().catch(() => ({}));
+    const rows = (j?.items || j?.rows || j?.data || []) as any[];
+    return rows.map(normalizeUnpaidInvoice);
+  }, []);
+
+  const clearForm = React.useCallback(() => {
+    setEditingReceiptId("");
+    setTotalReceivedStr("");
+    setBankFeeStr("0.00");
+    setBuyerBankFeeStr("0.00");
+    setClaimDeductionStr("0.00");
+    setReferenceNo("");
+    setNote("");
+    resetApply();
+  }, [resetApply]);
+
   const loadUnpaid = React.useCallback(
     async (bId: string) => {
       if (!bId) {
@@ -295,28 +363,7 @@ export default function ReceiptsPage() {
       setUnpaidLoading(true);
       setErrorMsg("");
       try {
-        const res = await fetch(`/api/receipts/bulk/unpaid?buyer_id=${encodeURIComponent(bId)}`, {
-          method: "GET",
-          cache: "no-store",
-        });
-
-        if (!res.ok) {
-          const j = await res.json().catch(() => ({}));
-          throw new Error(j?.error || `Failed to load unpaid invoices (${res.status})`);
-        }
-
-        const j = await res.json().catch(() => ({}));
-        const rows = (j?.items || j?.rows || j?.data || []) as any[];
-        setUnpaid(
-          rows.map((r) => ({
-            invoice_id: String(r.invoice_id ?? r.id),
-            invoice_no: String(r.invoice_no ?? r.no ?? ""),
-            invoice_date: (r.invoice_date ?? r.created_at ?? null) as any,
-            total_amount: toNum(r.total_amount),
-            received_amount: toNum(r.received_amount ?? r.paid_amount),
-            balance: toNum(r.balance ?? r.balance_amount),
-          }))
-        );
+        setUnpaid(await fetchUnpaidInvoices(bId));
         resetApply();
       } catch (e: any) {
         console.error(e);
@@ -327,7 +374,7 @@ export default function ReceiptsPage() {
         setUnpaidLoading(false);
       }
     },
-    [resetApply]
+    [fetchUnpaidInvoices, resetApply]
   );
 
   const loadReceipts = React.useCallback(async (bId: string) => {
@@ -359,6 +406,10 @@ export default function ReceiptsPage() {
   }, [loadBuyers, loadBanks]);
 
   React.useEffect(() => {
+    if (skipBuyerReloadRef.current) {
+      skipBuyerReloadRef.current = false;
+      return;
+    }
     void loadUnpaid(buyerId);
     void loadReceipts(buyerId);
   }, [buyerId, loadUnpaid, loadReceipts]);
@@ -488,6 +539,73 @@ export default function ReceiptsPage() {
     resetApply();
   }, [resetApply]);
 
+  const onCancelEdit = React.useCallback(() => {
+    setOkMsg("");
+    setErrorMsg("");
+    clearForm();
+    void Promise.all([loadUnpaid(buyerId), loadReceipts(buyerId)]);
+  }, [buyerId, clearForm, loadUnpaid, loadReceipts]);
+
+  const onEditReceipt = React.useCallback(async (receiptId: string) => {
+    if (!receiptId) return;
+
+    setLoadingEditId(receiptId);
+    setErrorMsg("");
+    setOkMsg("");
+    try {
+      const res = await fetch(`/api/receipts/${encodeURIComponent(receiptId)}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load receipt (${res.status})`);
+
+      const row = (j?.row || {}) as ReceiptRow;
+      const nextBuyerId = String(row.buyer_id || "");
+      if (!nextBuyerId) throw new Error("Receipt buyer is missing.");
+
+      const details = Array.isArray(row.details) ? row.details : [];
+      const baseUnpaid = await fetchUnpaidInvoices(nextBuyerId);
+      const mergedUnpaid = mergeReceiptDetailsIntoUnpaid(baseUnpaid, details);
+
+      const nextSelected: Record<string, boolean> = {};
+      const nextApplyAmount: Record<string, string> = {};
+      for (const detail of details) {
+        const invoiceId = String(detail.invoice_id || "");
+        const applied = round2(toNum(detail.applied_amount));
+        if (!invoiceId || applied <= 0) continue;
+        nextSelected[invoiceId] = true;
+        nextApplyAmount[invoiceId] = fmt2(applied);
+      }
+
+      if (nextBuyerId !== buyerId) {
+        skipBuyerReloadRef.current = true;
+        setBuyerId(nextBuyerId);
+      }
+      setEditingReceiptId(receiptId);
+      setBankAccountId(String((row as any).bank_account_id || ""));
+      setDepositDate(shortDate(row.deposit_date || row.receipt_date) || todayISODate());
+      setTotalReceivedStr(fmt2(toNum(row.total_received ?? row.received_amount)));
+      setBankFeeStr(fmt2(toNum(row.bank_fee_amount)));
+      setBuyerBankFeeStr(fmt2(toNum(row.buyer_bank_fee_amount)));
+      setClaimDeductionStr(fmt2(toNum(row.claim_deduction_amount)));
+      setMethod(String(row.method || "WIRE"));
+      setReferenceNo(String(row.reference_no || ""));
+      setNote(String(row.note || ""));
+      setUnpaid(mergedUnpaid);
+      setSelected(nextSelected);
+      setApplyAmount(nextApplyAmount);
+      setOkMsg("Receipt loaded for edit.");
+      void loadReceipts(nextBuyerId);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e: any) {
+      console.error(e);
+      setErrorMsg(e?.message || "Failed to load receipt");
+    } finally {
+      setLoadingEditId("");
+    }
+  }, [buyerId, fetchUnpaidInvoices, loadReceipts]);
+
   const allocateFromTotal = React.useCallback(() => {
     const selectedInvoices = unpaid.filter((u) => selected[u.invoice_id]);
     if (selectedInvoices.length === 0) return;
@@ -539,8 +657,12 @@ export default function ReceiptsPage() {
         allocations,
       };
 
-      const res = await fetch("/api/receipts/bulk/apply", {
-        method: "POST",
+      const res = await fetch(
+        editingReceiptId
+          ? `/api/receipts/${encodeURIComponent(editingReceiptId)}`
+          : "/api/receipts/bulk/apply",
+        {
+        method: editingReceiptId ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -556,19 +678,10 @@ export default function ReceiptsPage() {
 
       if (savedId) {
         setLastSavedReceiptId(savedId);
-        try {
-          window.open(`/receipts/${savedId}/pdf`, "_blank", "noopener,noreferrer");
-        } catch {}
       }
 
-      setOkMsg("Saved.");
-      setTotalReceivedStr("");
-      setBankFeeStr("0.00");
-      setBuyerBankFeeStr("0.00");
-      setClaimDeductionStr("0.00");
-      setReferenceNo("");
-      setNote("");
-      resetApply();
+      setOkMsg(editingReceiptId ? "Updated." : "Saved.");
+      clearForm();
       await Promise.all([loadUnpaid(buyerId), loadReceipts(buyerId)]);
     } catch (e: any) {
       console.error(e);
@@ -576,7 +689,7 @@ export default function ReceiptsPage() {
     } finally {
       setSaving(false);
     }
-  }, [buyerId, totalReceived, netReceived, hasMismatch, appliedTotal, unpaid, applyAmount, bankAccountId, depositDate, bankFee, buyerBankFee, claimDeduction, method, referenceNo, note, resetApply, loadUnpaid, loadReceipts]);
+  }, [buyerId, totalReceived, netReceived, hasMismatch, appliedTotal, unpaid, applyAmount, bankAccountId, depositDate, bankFee, buyerBankFee, claimDeduction, method, referenceNo, note, editingReceiptId, clearForm, loadUnpaid, loadReceipts]);
 
   const onDeleteReceipt = React.useCallback(async (receiptId: string) => {
     if (!receiptId) return;
@@ -608,8 +721,13 @@ export default function ReceiptsPage() {
       <div className="p-4 space-y-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-3">
-            <CardTitle>Receipts (Bulk Apply)</CardTitle>
+            <CardTitle>{editingReceiptId ? "Edit Receipt" : "Receipts (Bulk Apply)"}</CardTitle>
             <div className="flex items-center gap-2">
+              {editingReceiptId && (
+                <Button type="button" variant="secondary" onClick={onCancelEdit} disabled={saving}>
+                  Cancel Edit
+                </Button>
+              )}
               <Button variant="secondary" onClick={exportExcelCSV} disabled={!buyerId}>
                 Export Excel (CSV)
               </Button>
@@ -622,7 +740,7 @@ export default function ReceiptsPage() {
                 PDF
               </Button>
               <Button onClick={onSave} disabled={!canSave}>
-                {saving ? "Saving..." : "Save Deposit"}
+                {saving ? "Saving..." : editingReceiptId ? "Update Receipt" : "Save Deposit"}
               </Button>
             </div>
           </CardHeader>
@@ -638,8 +756,11 @@ export default function ReceiptsPage() {
                 <select
                   className="w-full border rounded-md h-10 px-2 text-sm"
                   value={buyerId}
-                  onChange={(e) => setBuyerId(e.target.value)}
-                  disabled={buyersLoading}
+                  onChange={(e) => {
+                    if (editingReceiptId) clearForm();
+                    setBuyerId(e.target.value);
+                  }}
+                  disabled={buyersLoading || !!editingReceiptId}
                 >
                   <option value="">{buyersLoading ? "Loading..." : "Select buyer"}</option>
                   {buyers.map((b) => (
@@ -840,7 +961,7 @@ export default function ReceiptsPage() {
                       <th className="text-right p-2 min-w-[110px]">Settled</th>
                       <th className="text-center p-2 min-w-[100px]">Invoices</th>
                       <th className="text-left p-2 min-w-[180px]">Note</th>
-                      <th className="text-center p-2 min-w-[160px]">Action</th>
+                      <th className="text-center p-2 min-w-[260px]">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -873,6 +994,14 @@ export default function ReceiptsPage() {
                             <td className="p-2">{row.note || "-"}</td>
                             <td className="p-2">
                               <div className="flex justify-center gap-2">
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  onClick={() => onEditReceipt(row.id)}
+                                  disabled={loadingEditId === row.id || saving}
+                                >
+                                  {loadingEditId === row.id ? "Loading..." : "Edit"}
+                                </Button>
                                 <Button type="button" variant="secondary" onClick={() => openReceiptPdf(row.id)}>
                                   PDF
                                 </Button>
