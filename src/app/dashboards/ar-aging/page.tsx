@@ -49,6 +49,7 @@ type AgingRow = {
 
 type OverdueInvoiceRow = {
   invoice_id: string | null;
+  buyer_id?: string | null;
   buyer_name: string | null;
   buyer_code: string | null;
   invoice_no: string | null;
@@ -70,6 +71,7 @@ type ResponseShape = {
   };
   buckets: AgingBuckets;
   rows: AgingRow[];
+  outstanding_invoices?: OverdueInvoiceRow[];
   top_overdue_invoices: OverdueInvoiceRow[];
   meta?: {
     detail_row_count?: number;
@@ -165,6 +167,7 @@ export default function ArAgingDashboardPage() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [data, setData] = React.useState<ResponseShape | null>(null);
+  const [selectedBuyer, setSelectedBuyer] = React.useState<AgingRow | null>(null);
 
   function syncUrl(next: {
     preset?: DatePreset;
@@ -264,7 +267,14 @@ export default function ArAgingDashboardPage() {
       });
 
     fetchJSON<ResponseShape>(`/api/dashboards/ar-aging${q}`, ac.signal)
-      .then((raw) => setData(raw))
+      .then((raw) => {
+        setData(raw);
+        setSelectedBuyer((prev) => {
+          if (!prev) return null;
+          const next = (raw.rows || []).find((r) => r.key === prev.key || (prev.buyer_id && r.buyer_id === prev.buyer_id));
+          return next || null;
+        });
+      })
       .catch((e: any) => {
         if (e?.name === "AbortError") return;
         const msg = String(e?.message ?? e ?? "");
@@ -683,7 +693,13 @@ export default function ArAgingDashboardPage() {
               <CardTitle className="text-base">A/R Aging by Buyer</CardTitle>
             </CardHeader>
             <CardContent>
-              <AgingTable rows={data?.rows || []} loading={loading} groupBy={groupBy} onOpenBuyer={openBuyerAging} />
+              <AgingTable
+                rows={data?.rows || []}
+                loading={loading}
+                groupBy={groupBy}
+                selectedBuyerKey={selectedBuyer?.key}
+                onSelectBuyer={(row) => setSelectedBuyer((prev) => (prev?.key === row.key ? null : row))}
+              />
             </CardContent>
           </Card>
 
@@ -696,6 +712,31 @@ export default function ArAgingDashboardPage() {
             </CardContent>
           </Card>
         </div>
+
+        {selectedBuyer ? (
+          <Card className="rounded-2xl">
+            <CardHeader className="pb-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <CardTitle className="text-base">
+                  Outstanding Invoices - {selectedBuyer.buyer_name || selectedBuyer.buyer_code || selectedBuyer.key}
+                </CardTitle>
+                <Button type="button" variant="secondary" onClick={() => setSelectedBuyer(null)}>
+                  Close
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <BuyerInvoiceTable
+                rows={(data?.outstanding_invoices || []).filter((r) => {
+                  if (selectedBuyer.buyer_id && r.buyer_id) return r.buyer_id === selectedBuyer.buyer_id;
+                  return normalizeBuyerKey(r.buyer_name || r.buyer_code) === normalizeBuyerKey(selectedBuyer.buyer_name || selectedBuyer.buyer_code);
+                })}
+                loading={loading}
+                onOpenInvoice={openInvoice}
+              />
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
     </AppShell>
   );
@@ -730,12 +771,14 @@ function AgingTable({
   rows,
   loading,
   groupBy,
-  onOpenBuyer,
+  selectedBuyerKey,
+  onSelectBuyer,
 }: {
   rows: AgingRow[];
   loading: boolean;
   groupBy: GroupBy;
-  onOpenBuyer?: (name?: string | null, code?: string | null, buyerId?: string | null) => void;
+  selectedBuyerKey?: string | null;
+  onSelectBuyer?: (row: AgingRow) => void;
 }) {
   if (loading) return <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">Loading…</div>;
   if (!rows.length) return <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">No outstanding A/R found.</div>;
@@ -757,12 +800,12 @@ function AgingTable({
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.key} className="border-b last:border-0 hover:bg-muted/20">
+            <tr key={r.key} className={`border-b last:border-0 hover:bg-muted/20 ${selectedBuyerKey === r.key ? "bg-blue-50/70" : ""}`}>
               <td className="p-2">
                 <button
                   type="button"
                   className="text-left"
-                  onClick={() => onOpenBuyer?.(r.buyer_name, r.buyer_code, r.buyer_id)}
+                  onClick={() => onSelectBuyer?.(r)}
                   disabled={!r.buyer_id && !r.buyer_name && !r.buyer_code}
                 >
                   <div className={`font-medium ${(r.buyer_id || r.buyer_name || r.buyer_code) ? "text-blue-600 hover:underline" : ""}`}>
@@ -778,6 +821,69 @@ function AgingTable({
               <td className={bucketCellClass(r.b90_plus, "red")}>{fmtMoneyUSD(r.b90_plus)}</td>
               <td className="p-2 text-right font-semibold">{fmtMoneyUSD(r.total)}</td>
               <td className="p-2 text-right">{r.invoice_count.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BuyerInvoiceTable({
+  rows,
+  loading,
+  onOpenInvoice,
+}: {
+  rows: OverdueInvoiceRow[];
+  loading: boolean;
+  onOpenInvoice?: (invoiceId?: string | null, invoiceNo?: string | null) => void;
+}) {
+  if (loading) return <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">Loading...</div>;
+  if (!rows.length) return <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">No outstanding invoices.</div>;
+
+  const sorted = [...rows].sort((a, b) => {
+    const overdue = (b.overdue_days || 0) - (a.overdue_days || 0);
+    return overdue || (b.balance_usd || 0) - (a.balance_usd || 0);
+  });
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b bg-muted/30">
+            <th className="p-2 text-left">Invoice</th>
+            <th className="p-2 text-left">Invoice Date</th>
+            <th className="p-2 text-left">Due Date</th>
+            <th className="p-2 text-right">Term</th>
+            <th className="p-2 text-right">Days</th>
+            <th className="p-2 text-right">Balance</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, idx) => (
+            <tr key={`${r.invoice_id || r.invoice_no || "row"}-${idx}`} className="border-b last:border-0 hover:bg-muted/20">
+              <td className="p-2">
+                {r.invoice_no ? (
+                  <button
+                    type="button"
+                    className="font-medium text-blue-600 hover:underline"
+                    onClick={() => onOpenInvoice?.(r.invoice_id, r.invoice_no)}
+                  >
+                    {r.invoice_no}
+                  </button>
+                ) : (
+                  <span className="font-medium">-</span>
+                )}
+              </td>
+              <td className="p-2">{r.invoice_date || "-"}</td>
+              <td className="p-2">{r.due_date || "-"}</td>
+              <td className="p-2 text-right">{r.payment_term_days ? `${r.payment_term_days}d` : "-"}</td>
+              <td className="p-2 text-right">
+                <span className={`inline-flex rounded-full border px-2 py-1 text-xs font-medium ${riskBadge(r.overdue_days)}`}>
+                  {r.overdue_days > 0 ? `+${r.overdue_days}` : r.overdue_days}
+                </span>
+              </td>
+              <td className="p-2 text-right font-semibold">{fmtMoneyUSD(r.balance_usd)}</td>
             </tr>
           ))}
         </tbody>

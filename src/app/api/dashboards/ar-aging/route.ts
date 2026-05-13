@@ -600,6 +600,7 @@ export async function GET(req: Request) {
         invoice_count: summary.invoice_count,
       },
       rows,
+      outstanding_invoices: detailRows,
       top_overdue_invoices: topOverdueInvoices,
       meta: {
         detail_row_count: detailRows.length,
