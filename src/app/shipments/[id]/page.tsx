@@ -173,7 +173,7 @@ export default function ShipmentDetailPage() {
   const [linkedPackingList, setLinkedPackingList] = React.useState<any>(null);
   const [creatingPackingList, setCreatingPackingList] = React.useState(false);
 
-  const currentStatus = (editMode ? draftShipment?.status : shipment?.status ?? "")
+  const currentStatus = ((editMode ? draftShipment?.status : shipment?.status) ?? "")
     .toString()
     .toUpperCase();
 
@@ -452,6 +452,12 @@ export default function ShipmentDetailPage() {
     .toUpperCase();
 
   const enterEditMode = () => {
+    if (isInvoiceLinked || isPlLinked) {
+      alert(
+        "This shipment is already linked to an invoice or packing list. Delete the linked document first, then edit the shipment."
+      );
+      return;
+    }
     setDraftShipment(shipment);
     setDraftLines(lines as any);
     setEditMode(true);

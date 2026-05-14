@@ -29,6 +29,37 @@ function num(v: any, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
+function isTempSplitId(v: any) {
+  return s(v).includes("__split__");
+}
+function sourceIdFromTempSplit(v: any) {
+  return s(v).split("__split__")[0] || "";
+}
+function round2(v: number) {
+  return Math.round((v + Number.EPSILON) * 100) / 100;
+}
+function round1(v: number) {
+  return Math.round((v + Number.EPSILON) * 10) / 10;
+}
+function proportionalAmount(params: {
+  qty: number;
+  sourceLine: any;
+  poLine?: any | null;
+}) {
+  const poQty = num(pickFirst(params.poLine, ["qty", "order_qty", "quantity"]), 0);
+  const poAmount = num(pickFirst(params.poLine, ["amount"]), NaN);
+  if (Number.isFinite(poAmount) && poQty > 0) {
+    return round2((poAmount * params.qty) / poQty);
+  }
+  return round2(params.qty * num(pickFirst(params.poLine, ["unit_price", "price"]), num(params.sourceLine?.unit_price, 0)));
+}
+function proportionalMetric(value: any, ratio: number, digits: 0 | 1 | 2 = 1) {
+  const n0 = num(value, 0);
+  const raw = n0 * ratio;
+  if (digits === 0) return Math.round(raw);
+  if (digits === 2) return round2(raw);
+  return round1(raw);
+}
 
 function inferSiteFromOriginCode(code: string | null | undefined) {
   const c = s(code).toUpperCase();
@@ -249,6 +280,205 @@ export async function GET(
       lines: normalized,
       _debug: lineErrMsg ? { shipment_lines_join_error: lineErrMsg } : undefined,
     });
+  } catch (e: any) {
+    return bad(e?.message || "Unknown error", 500);
+  }
+}
+
+export async function PUT(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const id = s(params?.id);
+    if (!id) return bad("Missing shipment id", 400);
+
+    const body = await req.json().catch(() => ({}));
+    const shipmentIn = body?.shipment && typeof body.shipment === "object" ? body.shipment : {};
+    const linesIn: any[] = Array.isArray(body?.lines) ? body.lines : [];
+
+    const { data: shipment, error: shipErr } = await supabaseAdmin
+      .from("shipments")
+      .select("*")
+      .eq("id", id)
+      .eq("is_deleted", false)
+      .maybeSingle();
+
+    if (shipErr) return bad(`Failed to load shipment: ${shipErr.message}`, 500);
+    if (!shipment) return bad("Shipment not found", 404);
+
+    const status = s((shipment as any).status).toUpperCase();
+    if (["CANCELLED", "CANCELED", "DELETED"].includes(status)) {
+      return bad("Cancelled or deleted shipments cannot be edited.", 409);
+    }
+
+    const { data: invoices, error: invErr } = await supabaseAdmin
+      .from("invoice_headers")
+      .select("id, invoice_no")
+      .eq("shipment_id", id)
+      .eq("is_deleted", false)
+      .limit(1);
+
+    if (invErr) return bad(invErr.message, 500);
+    if ((invoices || []).length > 0) {
+      return bad("Shipment cannot be edited because an invoice is already linked.", 409, {
+        invoice: invoices?.[0] ?? null,
+      });
+    }
+
+    const { data: packingLists, error: plErr } = await supabaseAdmin
+      .from("packing_list_headers")
+      .select("id, packing_list_no")
+      .eq("shipment_id", id)
+      .eq("is_deleted", false)
+      .limit(1);
+
+    if (plErr) return bad(plErr.message, 500);
+    if ((packingLists || []).length > 0) {
+      return bad("Shipment cannot be edited because a packing list is already linked.", 409, {
+        packing_list: packingLists?.[0] ?? null,
+      });
+    }
+
+    const { data: existingLines, error: lineErr } = await supabaseAdmin
+      .from("shipment_lines")
+      .select("*")
+      .eq("shipment_id", id)
+      .eq("is_deleted", false);
+
+    if (lineErr) return bad(lineErr.message, 500);
+
+    const existingById = new Map<string, any>();
+    const poLineIds = new Set<string>();
+    for (const line of existingLines || []) {
+      const lineId = s((line as any).id);
+      if (lineId) existingById.set(lineId, line);
+      const poLineId = s((line as any).po_line_id);
+      if (poLineId) poLineIds.add(poLineId);
+    }
+
+    const { data: poLines, error: poErr } =
+      poLineIds.size > 0
+        ? await supabaseAdmin
+            .from("po_lines")
+            .select("id, qty, order_qty, quantity, unit_price, price, amount")
+            .in("id", Array.from(poLineIds))
+        : { data: [], error: null as any };
+
+    if (poErr) return bad(poErr.message, 500);
+    const poLineById = new Map<string, any>();
+    for (const row of poLines || []) poLineById.set(s((row as any).id), row);
+
+    const sourceRowsById = new Map<string, any[]>();
+    for (const row of linesIn) {
+      const rawId = s(row?.id);
+      const sourceId = isTempSplitId(rawId) ? sourceIdFromTempSplit(rawId) : rawId;
+      if (!sourceId || !existingById.has(sourceId)) continue;
+      if (!sourceRowsById.has(sourceId)) sourceRowsById.set(sourceId, []);
+      sourceRowsById.get(sourceId)!.push(row);
+    }
+
+    const now = new Date().toISOString();
+
+    for (const [sourceId, rows] of sourceRowsById.entries()) {
+      const source = existingById.get(sourceId);
+      if (!source) continue;
+
+      const originalQty = num(source.shipped_qty ?? source.qty, 0);
+      const requestedQty = rows.reduce(
+        (sum: number, row: any) =>
+          sum + (Boolean(row?.is_deleted) ? 0 : Math.max(0, num(row?.qty ?? row?.shipped_qty, 0))),
+        0
+      );
+      if (requestedQty > originalQty) {
+        return bad("Edited shipment qty cannot exceed the original shipment qty.", 409, {
+          shipment_line_id: sourceId,
+          original_qty: originalQty,
+          requested_qty: requestedQty,
+        });
+      }
+
+      const poLine = poLineById.get(s(source.po_line_id)) ?? null;
+
+      for (const row of rows) {
+        const rawId = s(row?.id);
+        const nextQty = Math.max(0, num(row?.qty ?? row?.shipped_qty, 0));
+        const isDeleted = Boolean(row?.is_deleted) || nextQty <= 0;
+        const ratio = originalQty > 0 ? nextQty / originalQty : 0;
+        const nextAmount = isDeleted ? 0 : proportionalAmount({ qty: nextQty, sourceLine: source, poLine });
+
+        const linePatch: any = {
+          shipped_qty: nextQty,
+          amount: nextAmount,
+          cartons: proportionalMetric(source.cartons, ratio, 0),
+          gw: proportionalMetric(source.gw, ratio, 1),
+          nw: proportionalMetric(source.nw, ratio, 1),
+          is_deleted: isDeleted,
+          updated_at: now,
+        };
+
+        if (isTempSplitId(rawId)) {
+          if (isDeleted) continue;
+          const newLine = {
+            ...source,
+            id: undefined,
+            created_at: undefined,
+            updated_at: now,
+            shipped_qty: nextQty,
+            amount: nextAmount,
+            cartons: linePatch.cartons,
+            gw: linePatch.gw,
+            nw: linePatch.nw,
+            is_deleted: false,
+          };
+
+          delete (newLine as any).id;
+          delete (newLine as any).created_at;
+
+          const { error: insErr } = await supabaseAdmin.from("shipment_lines").insert(newLine);
+          if (insErr) return bad(insErr.message, 500);
+        } else {
+          const { error: upErr } = await supabaseAdmin
+            .from("shipment_lines")
+            .update(linePatch)
+            .eq("id", sourceId)
+            .eq("shipment_id", id);
+
+          if (upErr) return bad(upErr.message, 500);
+        }
+      }
+    }
+
+    const headerPatch: any = {
+      updated_at: now,
+    };
+    const shipMode = s(shipmentIn.ship_mode ?? shipmentIn.shipMode);
+    if (shipMode) headerPatch.ship_mode = shipMode.toUpperCase();
+    if (s(shipmentIn.carrier)) headerPatch.carrier = s(shipmentIn.carrier);
+    if (s(shipmentIn.tracking_no)) headerPatch.tracking_no = s(shipmentIn.tracking_no);
+
+    const { data: currentLines, error: currentErr } = await supabaseAdmin
+      .from("shipment_lines")
+      .select("cartons, gw, nw")
+      .eq("shipment_id", id)
+      .eq("is_deleted", false);
+
+    if (currentErr) return bad(currentErr.message, 500);
+
+    headerPatch.total_cartons = (currentLines || []).reduce((sum: number, line: any) => sum + num(line.cartons, 0), 0);
+    headerPatch.total_gw = round1((currentLines || []).reduce((sum: number, line: any) => sum + num(line.gw, 0), 0));
+    headerPatch.total_nw = round1((currentLines || []).reduce((sum: number, line: any) => sum + num(line.nw, 0), 0));
+
+    const { data: updatedShipment, error: headerErr } = await supabaseAdmin
+      .from("shipments")
+      .update(headerPatch)
+      .eq("id", id)
+      .select("*")
+      .single();
+
+    if (headerErr) return bad(headerErr.message, 500);
+
+    return ok({ shipment: updatedShipment });
   } catch (e: any) {
     return bad(e?.message || "Unknown error", 500);
   }
