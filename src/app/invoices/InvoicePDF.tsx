@@ -219,6 +219,13 @@ function fmtNum(v: number | null | undefined, digits = 2) {
     return String(v);
   }
 }
+function hasThreeDecimalUnitPrice(v: number | null | undefined) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return false;
+  const rounded3 = Math.round((n + Number.EPSILON) * 1000) / 1000;
+  const rounded2 = Math.round((n + Number.EPSILON) * 100) / 100;
+  return Math.abs(rounded3 - rounded2) > 0.0000001;
+}
 function toNum(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -261,6 +268,11 @@ function formatOriginText(originCode: string | null | undefined) {
 
 export default function InvoicePDF({ header, lines }: Props) {
   const safeLines = (lines ?? []).filter((x) => !x?.is_deleted);
+  const unitPriceDigits = safeLines.some((line) =>
+    hasThreeDecimalUnitPrice(line.unit_price)
+  )
+    ? 3
+    : 2;
 
   // ===== Material/HS 표시 규칙 (PI처럼 “필요할 때만”)
   const ldc = isLdcBuyer(header);
@@ -433,7 +445,7 @@ export default function InvoicePDF({ header, lines }: Props) {
 
                 <Text style={[styles.td, { width: W.qty, textAlign: "right" }]}>{fmtNum(r.qty, 0)}</Text>
                 <Text style={[styles.td, { width: W.uom, textAlign: "center" }]}>{r.uom ?? "PCS"}</Text>
-                <Text style={[styles.td, { width: W.unit, textAlign: "right" }]}>{fmtNum(r.unit_price, 2)}</Text>
+                <Text style={[styles.td, { width: W.unit, textAlign: "right" }]}>{fmtNum(r.unit_price, unitPriceDigits)}</Text>
                 <Text style={[styles.td, { width: W.amt, textAlign: "right" }]}>{fmtNum(r.amount, 2)}</Text>
               </View>
             ))

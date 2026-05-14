@@ -263,6 +263,7 @@ React.useEffect(() => {
   // ✅ Track the loaded PO identity to prevent accidental overwrite when PO No changes
   const loadedPoNoRef = React.useRef<string | null>(null);
   const loadedHeaderIdRef = React.useRef<string | null>(null);
+  const loadedLineSnapshotRef = React.useRef<Record<string, { qty: number; unitPrice: number }>>({});
 
   const [orderType, setOrderType] = React.useState<OrderType>("NEW");
   const [status, setStatus] = React.useState<POStatus>("DRAFT");
@@ -487,6 +488,83 @@ const hasAnyShipped = React.useMemo(() => {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
+  };
+
+  const hasThreeDecimalUnitPrice = (v: number | null | undefined) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return false;
+    const rounded3 = Math.round((n + Number.EPSILON) * 1000) / 1000;
+    const rounded2 = Math.round((n + Number.EPSILON) * 100) / 100;
+    return Math.abs(rounded3 - rounded2) > 0.0000001;
+  };
+
+  const formatUnitPrice = (v: number | null | undefined, forceThreeDecimals = false) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n === 0) return "";
+    const digits = forceThreeDecimals || hasThreeDecimalUnitPrice(n) ? 3 : 2;
+    return (Math.round((n + Number.EPSILON) * 1000) / 1000).toLocaleString("en-US", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+  };
+
+  const snapshotPoLines = (rows: POLine[]) => {
+    const out: Record<string, { qty: number; unitPrice: number }> = {};
+    for (const row of rows || []) {
+      if (!row.id) continue;
+      out[String(row.id)] = {
+        qty: Number(row.qty || 0),
+        unitPrice: Number(row.unitPrice || 0),
+      };
+    }
+    return out;
+  };
+
+  const didQtyOrUnitPriceChange = (rows: POLine[]) => {
+    const before = loadedLineSnapshotRef.current || {};
+    if (!Object.keys(before).length) return false;
+
+    for (const row of rows || []) {
+      const prev = before[String(row.id || "")];
+      if (!prev) continue;
+      if (Number(row.qty || 0) !== Number(prev.qty || 0)) return true;
+      if (Math.abs(Number(row.unitPrice || 0) - Number(prev.unitPrice || 0)) > 0.000001) return true;
+    }
+    return false;
+  };
+
+  const getIssuedDocumentImpact = async (targetPoNo: string) => {
+    const po = String(targetPoNo || "").trim();
+    if (!po) return { proformas: 0, invoices: 0 };
+
+    const [piRes, invLineRes] = await Promise.allSettled([
+      supabase
+        .from("proforma_headers")
+        .select("id, invoice_no")
+        .eq("po_no", po)
+        .eq("is_deleted", false),
+      supabase
+        .from("invoice_lines")
+        .select("invoice_header_id")
+        .eq("po_no", po)
+        .eq("is_deleted", false),
+    ]);
+
+    const proformas =
+      piRes.status === "fulfilled" && !piRes.value.error
+        ? (piRes.value.data || []).length
+        : 0;
+
+    let invoices = 0;
+    if (invLineRes.status === "fulfilled" && !invLineRes.value.error) {
+      invoices = new Set(
+        (invLineRes.value.data || [])
+          .map((row: any) => String(row.invoice_header_id || "").trim())
+          .filter(Boolean)
+      ).size;
+    }
+
+    return { proformas, invoices };
   };
 
   const updateLine = (id: string, patch: Partial<POLine>) =>
@@ -1337,6 +1415,7 @@ const fetchPoList = React.useCallback(
     setPoHeaderId(null);
     loadedPoNoRef.current = null;
     loadedHeaderIdRef.current = null;
+    loadedLineSnapshotRef.current = {};
     setOrderType("NEW");
     setStatus("DRAFT");
     setBuyerId("");
@@ -1577,6 +1656,7 @@ const mappedLines: POLine[] = apiLines.map((row: any) =>
         setLines(
           mappedLines.length ? mappedLines : [makeEmptyLine()]
         );
+        loadedLineSnapshotRef.current = snapshotPoLines(mappedLines);
 
         // 기존 PO를 열었다면 임시 Draft는 필요 없으니 삭제
         if (typeof window !== "undefined") {
@@ -1865,6 +1945,7 @@ const handleDuplicateAsNew = async () => {
     setPoHeaderId(null);
     loadedPoNoRef.current = null;
     loadedHeaderIdRef.current = null;
+    loadedLineSnapshotRef.current = {};
 
     setPoNo(nextPoNo.trim());
     setStatus("DRAFT");
@@ -2039,6 +2120,25 @@ if (targetStatus === "CANCELLED" && hasAnyShipped) {
   );
   return;
 }
+
+    const isLoadedExistingPo = !!(poHeaderId || loadedHeaderIdRef.current);
+    const changedCommercialValues = isLoadedExistingPo && didQtyOrUnitPriceChange(linesToSave);
+    if (changedCommercialValues) {
+      const impact = await getIssuedDocumentImpact(poNo);
+      if (impact.proformas > 0 || impact.invoices > 0) {
+        const message =
+          `This PO already has issued documents.\n\n` +
+          `Proforma Invoice: ${impact.proformas}\n` +
+          `Commercial Invoice: ${impact.invoices}\n\n` +
+          `You changed Order Qty or Unit Price. Existing PI/Invoice will NOT update automatically.\n\n` +
+          `After saving:\n` +
+          `- Re-create Proforma Invoice to update PI.\n` +
+          `- Delete and create the Commercial Invoice again if invoice values must change.\n\n` +
+          `Save PO changes anyway?`;
+        if (!window.confirm(message)) return;
+      }
+    }
+
     const nowIso = new Date().toISOString();
 
     const todayStr = new Date().toISOString().slice(0, 10);
@@ -2218,6 +2318,7 @@ if (resolvedPoNo) {
       if (data?.headerId || data?.header_id) {
         setPoHeaderId(String(data.headerId ?? data.header_id));
       }
+      loadedLineSnapshotRef.current = snapshotPoLines(linesToSave);
 
       // ✅ 저장 성공 시 Draft 삭제
       if (typeof window !== "undefined") {
@@ -2352,6 +2453,11 @@ if (!buyerId) {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
+    const forceThreeDecimalUnitPrice = lines.some((line) =>
+      hasThreeDecimalUnitPrice(line.unitPrice)
+    );
+    const fmtUnit = (v: number) =>
+      formatUnitPrice(v, forceThreeDecimalUnitPrice) || fmt(0);
 
     popup.document.write("<html><head><title>Purchase Order</title>");
     popup.document.write(`
@@ -2438,7 +2544,7 @@ if (!buyerId) {
       );
       popup!.document.write(`<td>${l.uom || ""}</td>`);
       popup!.document.write(
-        `<td class="text-right">${fmt(l.unitPrice ?? 0)}</td>`
+        `<td class="text-right">${fmtUnit(l.unitPrice ?? 0)}</td>`
       );
       popup!.document.write(
         `<td class="text-right">${fmt(l.amount ?? 0)}</td>`
@@ -2546,6 +2652,9 @@ if (!buyerId) {
       sheet.getCell("A10").font = { bold: true, size: 13 };
 
       const tableStart = 11;
+      const forceThreeDecimalUnitPrice = lines.some((line) =>
+        hasThreeDecimalUnitPrice(line.unitPrice)
+      );
       const headerRow = sheet.getRow(tableStart);
       headerRow.values = [
         "No",
@@ -2591,7 +2700,8 @@ if (!buyerId) {
             cell.alignment = { horizontal: "right", vertical: "middle", wrapText: true };
           }
           if (colNumber === 8) cell.numFmt = "#,##0";
-          if ([10, 11].includes(colNumber)) cell.numFmt = "#,##0.00";
+          if (colNumber === 10) cell.numFmt = forceThreeDecimalUnitPrice ? "#,##0.000" : "#,##0.00";
+          if (colNumber === 11) cell.numFmt = "#,##0.00";
         });
       });
 
@@ -3595,15 +3705,15 @@ const canCreateProforma =
                                     line.unitPriceInput !== undefined
                                       ? line.unitPriceInput
                                       : line.unitPrice
-                                      ? line.unitPrice.toFixed(2)
+                                      ? formatUnitPrice(line.unitPrice)
                                       : ""
                                   }
                                   onChange={(e) => {
                                     const raw = e.target.value;
 
-                                    // 숫자 + 소수점 4자리까지 허용
+                                    // 숫자 + 소수점 3자리까지 허용
                                     if (
-                                      !/^\d*(\.\d{0,4})?$/.test(raw)
+                                      !/^\d*(\.\d{0,3})?$/.test(raw)
                                     ) {
                                       return;
                                     }
@@ -3635,7 +3745,7 @@ const canCreateProforma =
                                     if (price) {
                                       updateLine(line.id, {
                                         unitPriceInput:
-                                          price.toFixed(2),
+                                          formatUnitPrice(price),
                                       });
                                     } else {
                                       updateLine(line.id, {

@@ -106,6 +106,19 @@ const styles = StyleSheet.create({
 
 const CommercialInvoicePDF: React.FC<Props> = ({ header, lines }) => {
   const safe = (v: any) => (v === null || v === undefined ? "" : String(v));
+  const num = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const hasThreeDecimalUnitPrice = (v: any) => {
+    const value = num(v);
+    const rounded3 = Math.round((value + Number.EPSILON) * 1000) / 1000;
+    const rounded2 = Math.round((value + Number.EPSILON) * 100) / 100;
+    return Math.abs(rounded3 - rounded2) > 0.0000001;
+  };
+  const unitPriceDigits = lines.some((line) => hasThreeDecimalUnitPrice(line.unit_price)) ? 3 : 2;
+  const money = (v: any, digits = 2) =>
+    num(v).toLocaleString("en-US", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
 
   return (
     <Document>
@@ -204,7 +217,7 @@ const CommercialInvoicePDF: React.FC<Props> = ({ header, lines }) => {
                   { width: 50, textAlign: "right" },
                 ]}
               >
-                {safe(line.unit_price)}
+                {money(line.unit_price, unitPriceDigits)}
               </Text>
               <Text
                 style={[
@@ -212,7 +225,7 @@ const CommercialInvoicePDF: React.FC<Props> = ({ header, lines }) => {
                   { width: 60, textAlign: "right" },
                 ]}
               >
-                {safe(line.amount)}
+                {money(line.amount, 2)}
               </Text>
             </View>
           ))}

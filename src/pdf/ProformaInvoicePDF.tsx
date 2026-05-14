@@ -56,6 +56,21 @@ const money = (v: any) =>
     maximumFractionDigits: 2,
   });
 
+const hasThreeDecimalUnitPrice = (v: any) => {
+  const value = n(v);
+  const rounded3 = Math.round((value + Number.EPSILON) * 1000) / 1000;
+  const rounded2 = Math.round((value + Number.EPSILON) * 100) / 100;
+  return Math.abs(rounded3 - rounded2) > 0.0000001;
+};
+
+const unitPriceMoney = (v: any, forceThreeDecimals = false) => {
+  const digits = forceThreeDecimals || hasThreeDecimalUnitPrice(v) ? 3 : 2;
+  return n(v).toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+};
+
 const intComma = (v: any) =>
   n(v).toLocaleString("en-US", { maximumFractionDigits: 0 });
 
@@ -377,6 +392,9 @@ const ProformaInvoicePDF: React.FC<{
   lines: ProformaLinePDF[];
   assetsBaseUrl?: string; // ✅ server render용: 절대 URL 베이스
 }> = ({ header, lines, assetsBaseUrl }) => {
+  const forceThreeDecimalUnitPrice = lines.some((line) =>
+    hasThreeDecimalUnitPrice(line.unit_price)
+  );
   const subtotal = lines.reduce((s, l) => s + n(l.amount), 0);
   const pages = chunk(lines, ROWS_PER_PAGE);
 
@@ -418,7 +436,7 @@ const ProformaInvoicePDF: React.FC<{
                     {show(l.uom)}
                   </Text>
                   <Text style={[styles.td, styles.tdRight, { width: "10%" }]}>
-                    {money(l.unit_price)}
+                    {unitPriceMoney(l.unit_price, forceThreeDecimalUnitPrice)}
                   </Text>
                   <Text style={[styles.td, styles.tdRight, { width: "10%" }]}>
                     {money(l.amount)}
