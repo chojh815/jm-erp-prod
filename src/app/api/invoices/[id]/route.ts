@@ -360,3 +360,56 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     return bad(e?.message || "Server error", 500);
   }
 }
+
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await ctx.params;
+    if (!id || !isUuid(id)) return bad("Invalid id", 400);
+
+    const existing = await loadInvoiceHeader(id);
+    if (!existing) return bad("Invoice not found", 404);
+
+    const { data: receiptLines, error: receiptErr } = await supabaseAdmin
+      .from("receipt_lines")
+      .select("id")
+      .eq("invoice_id", id)
+      .eq("is_deleted", false)
+      .limit(1);
+
+    if (receiptErr) return bad(receiptErr.message, 500);
+    if ((receiptLines || []).length > 0) {
+      return bad("Cannot delete invoice because receipts are already applied.", 409);
+    }
+
+    const now = new Date().toISOString();
+
+    const { error: lineErr } = await supabaseAdmin
+      .from("invoice_lines")
+      .update({ is_deleted: true, updated_at: now })
+      .or(`invoice_id.eq.${id},invoice_header_id.eq.${id}`);
+
+    if (lineErr) return bad(lineErr.message, 500);
+
+    const { error: linkErr } = await supabaseAdmin
+      .from("invoice_shipments")
+      .delete()
+      .eq("invoice_id", id);
+
+    if (linkErr) return bad(linkErr.message, 500);
+
+    const { error: headerErr } = await supabaseAdmin
+      .from("invoice_headers")
+      .update({
+        is_deleted: true,
+        status: "DELETED",
+        updated_at: now,
+      })
+      .eq("id", id);
+
+    if (headerErr) return bad(headerErr.message, 500);
+
+    return ok({ id });
+  } catch (e: any) {
+    return bad(e?.message || "Server error", 500);
+  }
+}

@@ -13,6 +13,12 @@ function num(v: any, d = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 }
+function round2(v: number) {
+  return Math.round((v + Number.EPSILON) * 100) / 100;
+}
+function round3(v: number) {
+  return Math.round((v + Number.EPSILON) * 1000) / 1000;
+}
 
 function originToCountry(origin?: string | null) {
   const o = String(origin || "").toUpperCase();
@@ -226,12 +232,21 @@ if (existingInvoice?.id) {
       new Set((sLines ?? []).map((l: any) => l?.po_line_id).filter(Boolean))
     ) as string[];
 
-    const poMetaByPoLineId = new Map<string, { po_no: string | null; hs_code: string | null }>();
+    const poMetaByPoLineId = new Map<
+      string,
+      {
+        po_no: string | null;
+        hs_code: string | null;
+        unit_price: number | null;
+        qty: number | null;
+        amount: number | null;
+      }
+    >();
     if (poLineIds.length > 0) {
       const { data: plRows, error: plErr } = await supabaseAdmin
         .from("po_lines")
         // FK: po_lines.po_header_id -> po_headers.id
-        .select("id, hs_code, po_headers ( po_no )")
+        .select("id, hs_code, unit_price, qty, amount, po_headers ( po_no )")
         .in("id", poLineIds);
 
       if (!plErr && plRows) {
@@ -239,6 +254,9 @@ if (existingInvoice?.id) {
           poMetaByPoLineId.set(r.id, {
             po_no: r?.po_headers?.po_no ?? null,
             hs_code: r?.hs_code ?? null,
+            unit_price: r?.unit_price == null ? null : num(r.unit_price),
+            qty: r?.qty == null ? null : num(r.qty),
+            amount: r?.amount == null ? null : num(r.amount),
           });
         }
       }
@@ -312,7 +330,17 @@ if (existingInvoice?.id) {
     const invoiceNo = `${prefix}${seq4}`;
 
     // 7) totals (invoice는 Amount 중심)
-    const totalAmount = (sLines || []).reduce((s: number, l: any) => s + num(l.amount, 0), 0);
+    const totalAmount = (sLines || []).reduce((s: number, l: any) => {
+      const qty = num(l.shipped_qty ?? l.order_qty, 0);
+      const poMeta = poMetaByPoLineId.get(l?.po_line_id);
+      const poQty = num(poMeta?.qty, 0);
+      const poAmount = poMeta?.amount;
+      const amount =
+        poAmount != null && poQty > 0
+          ? round2((poAmount * qty) / poQty)
+          : round2(qty * (poMeta?.unit_price ?? num(l.unit_price, 0)));
+      return round2(s + amount);
+    }, 0);
 
     // 8) invoice_headers insert (스키마에 맞게)
     const headerPayload: any = {
@@ -377,6 +405,19 @@ if (existingInvoice?.id) {
     // 9) invoice_lines insert (Shipment lines → Invoice lines)
     const lineRows = (sLines || []).map((l: any, idx: number) => {
       const qty = l.shipped_qty ?? l.order_qty ?? null;
+      const poMeta = poMetaByPoLineId.get(l?.po_line_id);
+      const poQty = num(poMeta?.qty, 0);
+      const poAmount = poMeta?.amount;
+      const unitPrice =
+        poAmount != null && poQty > 0
+          ? round3(poAmount / poQty)
+          : poMeta?.unit_price ?? (l.unit_price == null ? null : num(l.unit_price));
+      const amount =
+        qty != null && poAmount != null && poQty > 0
+          ? round2((poAmount * num(qty)) / poQty)
+          : qty != null && unitPrice != null
+          ? round2(num(qty) * num(unitPrice))
+          : null;
 
       return {
         invoice_id: invoiceHeader.id,
@@ -403,8 +444,8 @@ if (existingInvoice?.id) {
         size: l.size ?? null,
 
         qty,
-        unit_price: l.unit_price ?? null,
-        amount: l.amount ?? (qty != null && l.unit_price != null ? num(qty) * num(l.unit_price) : null),
+        unit_price: unitPrice,
+        amount,
 
         cartons: null,
         gw: null,

@@ -159,6 +159,42 @@ function fmtMoney2(v: any) {
   });
 }
 
+function round2(v: number) {
+  return Math.round((v + Number.EPSILON) * 100) / 100;
+}
+
+function round3(v: number) {
+  return Math.round((v + Number.EPSILON) * 1000) / 1000;
+}
+
+function effectiveUnitPrice(line: Pick<InvoiceLine, "qty" | "unit_price" | "amount">) {
+  const qty = n(line.qty);
+  const amount = n(line.amount);
+  if (qty > 0 && amount > 0) {
+    return round3(amount / qty);
+  }
+  return n(line.unit_price);
+}
+
+function hasThreeDecimalUnitPrice(v: any) {
+  const value = Number(v || 0);
+  const rounded3 = round3(value);
+  const rounded2 = round2(value);
+  return Math.abs(rounded3 - rounded2) > 0.0000001;
+}
+
+function unitPriceDigitsForLines(lines: InvoiceLine[]) {
+  return (lines || []).some((line) => hasThreeDecimalUnitPrice(effectiveUnitPrice(line))) ? 3 : 2;
+}
+
+function fmtUnitPrice(v: any, digits: number) {
+  const value = Number(v || 0);
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
 function shortId(v?: string | null) {
   const x = s(v);
   if (!x) return "";
@@ -1048,6 +1084,7 @@ ${shipperAddress}` : `${shipperName}`,
       const colCount = head[0].length;
 
       const groups = groupInvoiceLines(lines);
+      const unitPriceDigits = unitPriceDigitsForLines(lines);
       const body: any[] = [];
       let grandTotalCalc = 0;
 
@@ -1065,7 +1102,7 @@ ${shipperAddress}` : `${shipperName}`,
         for (const l of g.lines) {
           const row: any[] = [l.po_no || "", l.style_no || "", l.description || ""];
           if (showMatHs) row.push(l.material_content || "", l.hs_code || "");
-          row.push(fmtQty0(l.qty), fmtMoney2(l.unit_price), fmtMoney2(l.amount));
+          row.push(fmtQty0(l.qty), fmtUnitPrice(effectiveUnitPrice(l), unitPriceDigits), fmtMoney2(l.amount));
           body.push(row);
         }
 
@@ -1299,6 +1336,7 @@ ${shipperAddress}` : `${shipperName}`,
       }
 
       const tableStart = 21;
+      const unitPriceDigits = unitPriceDigitsForLines(lines);
       const tableHeader = [
         "PO #",
         "Style #",
@@ -1327,7 +1365,7 @@ ${shipperAddress}` : `${shipperName}`,
             l.description || "",
             ...(showMatHs ? [l.material_content || "", l.hs_code || ""] : []),
             n(l.qty),
-            n(l.unit_price),
+            effectiveUnitPrice(l),
             n(l.amount),
           ];
           row.eachCell((cell, colNumber) => {
@@ -1338,7 +1376,8 @@ ${shipperAddress}` : `${shipperName}`,
             }
           });
           row.getCell(tableHeader.length - 2).numFmt = "#,##0";
-          row.getCell(tableHeader.length - 1).numFmt = "#,##0.00";
+          row.getCell(tableHeader.length - 1).numFmt =
+            unitPriceDigits === 3 ? "#,##0.000" : "#,##0.00";
           row.getCell(tableHeader.length).numFmt = "#,##0.00";
         }
       }

@@ -14,6 +14,16 @@ const safeNumber = (v: any, fallback = 0): number => {
   const n = Number(v);
   return Number.isNaN(n) ? fallback : n;
 };
+const round3 = (v: number) => Math.round((v + Number.EPSILON) * 1000) / 1000;
+
+function effectiveUnitPrice(line: any) {
+  const qty = safeNumber(line?.qty);
+  const amount = safeNumber(line?.amount);
+  if (qty > 0 && amount > 0) {
+    return round3(amount / qty);
+  }
+  return safeNumber(line?.unit_price);
+}
 
 export async function GET(
   req: NextRequest,
@@ -107,7 +117,7 @@ export async function GET(
       color: l.color ?? "",
       size: l.size ?? "",
       qty: safeNumber(l.qty),
-      unit_price: safeNumber(l.unit_price),
+      unit_price: effectiveUnitPrice(l),
       amount: safeNumber(l.amount),
       cartons: safeNumber(l.cartons),
       gw: safeNumber(l.gw),

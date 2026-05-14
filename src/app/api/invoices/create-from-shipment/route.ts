@@ -20,6 +20,17 @@ function safeNumber(v: any, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
+function maybeNumber(v: any) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function round2(n: number) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+function round3(n: number) {
+  return Math.round((n + Number.EPSILON) * 1000) / 1000;
+}
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
@@ -256,7 +267,10 @@ export async function POST(req: Request) {
           plating_color,
           color,
           size,
-          description
+          description,
+          unit_price,
+          qty,
+          amount
         )
       `)
       .eq("shipment_id", shipmentId)
@@ -272,7 +286,16 @@ export async function POST(req: Request) {
 
     console.log("[create-from-shipment] shipLines:", shipLines.length, "shipment:", shipmentId);
 
-    const totalAmount = (shipLines ?? []).reduce((s, l) => s + safeNumber((l as any).amount), 0);
+    const totalAmount = (shipLines ?? []).reduce((s, l: any) => {
+      const qty = safeNumber(l.shipped_qty);
+      const poQty = safeNumber(l.po_lines?.qty);
+      const poAmount = maybeNumber(l.po_lines?.amount);
+      const amount =
+        poAmount != null && poQty > 0
+          ? round2((poAmount * qty) / poQty)
+          : round2(qty * safeNumber(l.po_lines?.unit_price, safeNumber(l.unit_price)));
+      return round2(s + amount);
+    }, 0);
 
     // shipment header totals (이미 shipment에 total_* 들어있음)
     const total_cartons = safeNumber(shipment.total_cartons, 0);
@@ -348,36 +371,50 @@ export async function POST(req: Request) {
     }
 
     // 8) invoice lines insert (스키마에 맞게 최대한 채움)
-    const lineRows = (shipLines ?? []).map((l: any) => ({
-      invoice_id: invoiceId,
-      invoice_header_id: invoiceId,
+    const lineRows = (shipLines ?? []).map((l: any) => {
+      const qty = safeNumber(l.shipped_qty);
+      const poQty = safeNumber(l.po_lines?.qty);
+      const poAmount = maybeNumber(l.po_lines?.amount);
+      const unitPrice =
+        poAmount != null && poQty > 0
+          ? round3(poAmount / poQty)
+          : safeNumber(l.po_lines?.unit_price, safeNumber(l.unit_price));
+      const amount =
+        poAmount != null && poQty > 0
+          ? round2((poAmount * qty) / poQty)
+          : round2(qty * unitPrice);
 
-      shipment_id: shipmentId,
-      shipment_line_id: l.id ?? null,
+      return {
+        invoice_id: invoiceId,
+        invoice_header_id: invoiceId,
 
-      po_header_id: l.po_header_id ?? null,
-      po_line_id: l.po_line_id ?? null,
-      po_no: l.po_no ?? null,
+        shipment_id: shipmentId,
+        shipment_line_id: l.id ?? null,
 
-      line_no: l.line_no ?? null,
-      style_no: pickStyleNo(l),
-      description: (l.description ?? l.po_lines?.description ?? null),
-      color: (l.color ?? l.po_lines?.plating_color ?? l.po_lines?.color ?? null),
-      size: (l.size ?? l.po_lines?.size ?? null),
+        po_header_id: l.po_header_id ?? null,
+        po_line_id: l.po_line_id ?? null,
+        po_no: l.po_no ?? null,
 
-      qty: safeNumber(l.shipped_qty),
-      unit_price: safeNumber(l.unit_price),
-      amount: safeNumber(l.amount),
+        line_no: l.line_no ?? null,
+        style_no: pickStyleNo(l),
+        description: (l.description ?? l.po_lines?.description ?? null),
+        color: (l.color ?? l.po_lines?.plating_color ?? l.po_lines?.color ?? null),
+        size: (l.size ?? l.po_lines?.size ?? null),
 
-      cartons: l.cartons ?? null,
-      gw: l.gw ?? null,
-      nw: l.nw ?? null,
+        qty,
+        unit_price: unitPrice,
+        amount,
 
-      material_content: null,
-      hs_code: null,
+        cartons: l.cartons ?? null,
+        gw: l.gw ?? null,
+        nw: l.nw ?? null,
 
-      is_deleted: false,
-    }));
+        material_content: null,
+        hs_code: null,
+
+        is_deleted: false,
+      };
+    });
 
     if (lineRows.length) {
       const { error: ilErr } = await supabaseAdmin.from("invoice_lines").insert(lineRows);

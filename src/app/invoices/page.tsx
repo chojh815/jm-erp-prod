@@ -173,12 +173,14 @@ export default function InvoicesPage() {
   const [invBuyer, setInvBuyer] = React.useState<string>(""); // buyer filter
   const [invStatus, setInvStatus] = React.useState<string>(""); // status filter
   const [exportingId, setExportingId] = React.useState<string | null>(null);
+  const [deletingInvoiceId, setDeletingInvoiceId] = React.useState<string | null>(null);
 
   // packing list
   const [plRows, setPlRows] = React.useState<PackingRow[]>([]);
   const [plQ, setPlQ] = React.useState(""); // keyword
   const [plBuyer, setPlBuyer] = React.useState<string>(""); // buyer filter
   const [plStatus, setPlStatus] = React.useState<string>(""); // status filter
+  const [deletingPackingId, setDeletingPackingId] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     // 프로젝트 공통 role 로딩 로직이 있으면 여기를 교체
@@ -530,6 +532,68 @@ export default function InvoicesPage() {
     }
   }, []);
 
+  const handleDeleteInvoice = React.useCallback(async (inv: InvoiceRow) => {
+    if (!inv.id) return;
+    const ok = window.confirm(
+      `Delete invoice ${inv.invoice_no || inv.id}?\n\n` +
+        "This will remove this invoice from the invoice list and mark its invoice lines as deleted.\n" +
+        "If receipts are already applied, deletion will be blocked.\n\n" +
+        "Continue?"
+    );
+    if (!ok) return;
+
+    setDeletingInvoiceId(inv.id);
+    try {
+      const res = await fetch(`/api/invoices/${encodeURIComponent(inv.id)}`, {
+        method: "DELETE",
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || json?.success === false) {
+        alert(json?.error || `Failed to delete invoice (status ${res.status}).`);
+        return;
+      }
+
+      setInvRows((prev) => prev.filter((row) => row.id !== inv.id));
+      alert("Invoice deleted.");
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete invoice.");
+    } finally {
+      setDeletingInvoiceId(null);
+    }
+  }, []);
+
+  const handleDeletePackingList = React.useCallback(async (pl: PackingRow) => {
+    if (!pl.id) return;
+    const ok = window.confirm(
+      `Delete packing list ${pl.packing_list_no || pl.id}?\n\n` +
+        "This will remove this packing list from the list and mark its packing lines as deleted.\n" +
+        "The linked invoice will not be deleted.\n\n" +
+        "Continue?"
+    );
+    if (!ok) return;
+
+    setDeletingPackingId(pl.id);
+    try {
+      const res = await fetch(`/api/packing-lists/${encodeURIComponent(pl.id)}`, {
+        method: "DELETE",
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || json?.success === false) {
+        alert(json?.error || `Failed to delete packing list (status ${res.status}).`);
+        return;
+      }
+
+      setPlRows((prev) => prev.filter((row) => row.id !== pl.id));
+      alert("Packing list deleted.");
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete packing list.");
+    } finally {
+      setDeletingPackingId(null);
+    }
+  }, []);
+
   const doRefresh = React.useCallback(() => {
     if (tab === "invoices") applyInvoiceSearch();
     else applyPackingSearch();
@@ -681,12 +745,13 @@ export default function InvoicesPage() {
                           <th className="min-w-[120px]">Status</th>
                           <th className="min-w-[110px]">ETD</th>
                           <th className="min-w-[110px]">ETA</th>
-                          <th className="min-w-[170px]">Actions</th>
+                          <th className="min-w-[240px]">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
                         {invFiltered.map((r) => {
                           const busy = exportingId === r.id;
+                          const deleting = deletingInvoiceId === r.id;
                           return (
                             <tr
                               key={r.id}
@@ -716,6 +781,14 @@ export default function InvoicesPage() {
                                 </Button>
                                 <Button size="sm" onClick={() => window.open(`/invoices/${r.id}?autoPdf=1`, "_blank")} disabled={busy}>
                                   {busy ? "PDF..." : "PDF"}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  onClick={() => handleDeleteInvoice(r)}
+                                  disabled={deleting}
+                                >
+                                  {deleting ? "Deleting..." : "Delete"}
                                 </Button>
                               </td>
                             </tr>
@@ -810,15 +883,17 @@ export default function InvoicesPage() {
                           <th className="min-w-[120px]">Status</th>
                           <th className="min-w-[110px]">ETD</th>
                           <th className="min-w-[110px]">ETA</th>
-                          <th className="min-w-[170px]">Actions</th>
+                          <th className="min-w-[240px]">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {plFiltered.map((r) => (
-                          <tr
-                            key={r.id}
-                            className="border-t [&>td]:px-3 [&>td]:py-2 hover:bg-muted/20"
-                          >
+                        {plFiltered.map((r) => {
+                          const deleting = deletingPackingId === r.id;
+                          return (
+                            <tr
+                              key={r.id}
+                              className="border-t [&>td]:px-3 [&>td]:py-2 hover:bg-muted/20"
+                            >
                             <td className="font-medium">{r.packing_list_no ?? "-"}</td>
                             <td>{r.invoice_no ?? "-"}</td>
                             <td>
@@ -847,9 +922,18 @@ export default function InvoicesPage() {
                               >
                                 PDF
                               </Button>
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                onClick={() => handleDeletePackingList(r)}
+                                disabled={deleting}
+                              >
+                                {deleting ? "Deleting..." : "Delete"}
+                              </Button>
                             </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

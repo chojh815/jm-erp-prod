@@ -632,3 +632,42 @@ export async function PUT(
     return bad(e?.message || "Server error", 500);
   }
 }
+
+export async function DELETE(
+  _req: Request,
+  ctx: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await ctx.params;
+    if (!id || !isUuid(id)) return bad("Invalid id", 400);
+
+    const resolved = await resolvePackingListHeader(id);
+    if (!resolved.header) return bad("Packing list not found", 404);
+
+    const plId = resolved.plId as string;
+    const now = new Date().toISOString();
+
+    const { error: lineErr } = await supabaseAdmin
+      .from("packing_list_lines")
+      .update({ is_deleted: true, updated_at: now })
+      .eq("packing_list_id", plId)
+      .eq("is_deleted", false);
+
+    if (lineErr) return bad(lineErr.message, 500);
+
+    const { error: headerErr } = await supabaseAdmin
+      .from("packing_list_headers")
+      .update({
+        is_deleted: true,
+        status: "DELETED",
+        updated_at: now,
+      })
+      .eq("id", plId);
+
+    if (headerErr) return bad(headerErr.message, 500);
+
+    return ok({ id: plId });
+  } catch (e: any) {
+    return bad(e?.message || "Server error", 500);
+  }
+}
