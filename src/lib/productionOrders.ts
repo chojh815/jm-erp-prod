@@ -66,6 +66,7 @@ export type ProductionOrderDetail = {
 
 export const PRODUCTION_ORDER_PROCESS_OPTIONS = [
   { value: "MATERIAL_PURCHASE", label: "材料采购 / Material Purchase" },
+  { value: "FINISHED_PRODUCT", label: "成品 / Finished Product" },
   { value: "PLATING", label: "电镀 / Plating" },
   { value: "EPOXY", label: "点胶 / Epoxy" },
   { value: "POLISH", label: "抛光 / Polish" },
