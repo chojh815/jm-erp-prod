@@ -1307,18 +1307,27 @@ const hasAnyShipped = React.useMemo(() => {
     React.useState<PoSummary[]>([]);
   const [poSearchLoading, setPoSearchLoading] =
     React.useState(false);
+  const [poSearchSubmitted, setPoSearchSubmitted] =
+    React.useState(false);
 
 const fetchPoList = React.useCallback(
   async (keyword: string) => {
     try {
-      setPoSearchLoading(true);
-
       // ✅ /api/orders/list 는 keyword가 아니라 q 파라미터를 사용합니다.
       // (PO List 화면과 동일한 검색 키를 써야 Create PO Search에서도 같은 결과가 나옵니다.)
       const kw = String(keyword || "").trim();
+      if (!kw) {
+        setPoSearchSubmitted(false);
+        setPoSearchResults([]);
+        alert("Please enter a keyword to search PO.");
+        return;
+      }
+
+      setPoSearchLoading(true);
+      setPoSearchSubmitted(true);
 
       const params = new URLSearchParams();
-      if (kw) params.set("q", kw);
+      params.set("q", kw);
 
       // 검색 팝업은 보통 최근/상단 몇십개면 충분 → 넉넉히 50개
       params.set("page", "1");
@@ -1340,8 +1349,6 @@ const fetchPoList = React.useCallback(
 
       // 1) API에서 넘어온 원본 리스트
       const rawItems = (data?.items ?? data?.results ?? []) as any[];
-
-      console.log("rawItems from API ===>", rawItems);
 
       // 2) 여기서 한 번 더 삭제된 PO 제거 (status=DELETED, is_deleted=true 둘 다)
       const filtered = rawItems.filter((row: any) => {
@@ -1401,11 +1408,11 @@ const fetchPoList = React.useCallback(
   // 모달이 열릴 때 한 번만 실행
   if (!poSearchOpen) return;
 
-  // 🔹 모달 열릴 때는 항상 최신 전체 리스트를 다시 불러오고
-  //    (이때 API에서 is_deleted=false 조건 때문에 삭제된 건 안 나옴)
-  setPoSearchKeyword(""); // 검색어 초기화
-  fetchPoList("");        // 키워드 없이 전체 조회
-}, [poSearchOpen, fetchPoList]);
+  // 검색 팝업은 열 때 자동 조회하지 않고, 사용자가 Search를 눌렀을 때만 조회한다.
+  setPoSearchKeyword("");
+  setPoSearchResults([]);
+  setPoSearchSubmitted(false);
+}, [poSearchOpen]);
 
   // ----------------------
   // Reset Form
@@ -4065,6 +4072,9 @@ const canCreateProforma =
                 placeholder="Keyword..."
                 value={poSearchKeyword}
                 onChange={(e) => setPoSearchKeyword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") fetchPoList(poSearchKeyword);
+                }}
                 className="h-8 text-sm"
               />
               <Button
@@ -4080,6 +4090,10 @@ const canCreateProforma =
               {poSearchLoading ? (
                 <div className="p-4 text-sm text-slate-500">
                   Loading...
+                </div>
+              ) : !poSearchSubmitted ? (
+                <div className="p-4 text-sm text-slate-500">
+                  Enter a PO No, Buyer, Destination, or style keyword to search.
                 </div>
               ) : poSearchResults.length === 0 ? (
                 <div className="p-4 text-sm text-slate-500">
