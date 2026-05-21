@@ -648,6 +648,7 @@ setCodeError("");
           ? rawSites
               .filter((s) => (s.siteName || "").trim().length > 0)
               .map((s) => ({
+                id: s.id && !String(s.id).startsWith("temp-") ? s.id : null,
                 siteName: s.siteName.trim(),
                 originCode: s.originCode,
                 country: s.country,

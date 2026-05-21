@@ -10,6 +10,32 @@ function okResponse(data: any = {}, status = 200) {
   return NextResponse.json({ success: true, ...data }, { status });
 }
 
+function cleanSitePayload(savedCompanyId: string, site: any, nowIso: string) {
+  return {
+    company_id: savedCompanyId,
+    site_name: site.siteName,
+    origin_code: site.originCode,
+    country: site.country,
+    city: site.city ?? null,
+    state: site.state ?? null,
+    address1: site.address1 ?? null,
+    address2: site.address2 ?? null,
+    phone: site.phone ?? null,
+    tax_id: site.taxId ?? null,
+    bank_name: site.bankName ?? null,
+    bank_account: site.bankAccount ?? null,
+    account_holder_name: site.accountHolderName ?? null,
+    swift: site.swift ?? null,
+    currency: site.currency ?? null,
+    exporter_of_record: !!site.exporterOfRecord,
+    origin_country: site.originCountry ?? null,
+    is_default: !!site.isDefault,
+    air_port_loading: site.airPortLoading ?? null,
+    sea_port_loading: site.seaPortLoading ?? null,
+    updated_at: nowIso,
+  };
+}
+
 /**
  * POST /api/companies
  *
@@ -199,59 +225,53 @@ export async function POST(req: NextRequest) {
     if (!savedCompanyId) {
       return errorResponse("Failed to get company id after save.", 500);
     }
+    const companyIdForSites = savedCompanyId;
 
     // ==============
     // company_sites 처리 (our_company 인 경우만)
     // ==============
     if (companyType === "our_company") {
       const sites = (body.sites ?? []) as any[];
-
-      // 기존 사이트 삭제
-      const { error: delErr } = await supabaseAdmin
-        .from("company_sites")
-        .delete()
-        .eq("company_id", savedCompanyId);
-
-      if (delErr) {
-        console.error("DELETE company_sites error:", delErr);
-        return errorResponse("Failed to reset company sites.", 500);
-      }
-
       const cleanSites = sites
         .filter((s) => (s.siteName ?? "").trim().length > 0)
         .map((s) => ({
-          company_id: savedCompanyId,
-          site_name: s.siteName,
-          origin_code: s.originCode,
-          country: s.country,
-          city: s.city ?? null,
-          state: (s as any).state ?? null,
-          address1: s.address1 ?? null,
-          address2: s.address2 ?? null,
-          phone: s.phone ?? null,
-          tax_id: s.taxId ?? null,
-          bank_name: s.bankName ?? null,
-          bank_account: s.bankAccount ?? null,
-          account_holder_name: s.accountHolderName ?? null,
-          swift: s.swift ?? null,
-          currency: s.currency ?? null,
-          exporter_of_record: !!s.exporterOfRecord,
-          origin_country: s.originCountry ?? null,
-          is_default: !!s.isDefault,
-          air_port_loading: s.airPortLoading ?? null,
-          sea_port_loading: s.seaPortLoading ?? null,
-          created_at: nowIso,
-          updated_at: nowIso,
+          id: typeof s.id === "string" && s.id.trim() && !s.id.startsWith("temp-") ? s.id.trim() : null,
+          ...cleanSitePayload(companyIdForSites, s, nowIso),
         }));
 
-      if (cleanSites.length > 0) {
-        const { error: insErr } = await supabaseAdmin
-          .from("company_sites")
-          .insert(cleanSites);
+      for (const site of cleanSites) {
+        if (site.id) {
+          const { id: siteId, ...patch } = site;
+          const { data: updated, error: upErr } = await supabaseAdmin
+            .from("company_sites")
+            .update(patch)
+            .eq("id", siteId)
+            .eq("company_id", companyIdForSites)
+            .select("id")
+            .maybeSingle();
 
-        if (insErr) {
-          console.error("INSERT company_sites error:", insErr);
-          return errorResponse("Failed to insert company sites.", 500);
+          if (upErr) {
+            console.error("UPDATE company_sites error:", upErr);
+            return errorResponse(`Failed to update company site: ${upErr.message}`, 500);
+          }
+          if (!updated?.id) {
+            return errorResponse("Company site not found.", 404);
+          }
+        } else {
+          const { id: _id, ...insertRow } = site;
+          const { data: inserted, error: insErr } = await supabaseAdmin
+            .from("company_sites")
+            .insert({ ...insertRow, created_at: nowIso })
+            .select("id")
+            .maybeSingle();
+
+          if (insErr) {
+            console.error("INSERT company_sites error:", insErr);
+            return errorResponse(`Failed to insert company site: ${insErr.message}`, 500);
+          }
+          if (!inserted?.id) {
+            return errorResponse("Failed to insert company site.", 500);
+          }
         }
       }
     }
