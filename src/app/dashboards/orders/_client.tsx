@@ -36,7 +36,8 @@ import {
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import html2canvas from "html2canvas";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
+import { useUnicodePdfFont } from "@/lib/pdfUnicodeFont";
 
 const BUYER_BAR_COLORS = ["#2563EB","#F97316","#22C55E","#A855F7","#EF4444","#14B8A6","#EAB308","#6366F1","#F43F5E","#84CC16"];
 
@@ -70,6 +71,42 @@ type ApiBuyerBreakdownRow = {
   pos?: number;
 };
 
+type ApiProductInsightRow = {
+  buyer_style_no?: string | null;
+  jm_style_no?: string | null;
+  description?: string | null;
+  qty: number;
+  amount_usd: number;
+  order_count: number;
+  buyer_count?: number;
+};
+
+type ApiBuyerPreferenceRow = {
+  buyer_name: string;
+  label: string;
+  qty: number;
+  amount_usd: number;
+  repeat_orders: number;
+  last_order_date?: string | null;
+  score: number;
+  jm_style_no?: string | null;
+  buyer_style_no?: string | null;
+  description?: string | null;
+  product_type?: string | null;
+  product_category?: string | null;
+};
+
+type ApiDroppedRepeatRow = ApiBuyerPreferenceRow & {
+  days_since_last_order?: number | null;
+};
+
+type ApiSuggestionRow = ApiBuyerPreferenceRow & {
+  target_buyer_name: string;
+  source_buyer_name: string;
+  reason: string;
+  suggestion_score: number;
+};
+
 type ApiData = {
   ok: boolean;
   message?: string;
@@ -78,6 +115,7 @@ type ApiData = {
     end: string;
     buyer_ids?: string; // "ALL" or csv
     site_ids?: string;  // "ALL" or csv
+    top_limit?: number;
   };
   meta?: {
     date_col_used?: string | null;
@@ -92,6 +130,20 @@ type ApiData = {
   monthly?: ApiMonthlyRow[];
   status?: ApiStatusRow[];
   buyer_breakdown?: ApiBuyerBreakdownRow[];
+  product_insights?: {
+    top_items_by_qty?: ApiProductInsightRow[];
+    top_items_by_amount?: ApiProductInsightRow[];
+    top_repeat_items?: ApiProductInsightRow[];
+  };
+  buyer_preferences?: {
+    product_types?: ApiBuyerPreferenceRow[];
+    categories?: ApiBuyerPreferenceRow[];
+    styles?: ApiBuyerPreferenceRow[];
+  };
+  opportunity_insights?: {
+    dropped_repeat_items?: ApiDroppedRepeatRow[];
+    next_suggestion_candidates?: ApiSuggestionRow[];
+  };
 };
 
 /* ---------------- Theme & constants ---------------- */
@@ -157,6 +209,14 @@ function numberShorten(v: number) {
   return `${n}`;
 }
 
+function fmt0(v: any) {
+  return safeNum(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
+
+function itemLabel(r: Partial<ApiProductInsightRow>) {
+  return [r.jm_style_no, r.buyer_style_no].filter(Boolean).join(" / ") || r.description || "-";
+}
+
 /* ---------------- ChartGuard (Recharts size fix) ---------------- */
 function ChartGuard({
   minHeight,
@@ -215,19 +275,21 @@ export default function OrdersDashboardClient() {
   const [draftAllBuyers, setDraftAllBuyers] = useState(true);
   const [draftBuyers, setDraftBuyers] = useState<string[]>([]);
   const [buyerPick, setBuyerPick] = useState<string>("");
+  const [draftTopLimit, setDraftTopLimit] = useState("10");
 
   // Applied (실제 API 반영용)  ✅ Apply 버튼으로만 바뀜
   const [start, setStart] = useState(yearStart);
   const [end, setEnd] = useState(today);
   const [allBuyers, setAllBuyers] = useState(true);
   const [buyers, setBuyers] = useState<string[]>([]);
+  const [topLimit, setTopLimit] = useState("10");
 
   // API URL (applied 상태로만)
   const q = useMemo(() => {
-    const params = new URLSearchParams({ start, end });
+    const params = new URLSearchParams({ start, end, top_limit: topLimit });
     if (!allBuyers && buyers.length > 0) params.set("buyer_ids", buyers.join(","));
     return `/api/dashboards/orders?${params.toString()}`;
-  }, [start, end, allBuyers, buyers]);
+  }, [start, end, allBuyers, buyers, topLimit]);
 
   const { data, mutate, isValidating } = useSWR<ApiData>(q, fetcher);
 
@@ -278,6 +340,88 @@ export default function OrdersDashboardClient() {
   // - 구조: [{ buyer: string, amount: number, pos?: number }]
   const buyerSeries = buyerBreakdownRows;
 
+  const topItemsByQty = useMemo(() => {
+    return (data?.product_insights?.top_items_by_qty ?? []).map((r) => ({
+      ...r,
+      label: itemLabel(r),
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      order_count: safeNum(r.order_count),
+    }));
+  }, [data?.product_insights?.top_items_by_qty]);
+
+  const topItemsByAmount = useMemo(() => {
+    return (data?.product_insights?.top_items_by_amount ?? []).map((r) => ({
+      ...r,
+      label: itemLabel(r),
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      order_count: safeNum(r.order_count),
+    }));
+  }, [data?.product_insights?.top_items_by_amount]);
+
+  const topRepeatItems = useMemo(() => {
+    return (data?.product_insights?.top_repeat_items ?? []).map((r) => ({
+      ...r,
+      label: itemLabel(r),
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      order_count: safeNum(r.order_count),
+    }));
+  }, [data?.product_insights?.top_repeat_items]);
+
+  const preferredProductTypes = useMemo(() => {
+    return (data?.buyer_preferences?.product_types ?? []).map((r) => ({
+      ...r,
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      repeat_orders: safeNum(r.repeat_orders),
+      score: safeNum(r.score),
+    }));
+  }, [data?.buyer_preferences?.product_types]);
+
+  const preferredCategories = useMemo(() => {
+    return (data?.buyer_preferences?.categories ?? []).map((r) => ({
+      ...r,
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      repeat_orders: safeNum(r.repeat_orders),
+      score: safeNum(r.score),
+    }));
+  }, [data?.buyer_preferences?.categories]);
+
+  const preferredStyles = useMemo(() => {
+    return (data?.buyer_preferences?.styles ?? []).map((r) => ({
+      ...r,
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      repeat_orders: safeNum(r.repeat_orders),
+      score: safeNum(r.score),
+    }));
+  }, [data?.buyer_preferences?.styles]);
+
+  const droppedRepeatItems = useMemo(() => {
+    return (data?.opportunity_insights?.dropped_repeat_items ?? []).map((r) => ({
+      ...r,
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      repeat_orders: safeNum(r.repeat_orders),
+      score: safeNum(r.score),
+      days_since_last_order: safeNum(r.days_since_last_order),
+    }));
+  }, [data?.opportunity_insights?.dropped_repeat_items]);
+
+  const nextSuggestionCandidates = useMemo(() => {
+    return (data?.opportunity_insights?.next_suggestion_candidates ?? []).map((r) => ({
+      ...r,
+      qty: safeNum(r.qty),
+      amount_usd: safeNum(r.amount_usd),
+      repeat_orders: safeNum(r.repeat_orders),
+      score: safeNum(r.score),
+      suggestion_score: safeNum(r.suggestion_score),
+    }));
+  }, [data?.opportunity_insights?.next_suggestion_candidates]);
+
   const kpis = useMemo(() => {
     const arr = data?.kpis ?? data?.kpiMap ?? [];
     // ✅ 요청: KPI 정의는 그대로, 라벨만 정리 → Orders=전체
@@ -315,6 +459,7 @@ export default function OrdersDashboardClient() {
     setEnd(draftEnd);
     setAllBuyers(draftAllBuyers);
     setBuyers(draftAllBuyers ? [] : draftBuyers);
+    setTopLimit(draftTopLimit);
     // SWR은 key가 바뀌면 자동 fetch. 동일하면 mutate.
     await mutate();
   };
@@ -323,52 +468,294 @@ export default function OrdersDashboardClient() {
     await mutate();
   };
 
-  /* ---------------- CSV ---------------- */
-  const handleCSV = () => {
-    const headers = ["Month", "Amount (USD)", "Cumulative (USD)"];
-    const csv = [headers.join(",")].concat(
-      monthRows.map((r) => `${r.month},${r.amount},${r.cumulative}`)
-    );
-    const blob = new Blob([csv.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `orders_${start}_${end}.csv`;
-    a.click();
+const handleExcel = async () => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "JM ERP";
+  workbook.created = new Date();
+
+  const navy = "FF1E3A5F";
+  const pale = "FFEFF6FF";
+  const headerFill = "FFE5EDF8";
+  const borderColor = "FFD6E0EA";
+
+  const border = {
+    top: { style: "thin", color: { argb: borderColor } },
+    left: { style: "thin", color: { argb: borderColor } },
+    bottom: { style: "thin", color: { argb: borderColor } },
+    right: { style: "thin", color: { argb: borderColor } },
+  } as const;
+
+  const moneyFmt = '"USD "#,##0.00';
+  const qtyFmt = '#,##0';
+
+  const styleTitle = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+    sheet.mergeCells(`A1:${lastCol}1`);
+    const titleCell = sheet.getCell("A1");
+    titleCell.value = title;
+    titleCell.font = { bold: true, size: 18, color: { argb: navy } };
+    titleCell.alignment = { horizontal: "center" };
+    sheet.mergeCells(`A2:${lastCol}2`);
+    const scopeCell = sheet.getCell("A2");
+    scopeCell.value = `Period: ${start} ~ ${end}    Buyers: ${allBuyers ? "ALL" : buyers.join(", ") || "-"}    Product Top: ${topLimit}`;
+    scopeCell.font = { size: 10, color: { argb: "FF64748B" } };
+    scopeCell.alignment = { horizontal: "center" };
+    sheet.addRow([]);
   };
 
+  const styleSection = (row: ExcelJS.Row) => {
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+      cell.font = { bold: true, color: { argb: navy } };
+      cell.border = border;
+    });
+  };
 
-const handleExcel = () => {
-  const wb = XLSX.utils.book_new();
+  const styleHeader = (row: ExcelJS.Row) => {
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+      cell.font = { bold: true, color: { argb: "FF0F172A" } };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.border = border;
+    });
+  };
 
-  const wsKpi = XLSX.utils.json_to_sheet([
-    { Metric: "Orders (Total)", ValueUSD: kpiByKey.orders?.value_usd ?? 0, Count: kpiByKey.orders?.sub_value ?? "" },
-    { Metric: "In Production", ValueUSD: kpiByKey.production?.value_usd ?? 0, Count: kpiByKey.production?.sub_value ?? "" },
-    { Metric: "Ready", ValueUSD: kpiByKey.ready?.value_usd ?? 0, Count: kpiByKey.ready?.sub_value ?? "" },
-    { Metric: "Shipped", ValueUSD: kpiByKey.shipped?.value_usd ?? 0, Count: kpiByKey.shipped?.sub_value ?? "" },
-  ]);
-  XLSX.utils.book_append_sheet(wb, wsKpi, "KPI");
+  const styleBody = (row: ExcelJS.Row, moneyCols: number[] = [], qtyCols: number[] = []) => {
+    row.eachCell((cell, colNumber) => {
+      cell.border = border;
+      cell.alignment = { vertical: "top", wrapText: true };
+      if (moneyCols.includes(colNumber)) cell.numFmt = moneyFmt;
+      if (qtyCols.includes(colNumber)) cell.numFmt = qtyFmt;
+    });
+  };
 
-  const wsMonthly = XLSX.utils.json_to_sheet(
-    (monthlySeries || []).map((r) => ({ Month: r.month, MonthlyUSD: r.amount, CumulativeUSD: r.cumulative }))
-  );
-  XLSX.utils.book_append_sheet(wb, wsMonthly, "Monthly");
+  const addSection = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+    sheet.addRow([]);
+    sheet.mergeCells(`A${sheet.rowCount + 1}:${lastCol}${sheet.rowCount + 1}`);
+    const row = sheet.addRow([title]);
+    styleSection(row);
+  };
 
-  const wsStatus = XLSX.utils.json_to_sheet(
-    (statusSeries || []).map((r) => ({ Status: r.status, AmountUSD: r.amount }))
-  );
-  XLSX.utils.book_append_sheet(wb, wsStatus, "Status");
+  const report = workbook.addWorksheet("Orders Dashboard", {
+    views: [{ state: "frozen", ySplit: 4 }],
+  });
+  styleTitle(report, "Orders Dashboard", "F");
 
-  const wsBuyers = XLSX.utils.json_to_sheet(
-    (buyerSeries || []).map((r) => ({ Buyer: r.buyer, AmountUSD: r.amount }))
-  );
-  XLSX.utils.book_append_sheet(wb, wsBuyers, "Buyers");
+  addSection(report, "KPI Summary", "F");
+  styleHeader(report.addRow(["Metric", "Value", "Count", "", "", ""]));
+  [
+    ["Orders (Total)", kpiByKey.orders?.value_usd ?? 0, kpiByKey.orders?.sub_value ?? ""],
+    ["In Production", kpiByKey.production?.value_usd ?? 0, kpiByKey.production?.sub_value ?? ""],
+    ["Ready", kpiByKey.ready?.value_usd ?? 0, kpiByKey.ready?.sub_value ?? ""],
+    ["Shipped", kpiByKey.shipped?.value_usd ?? 0, kpiByKey.shipped?.sub_value ?? ""],
+  ].forEach((r) => styleBody(report.addRow(r), [2], []));
 
-    // ✅ A안(정석): filters 변수가 없을 수 있으니 data.filters_echo 기반으로 파일명 구성
+  addSection(report, "Monthly Trend", "F");
+  styleHeader(report.addRow(["Month", "Monthly Amount", "Cumulative", "", "", ""]));
+  monthlySeries.forEach((r) => styleBody(report.addRow([r.month, r.amount, r.cumulative]), [2, 3], []));
+
+  addSection(report, "Status Distribution", "F");
+  styleHeader(report.addRow(["Status", "Amount", "", "", "", ""]));
+  statusSeries.forEach((r) => styleBody(report.addRow([r.status, r.amount]), [2], []));
+
+  addSection(report, "Buyer Breakdown", "F");
+  styleHeader(report.addRow(["Buyer", "Amount", "POs", "", "", ""]));
+  buyerSeries.forEach((r) => styleBody(report.addRow([r.buyer, r.amount, r.pos ?? 0]), [2], [3]));
+
+  report.columns = [
+    { width: 28 },
+    { width: 18 },
+    { width: 18 },
+    { width: 14 },
+    { width: 14 },
+    { width: 14 },
+  ];
+
+  const productSheet = workbook.addWorksheet("Product Insights", {
+    views: [{ state: "frozen", ySplit: 4 }],
+  });
+  styleTitle(productSheet, `Product Insights - Top ${topLimit}`, "H");
+
+  const addProductBlock = (title: string, rows: typeof topItemsByQty) => {
+    addSection(productSheet, title, "H");
+    styleHeader(productSheet.addRow([
+      "Rank",
+      "Item",
+      "JM Style",
+      "Buyer Style",
+      "Description",
+      "Qty",
+      "Amount",
+      "Orders",
+    ]));
+    rows.forEach((r, idx) => {
+      styleBody(productSheet.addRow([
+        idx + 1,
+        r.label,
+        r.jm_style_no || "",
+        r.buyer_style_no || "",
+        r.description || "",
+        r.qty,
+        r.amount_usd,
+        r.order_count,
+      ]), [7], [1, 6, 8]);
+    });
+  };
+
+  addProductBlock("Top Items by Qty", topItemsByQty);
+  addProductBlock("Top Items by Amount", topItemsByAmount);
+  addProductBlock("Top Repeat Items", topRepeatItems);
+  productSheet.columns = [
+    { width: 8 },
+    { width: 28 },
+    { width: 16 },
+    { width: 18 },
+    { width: 34 },
+    { width: 14 },
+    { width: 16 },
+    { width: 12 },
+  ];
+
+  const preferenceSheet = workbook.addWorksheet("Buyer Preferences", {
+    views: [{ state: "frozen", ySplit: 4 }],
+  });
+  styleTitle(preferenceSheet, `Buyer Preferences - Top ${topLimit}`, "J");
+
+  const addPreferenceBlock = (title: string, rows: typeof preferredProductTypes) => {
+    addSection(preferenceSheet, title, "J");
+    styleHeader(preferenceSheet.addRow([
+      "Rank",
+      "Buyer",
+      "Pattern",
+      "Product Type",
+      "Category",
+      "Description",
+      "Qty",
+      "Amount",
+      "Repeat Orders",
+      "Score",
+    ]));
+    rows.forEach((r, idx) => {
+      styleBody(preferenceSheet.addRow([
+        idx + 1,
+        r.buyer_name,
+        r.label,
+        r.product_type || "",
+        r.product_category || "",
+        r.description || "",
+        r.qty,
+        r.amount_usd,
+        r.repeat_orders,
+        r.score,
+      ]), [8], [1, 7, 9, 10]);
+    });
+  };
+
+  addPreferenceBlock("Preferred Product Types", preferredProductTypes);
+  addPreferenceBlock("Preferred Categories", preferredCategories);
+  addPreferenceBlock("Preferred Styles", preferredStyles);
+  preferenceSheet.columns = [
+    { width: 8 },
+    { width: 24 },
+    { width: 28 },
+    { width: 20 },
+    { width: 20 },
+    { width: 34 },
+    { width: 14 },
+    { width: 16 },
+    { width: 14 },
+    { width: 12 },
+  ];
+
+  const opportunitySheet = workbook.addWorksheet("Opportunities", {
+    views: [{ state: "frozen", ySplit: 4 }],
+  });
+  styleTitle(opportunitySheet, `Opportunity Insights - Top ${topLimit}`, "K");
+
+  addSection(opportunitySheet, "Dropped Repeat Items", "K");
+  styleHeader(opportunitySheet.addRow([
+    "Rank",
+    "Buyer",
+    "Item",
+    "Product Type",
+    "Category",
+    "Description",
+    "Qty",
+    "Amount",
+    "Repeat Orders",
+    "Last Order",
+    "Days Since",
+  ]));
+  droppedRepeatItems.forEach((r, idx) => {
+    styleBody(opportunitySheet.addRow([
+      idx + 1,
+      r.buyer_name,
+      r.label,
+      r.product_type || "",
+      r.product_category || "",
+      r.description || "",
+      r.qty,
+      r.amount_usd,
+      r.repeat_orders,
+      r.last_order_date || "",
+      r.days_since_last_order || 0,
+    ]), [8], [1, 7, 9, 11]);
+  });
+
+  addSection(opportunitySheet, "Next Suggestion Candidates", "K");
+  styleHeader(opportunitySheet.addRow([
+    "Rank",
+    "Target Buyer",
+    "Source Buyer",
+    "Item",
+    "Category",
+    "Description",
+    "Qty",
+    "Amount",
+    "Repeat Orders",
+    "Score",
+    "Reason",
+  ]));
+  nextSuggestionCandidates.forEach((r, idx) => {
+    styleBody(opportunitySheet.addRow([
+      idx + 1,
+      r.target_buyer_name,
+      r.source_buyer_name,
+      r.label,
+      r.product_category || "",
+      r.description || "",
+      r.qty,
+      r.amount_usd,
+      r.repeat_orders,
+      r.suggestion_score,
+      r.reason,
+    ]), [8], [1, 7, 9, 10]);
+  });
+  opportunitySheet.columns = [
+    { width: 8 },
+    { width: 24 },
+    { width: 24 },
+    { width: 30 },
+    { width: 18 },
+    { width: 34 },
+    { width: 14 },
+    { width: 16 },
+    { width: 14 },
+    { width: 12 },
+    { width: 60 },
+  ];
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
   const _start = (data as any)?.filters_echo?.start ?? "";
   const _end = (data as any)?.filters_echo?.end ?? "";
-  const _fname = _start && _end ? `orders_dashboard_${_start}_${_end}.xlsx` : "orders_dashboard.xlsx";
-  XLSX.writeFile(wb, _fname);
+  a.href = url;
+  a.download = _start && _end ? `orders_dashboard_${_start}_${_end}.xlsx` : "orders_dashboard.xlsx";
+  a.click();
+  URL.revokeObjectURL(url);
 };
 
   /* ---------------- PDF ---------------- */
@@ -385,6 +772,7 @@ const handleExcel = () => {
   const handlePDF = async () => {
   try {
     const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const pdfFont = await useUnicodePdfFont(doc);
     const pageW = 210;
     const pageH = 297;
     const margin = 12;
@@ -399,11 +787,11 @@ const handleExcel = () => {
     const safeText = (s: any) => (s == null ? "" : String(s));
 
     // Header (minimal)
-    doc.setFont("helvetica", "bold");
+    doc.setFont(pdfFont, "bold");
     doc.setFontSize(18);
     doc.text("Orders Dashboard", pageW / 2, margin + 2, { align: "center" });
 
-    doc.setFont("helvetica", "normal");
+    doc.setFont(pdfFont, "normal");
     doc.setFontSize(10);
     const headerRightX = pageW - margin;
     const headerY0 = margin + 0;
@@ -663,7 +1051,7 @@ const handleExcel = () => {
     };
 
     // Section: Monthly Trend
-    doc.setFont("helvetica", "bold");
+    doc.setFont(pdfFont, "bold");
     doc.setFontSize(13);
     doc.text("Monthly Trend (USD & Cumulative)", margin, y);
     y += 4;
@@ -673,7 +1061,7 @@ const handleExcel = () => {
     y += 62;
 
     // Section: Status Overview (2 charts)
-    doc.setFont("helvetica", "bold");
+    doc.setFont(pdfFont, "bold");
     doc.setFontSize(13);
     doc.text("Status Overview", margin, y);
     y += 4;
@@ -686,7 +1074,7 @@ const handleExcel = () => {
     y += 68;
 
     // Section: Buyer Breakdown
-    doc.setFont("helvetica", "bold");
+    doc.setFont(pdfFont, "bold");
     doc.setFontSize(13);
     doc.text("Buyer Breakdown (Top 10, USD)", margin, y);
     y += 4;
@@ -697,7 +1085,7 @@ const handleExcel = () => {
     y += 60;
 
     // Tables
-    doc.setFont("helvetica", "bold");
+    doc.setFont(pdfFont, "bold");
     doc.setFontSize(11);
     doc.text(`Total (Status): ${fmtUSD(Number(kpiByKey.orders?.value_usd || 0))}`, margin, y);
     y += 3;
@@ -707,8 +1095,8 @@ const handleExcel = () => {
       head: [["Status", "Amount (USD)"]],
       body: (statusRows || []).map((r: any) => [safeText(r?.status || "-"), fmtUSD(safeNum(r?.amount_usd))]),
       theme: "grid",
-      styles: { fontSize: 10 },
-      headStyles: { fillColor: [240, 240, 240], textColor: 20 },
+      styles: { font: pdfFont, fontSize: 10 },
+      headStyles: { fillColor: [240, 240, 240], textColor: 20, fontStyle: "bold" },
       margin: { left: margin, right: margin },
     });
 
@@ -719,8 +1107,49 @@ const handleExcel = () => {
       head: [["Buyer", "Amount (USD)"]],
       body: topBuyers.map((r: any) => [safeText(r?.buyer_name || r?.buyer || "-"), fmtUSD(safeNum(r?.amount_usd))]),
       theme: "grid",
-      styles: { fontSize: 10 },
-      headStyles: { fillColor: [240, 240, 240], textColor: 20 },
+      styles: { font: pdfFont, fontSize: 10 },
+      headStyles: { fillColor: [240, 240, 240], textColor: 20, fontStyle: "bold" },
+      margin: { left: margin, right: margin },
+    });
+
+    const yAfter2 = (doc as any).lastAutoTable?.finalY || (yAfter1 + 40);
+    const productBody = [
+      ...topItemsByQty.map((r, idx) => [
+        "Qty",
+        String(idx + 1),
+        safeText(r.label),
+        safeText(r.description || ""),
+        fmt0(r.qty),
+        fmtUSD(r.amount_usd),
+        fmt0(r.order_count),
+      ]),
+      ...topItemsByAmount.map((r, idx) => [
+        "Amount",
+        String(idx + 1),
+        safeText(r.label),
+        safeText(r.description || ""),
+        fmt0(r.qty),
+        fmtUSD(r.amount_usd),
+        fmt0(r.order_count),
+      ]),
+      ...topRepeatItems.map((r, idx) => [
+        "Repeat",
+        String(idx + 1),
+        safeText(r.label),
+        safeText(r.description || ""),
+        fmt0(r.qty),
+        fmtUSD(r.amount_usd),
+        fmt0(r.order_count),
+      ]),
+    ];
+
+    autoTable(doc, {
+      startY: yAfter2 + 6,
+      head: [["Metric", "Rank", "Item", "Description", "Qty", "Amount (USD)", "Orders"]],
+      body: productBody,
+      theme: "grid",
+      styles: { font: pdfFont, fontSize: 8 },
+      headStyles: { fillColor: [240, 240, 240], textColor: 20, fontStyle: "bold" },
       margin: { left: margin, right: margin },
     });
 
@@ -763,7 +1192,7 @@ const handleExcel = () => {
             </div>
 
             {/* Buyer Filter (dropdown + Add) */}
-            <div className="col-span-4">
+            <div className="col-span-3">
               <Label className="mb-2 block">Buyer Filter</Label>
 
               <div className="flex items-center gap-2 mb-2">
@@ -835,6 +1264,21 @@ const handleExcel = () => {
               )}
             </div>
 
+            <div className="col-span-1">
+              <Label className="mb-2 block">Product Top</Label>
+              <Select value={draftTopLimit} onValueChange={setDraftTopLimit}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Top 10" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="3">Top 3</SelectItem>
+                  <SelectItem value="5">Top 5</SelectItem>
+                  <SelectItem value="10">Top 10</SelectItem>
+                  <SelectItem value="20">Top 20</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
             {/* Buttons */}
             <div className="col-span-2 flex gap-2 justify-end">
               <Button onClick={applyFilters} className="flex-1" data-pdf-hide>
@@ -846,10 +1290,6 @@ const handleExcel = () => {
             </div>
 
             <div className="col-span-12 flex gap-2 justify-end mt-2">
-              
-              <Button onClick={handleCSV} variant="outline" data-pdf-hide>
-                CSV
-              </Button>
               <Button onClick={handleExcel} variant="outline" data-pdf-hide>
                 Excel
               </Button>
@@ -1030,6 +1470,242 @@ const handleExcel = () => {
               )
             }
           </ChartGuard>
+        </CardContent>
+      </Card>
+
+      {/* Product Insights */}
+      <Card>
+        <CardHeader className="py-3">
+          <CardTitle className="text-sm">Product Insights — Top {topLimit}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-12 gap-4">
+            {[
+              { title: "Top Items by Qty", rows: topItemsByQty, valueLabel: "Qty", valueKey: "qty" },
+              { title: "Top Items by Amount", rows: topItemsByAmount, valueLabel: "Amount", valueKey: "amount_usd" },
+              { title: "Top Repeat Items", rows: topRepeatItems, valueLabel: "Orders", valueKey: "order_count" },
+            ].map((block) => (
+              <div key={block.title} className="col-span-4 overflow-hidden rounded-lg border">
+                <div className="border-b bg-slate-50 px-3 py-2 text-sm font-semibold">
+                  {block.title}
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-xs text-muted-foreground">
+                        <th className="px-3 py-2 w-10">#</th>
+                        <th className="px-3 py-2">Item</th>
+                        <th className="px-3 py-2 text-right">{block.valueLabel}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {block.rows.length > 0 ? (
+                        block.rows.map((r, idx) => (
+                          <tr key={`${block.title}-${r.label}-${idx}`} className="border-b last:border-0">
+                            <td className="px-3 py-2 text-muted-foreground">{idx + 1}</td>
+                            <td className="px-3 py-2">
+                              <div className="font-medium">{r.label}</div>
+                              <div className="max-w-[260px] truncate text-xs text-muted-foreground">
+                                {r.description || "-"}
+                              </div>
+                              <div className="text-[11px] text-muted-foreground">
+                                Qty {fmt0(r.qty)} · {fmt2(r.amount_usd)} USD · Orders {fmt0(r.order_count)}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-right font-semibold">
+                              {block.valueKey === "amount_usd"
+                                ? fmt2((r as any)[block.valueKey])
+                                : fmt0((r as any)[block.valueKey])}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={3}>
+                            No data.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Buyer Preference Patterns */}
+      <Card>
+        <CardHeader className="py-3">
+          <CardTitle className="text-sm">Buyer Preference Patterns — Top {topLimit}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-12 gap-4">
+            {[
+              { title: "Preferred Product Types", rows: preferredProductTypes },
+              { title: "Preferred Categories", rows: preferredCategories },
+              { title: "Preferred Styles", rows: preferredStyles },
+            ].map((block) => (
+              <div key={block.title} className="col-span-4 overflow-hidden rounded-lg border">
+                <div className="border-b bg-slate-50 px-3 py-2 text-sm font-semibold">
+                  {block.title}
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-xs text-muted-foreground">
+                        <th className="px-3 py-2 w-10">#</th>
+                        <th className="px-3 py-2">Pattern</th>
+                        <th className="px-3 py-2 text-right">Score</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {block.rows.length > 0 ? (
+                        block.rows.map((r, idx) => (
+                          <tr key={`${block.title}-${r.buyer_name}-${r.label}-${idx}`} className="border-b last:border-0">
+                            <td className="px-3 py-2 text-muted-foreground">{idx + 1}</td>
+                            <td className="px-3 py-2">
+                              <div className="font-medium">{r.buyer_name}</div>
+                              <div className="max-w-[260px] truncate text-sm">
+                                {r.label}
+                              </div>
+                              {r.description ? (
+                                <div className="max-w-[260px] truncate text-xs text-muted-foreground">
+                                  {r.description}
+                                </div>
+                              ) : null}
+                              <div className="text-[11px] text-muted-foreground">
+                                Qty {fmt0(r.qty)} · {fmt2(r.amount_usd)} USD · Repeat {fmt0(r.repeat_orders)}
+                                {r.last_order_date ? ` · Last ${r.last_order_date}` : ""}
+                              </div>
+                              {r.product_type || r.product_category ? (
+                                <div className="text-[11px] text-muted-foreground">
+                                  {[r.product_type, r.product_category].filter(Boolean).join(" / ")}
+                                </div>
+                              ) : null}
+                            </td>
+                            <td className="px-3 py-2 text-right font-semibold">
+                              {fmt2(r.score)}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={3}>
+                            No data.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Opportunity Insights */}
+      <Card>
+        <CardHeader className="py-3">
+          <CardTitle className="text-sm">Opportunity Insights — Top {topLimit}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-12 gap-4">
+            <div className="col-span-6 overflow-hidden rounded-lg border">
+              <div className="border-b bg-slate-50 px-3 py-2 text-sm font-semibold">
+                Dropped Repeat Items
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-left text-xs text-muted-foreground">
+                      <th className="px-3 py-2 w-10">#</th>
+                      <th className="px-3 py-2">Item</th>
+                      <th className="px-3 py-2 text-right">Days</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {droppedRepeatItems.length > 0 ? (
+                      droppedRepeatItems.map((r, idx) => (
+                        <tr key={`dropped-${r.buyer_name}-${r.label}-${idx}`} className="border-b last:border-0">
+                          <td className="px-3 py-2 text-muted-foreground">{idx + 1}</td>
+                          <td className="px-3 py-2">
+                            <div className="font-medium">{r.buyer_name}</div>
+                            <div className="max-w-[360px] truncate">{r.label}</div>
+                            <div className="max-w-[360px] truncate text-xs text-muted-foreground">
+                              {r.description || "-"}
+                            </div>
+                            <div className="text-[11px] text-muted-foreground">
+                              {r.product_category || "Uncategorized"} · Repeat {fmt0(r.repeat_orders)} · Last {r.last_order_date || "-"} · {fmt2(r.amount_usd)} USD
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-right font-semibold">
+                            {fmt0(r.days_since_last_order)}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={3}>
+                          No dropped repeat items.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="col-span-6 overflow-hidden rounded-lg border">
+              <div className="border-b bg-slate-50 px-3 py-2 text-sm font-semibold">
+                Next Suggestion Candidates
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-left text-xs text-muted-foreground">
+                      <th className="px-3 py-2 w-10">#</th>
+                      <th className="px-3 py-2">Candidate</th>
+                      <th className="px-3 py-2 text-right">Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {nextSuggestionCandidates.length > 0 ? (
+                      nextSuggestionCandidates.map((r, idx) => (
+                        <tr key={`suggestion-${r.target_buyer_name}-${r.label}-${idx}`} className="border-b last:border-0">
+                          <td className="px-3 py-2 text-muted-foreground">{idx + 1}</td>
+                          <td className="px-3 py-2">
+                            <div className="font-medium">{r.target_buyer_name}</div>
+                            <div className="max-w-[360px] truncate">{r.label}</div>
+                            <div className="max-w-[360px] truncate text-xs text-muted-foreground">
+                              {r.description || "-"}
+                            </div>
+                            <div className="text-[11px] text-muted-foreground">
+                              From {r.source_buyer_name} · {r.product_category || "Uncategorized"} · Repeat {fmt0(r.repeat_orders)} · Last {r.last_order_date || "-"}
+                            </div>
+                            <div className="max-w-[360px] truncate text-[11px] text-muted-foreground">
+                              {r.reason}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-right font-semibold">
+                            {fmt2(r.suggestion_score)}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td className="px-3 py-6 text-sm text-muted-foreground" colSpan={3}>
+                          No suggestion candidates.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

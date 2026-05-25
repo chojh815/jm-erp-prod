@@ -17,6 +17,10 @@ import {
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
+import ExcelJS from "exceljs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { useUnicodePdfFont } from "@/lib/pdfUnicodeFont";
 
 type DatePreset = "MTD" | "LAST_30" | "LAST_90" | "LAST_12_MONTHS" | "YTD" | "CUSTOM";
 
@@ -450,8 +454,181 @@ export default function OverviewDashboardPage() {
     router.push(`/dashboards/ar-aging${q}`);
   }
 
+  async function exportExcel() {
+    if (!data) return;
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "JM ERP";
+    workbook.created = new Date();
+
+    const navy = "FF1E3A5F";
+    const pale = "FFEFF6FF";
+    const headerFill = "FFE5EDF8";
+    const borderColor = "FFD6E0EA";
+    const border = {
+      top: { style: "thin", color: { argb: borderColor } },
+      left: { style: "thin", color: { argb: borderColor } },
+      bottom: { style: "thin", color: { argb: borderColor } },
+      right: { style: "thin", color: { argb: borderColor } },
+    } as const;
+    const moneyFmt = '"USD "#,##0';
+    const intFmt = "#,##0";
+    const scope = `Preset: ${preset}    Period: ${data.filters_echo?.start || start || "-"} ~ ${data.filters_echo?.end || end || "-"}    Buyers: ${allBuyers ? "ALL" : buyerIds.length}`;
+
+    const styleTitle = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.mergeCells(`A1:${lastCol}1`);
+      const titleCell = sheet.getCell("A1");
+      titleCell.value = title;
+      titleCell.font = { bold: true, size: 18, color: { argb: navy } };
+      titleCell.alignment = { horizontal: "center" };
+      sheet.mergeCells(`A2:${lastCol}2`);
+      const scopeCell = sheet.getCell("A2");
+      scopeCell.value = scope;
+      scopeCell.font = { size: 10, color: { argb: "FF64748B" } };
+      scopeCell.alignment = { horizontal: "center" };
+      sheet.addRow([]);
+    };
+    const styleSection = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+        cell.font = { bold: true, color: { argb: navy } };
+        cell.border = border;
+      });
+    };
+    const styleHeader = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+        cell.font = { bold: true, color: { argb: "FF0F172A" } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = border;
+      });
+    };
+    const styleBody = (row: ExcelJS.Row, moneyCols: number[] = [], intCols: number[] = []) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = border;
+        cell.alignment = { vertical: "top", wrapText: true };
+        if (moneyCols.includes(colNumber)) cell.numFmt = moneyFmt;
+        if (intCols.includes(colNumber)) cell.numFmt = intFmt;
+      });
+    };
+    const addSection = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.addRow([]);
+      sheet.mergeCells(`A${sheet.rowCount + 1}:${lastCol}${sheet.rowCount + 1}`);
+      const row = sheet.addRow([title]);
+      styleSection(row);
+    };
+
+    const summary = workbook.addWorksheet("Summary", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(summary, "Overview Dashboard", "E");
+    addSection(summary, "KPI Summary", "E");
+    styleHeader(summary.addRow(["Metric", "Value", "Sub Label", "Sub Value", "Delta"]));
+    data.kpis.forEach((k) => {
+      const isCount = String(k.key).startsWith("sample_");
+      styleBody(summary.addRow([k.label, k.value_usd || 0, k.sub_label || "", k.sub_value || "", k.delta_pct ?? ""]), isCount ? [] : [2], isCount ? [2] : []);
+    });
+    addSection(summary, "Monthly Cumulative", "E");
+    styleHeader(summary.addRow(["As Of", "Orders", "Shipped", "Invoiced", "Collected"]));
+    data.trend.forEach((r) => styleBody(summary.addRow([r.date, r.orders_usd, r.shipped_usd, r.invoiced_usd, r.collected_usd]), [2, 3, 4, 5], []));
+    addSection(summary, "Status Distribution", "E");
+    styleHeader(summary.addRow(["Status", "Amount", "Count", "", ""]));
+    data.status_dist.forEach((r) => styleBody(summary.addRow([r.status, r.amount_usd, r.count]), [2], [3]));
+    summary.columns = [{ width: 28 }, { width: 18 }, { width: 18 }, { width: 18 }, { width: 14 }];
+
+    const actions = workbook.addWorksheet("Action Lists", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(actions, "Overview Action Lists", "G");
+    addSection(actions, "At Risk", "G");
+    styleHeader(actions.addRow(["Req Ship", "Delay", "PO", "Buyer", "Brand", "Amount", "Stage"]));
+    data.lists.at_risk.forEach((r) => styleBody(actions.addRow([r.req_ship_date || "", r.delay_days ?? "", r.po_no, r.buyer_name || "", r.brand || "", r.amount_usd || 0, r.stage || ""]), [6], [2]));
+    addSection(actions, "Today Ship Plan", "G");
+    styleHeader(actions.addRow(["Date", "PO", "Buyer", "Brand", "Amount", "Ship Mode", ""]));
+    (data.lists.today_ship || []).forEach((r) => styleBody(actions.addRow([r.req_ship_date, r.po_no, r.buyer_name || "", r.brand || "", r.amount_usd || 0, r.ship_mode || ""]), [5], []));
+    addSection(actions, "Next 7 Days Ship Plan", "G");
+    styleHeader(actions.addRow(["Date", "PO", "Buyer", "Brand", "Amount", "Ship Mode", ""]));
+    data.lists.next_ship.forEach((r) => styleBody(actions.addRow([r.req_ship_date, r.po_no, r.buyer_name || "", r.brand || "", r.amount_usd || 0, r.ship_mode || ""]), [5], []));
+    addSection(actions, "Cash Watch", "G");
+    styleHeader(actions.addRow(["Buyer", "Invoice", "Inv Date", "Overdue", "Balance", "", ""]));
+    data.lists.cash_watch.forEach((r) => styleBody(actions.addRow([r.buyer_name || "", r.invoice_no || "", r.invoice_date || "", r.overdue_days ?? 0, r.balance_usd || 0]), [5], [4]));
+    actions.columns = [{ width: 16 }, { width: 16 }, { width: 18 }, { width: 26 }, { width: 18 }, { width: 18 }, { width: 18 }];
+
+    const samples = workbook.addWorksheet("Samples", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(samples, "Sample Action Lists", "G");
+    const addSampleRows = (title: string, rows: SampleListRow[]) => {
+      addSection(samples, title, "G");
+      styleHeader(samples.addRow(["Request No", "Title", "Buyer", "Request Date", "Target Ship", "Alert", "Progress"]));
+      rows.forEach((r) => styleBody(samples.addRow([r.request_no || "", r.request_title || "", r.buyer_name || "", r.request_date || "", r.target_ship_date || "", r.alert_status || "", r.progress_status || ""])));
+    };
+    addSampleRows("Sample Overdue", (data.lists.sample_overdue || []) as SampleListRow[]);
+    addSampleRows("Sample Waiting Feedback", (data.lists.sample_waiting_feedback || []) as SampleListRow[]);
+    samples.columns = [{ width: 18 }, { width: 34 }, { width: 24 }, { width: 14 }, { width: 14 }, { width: 18 }, { width: 18 }];
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `overview_dashboard_${isoToday()}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportPdf() {
+    if (!data) return;
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    const pdfFont = await useUnicodePdfFont(doc);
+    doc.setFontSize(18);
+    doc.text("Overview Dashboard", 40, 40);
+    doc.setFontSize(9);
+    doc.text(`Preset: ${preset}   Period: ${data.filters_echo?.start || start || "-"} ~ ${data.filters_echo?.end || end || "-"}   Buyers: ${allBuyers ? "ALL" : buyerIds.length}`, 40, 58);
+
+    autoTable(doc, {
+      startY: 76,
+      head: [["Metric", "Value", "Sub Label", "Sub Value"]],
+      body: data.kpis.map((k) => [
+        k.label,
+        String(k.key).startsWith("sample_") ? fmtCount(k.value_usd) : fmtMoneyUSD(k.value_usd),
+        k.sub_label || "",
+        k.sub_value || "",
+      ]),
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+    });
+
+    autoTable(doc, {
+      startY: ((doc as any).lastAutoTable?.finalY || 76) + 16,
+      head: [["Status", "Amount", "Count"]],
+      body: data.status_dist.map((r) => [r.status, fmtMoneyUSD(r.amount_usd), fmtCount(r.count)]),
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+    });
+
+    doc.addPage("a4", "landscape");
+    doc.setFontSize(15);
+    doc.text("Action Lists", 40, 40);
+    autoTable(doc, {
+      startY: 58,
+      head: [["Req Ship", "Delay", "PO", "Buyer", "Brand", "Amount", "Stage"]],
+      body: data.lists.at_risk.map((r) => [r.req_ship_date || "", r.delay_days ?? "", r.po_no, r.buyer_name || "", r.brand || "", fmtMoneyUSD(r.amount_usd), r.stage || ""]),
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 3 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+    });
+    autoTable(doc, {
+      startY: ((doc as any).lastAutoTable?.finalY || 58) + 16,
+      head: [["Buyer", "Invoice", "Inv Date", "Overdue", "Balance"]],
+      body: data.lists.cash_watch.map((r) => [r.buyer_name || "", r.invoice_no || "", r.invoice_date || "", r.overdue_days ?? 0, fmtMoneyUSD(r.balance_usd)]),
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 3 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+    });
+    doc.save(`overview_dashboard_${isoToday()}.pdf`);
+  }
+
   const headerRight = (
     <div className="flex items-center gap-2">
+      <Button variant="outline" onClick={exportExcel} disabled={loading || !data}>
+        Export Excel
+      </Button>
+      <Button variant="secondary" onClick={exportPdf} disabled={loading || !data}>
+        PDF / Print
+      </Button>
       <Button
         variant="secondary"
         onClick={() => {

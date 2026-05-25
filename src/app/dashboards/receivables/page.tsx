@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import ExcelJS from "exceljs";
 
 type BuyerItem = {
   buyer_id: string | null;
@@ -154,23 +155,6 @@ function startOfMonth12Ago(): string {
   return d.toISOString().slice(0, 10);
 }
 
-function downloadCsv(filename: string, rows: Array<Record<string, any>>) {
-  if (!rows.length) return;
-  const headers = Object.keys(rows[0]);
-  const esc = (v: any) => {
-    const s = String(v ?? "");
-    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-    return s;
-  };
-  const csv = [headers.join(","), ...rows.map((r) => headers.map((h) => esc(r[h])).join(","))].join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-
 export default function ReceivablesDashboardPage() {
   const [buyerId, setBuyerId] = React.useState<string>("ALL");
   const [start, setStart] = React.useState<string>(startOfMonth12Ago());
@@ -238,50 +222,177 @@ export default function ReceivablesDashboardPage() {
     return Array.from(map.values()).sort((a, b) => String(a.buyer_name || "").localeCompare(String(b.buyer_name || "")));
   }, [data]);
 
-  const exportReceiptsSummary = React.useCallback(() => {
-    downloadCsv(
-      "receivables_receipts_summary.csv",
-      (data?.receipts_by_buyer || []).map((x) => ({
-        buyer_name: x.buyer_name,
-        buyer_code: x.buyer_code || "",
-        gross_received: x.gross_received || 0,
-        net_received: x.net_received || 0,
-        receipt_count: x.receipt_count || 0,
-      }))
-    );
-  }, [data]);
+  const exportExcel = React.useCallback(async () => {
+    if (!data) return;
 
-  const exportReceiptDetail = React.useCallback(() => {
-    downloadCsv(
-      "receivables_open_invoice_trace_index.csv",
-      (data?.open_invoices || []).map((x) => ({
-        invoice_no: x.invoice_no,
-        invoice_date: x.invoice_date || "",
-        buyer_name: x.buyer_name || "",
-        total_amount: x.total_amount,
-        paid_amount: x.paid_amount,
-        balance_amount: x.balance_amount,
-        partial_payment_count: x.partial_payment_count || 0,
-        receipt_trace_count: x.receipt_trace_count || 0,
-        status: x.status || "",
-      }))
-    );
-  }, [data]);
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "JM ERP";
+    workbook.created = new Date();
 
-  const exportOutstanding = React.useCallback(() => {
-    downloadCsv(
-      "receivables_outstanding.csv",
-      (data?.open_invoices || []).map((x) => ({
-        invoice_no: x.invoice_no,
-        invoice_date: x.invoice_date || "",
-        buyer_name: x.buyer_name || "",
-        total_amount: x.total_amount,
-        paid_amount: x.paid_amount,
-        balance_amount: x.balance_amount,
-        status: x.status || "",
-      }))
-    );
-  }, [data]);
+    const navy = "FF1E3A5F";
+    const pale = "FFEFF6FF";
+    const headerFill = "FFE5EDF8";
+    const borderColor = "FFD6E0EA";
+    const border = {
+      top: { style: "thin", color: { argb: borderColor } },
+      left: { style: "thin", color: { argb: borderColor } },
+      bottom: { style: "thin", color: { argb: borderColor } },
+      right: { style: "thin", color: { argb: borderColor } },
+    } as const;
+    const moneyFmt = '"USD "#,##0.00';
+    const intFmt = "#,##0";
+
+    const scope = `Period: ${start} ~ ${end}    Buyer: ${
+      buyerId === "ALL" ? "ALL" : allBuyers.find((b) => String(b.buyer_id) === buyerId)?.buyer_name || buyerId
+    }    Aging: ${agingBucket}`;
+
+    const styleTitle = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.mergeCells(`A1:${lastCol}1`);
+      const titleCell = sheet.getCell("A1");
+      titleCell.value = title;
+      titleCell.font = { bold: true, size: 18, color: { argb: navy } };
+      titleCell.alignment = { horizontal: "center" };
+      sheet.mergeCells(`A2:${lastCol}2`);
+      const scopeCell = sheet.getCell("A2");
+      scopeCell.value = scope;
+      scopeCell.font = { size: 10, color: { argb: "FF64748B" } };
+      scopeCell.alignment = { horizontal: "center" };
+      sheet.addRow([]);
+    };
+
+    const styleSection = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+        cell.font = { bold: true, color: { argb: navy } };
+        cell.border = border;
+      });
+    };
+
+    const styleHeader = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+        cell.font = { bold: true, color: { argb: "FF0F172A" } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = border;
+      });
+    };
+
+    const styleBody = (row: ExcelJS.Row, moneyCols: number[] = [], intCols: number[] = []) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = border;
+        cell.alignment = { vertical: "top", wrapText: true };
+        if (moneyCols.includes(colNumber)) cell.numFmt = moneyFmt;
+        if (intCols.includes(colNumber)) cell.numFmt = intFmt;
+      });
+    };
+
+    const addSection = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.addRow([]);
+      sheet.mergeCells(`A${sheet.rowCount + 1}:${lastCol}${sheet.rowCount + 1}`);
+      const row = sheet.addRow([title]);
+      styleSection(row);
+    };
+
+    const summary = workbook.addWorksheet("Summary", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(summary, "Receivables Dashboard", "F");
+    addSection(summary, "KPI Summary", "F");
+    styleHeader(summary.addRow(["Metric", "Value", "Count / Note", "", "", ""]));
+    [
+      ["Gross Received", data.kpis.gross_received, `Receipts ${data.kpis.receipt_count}`],
+      ["Net Received", data.kpis.net_received, `Applied ${fmt2(data.kpis.applied_total)}`],
+      ["Outstanding A/R", data.ar_kpis.outstanding_amount, `Open invoices ${data.ar_kpis.open_invoice_count}`],
+      ["Overdue Amount", data.ar_kpis.overdue_amount, ""],
+      ["Traced Invoices", data.ar_kpis.traced_invoice_count || 0, "Receipt linked invoices"],
+    ].forEach((r) => styleBody(summary.addRow(r), [2], []));
+
+    addSection(summary, "A/R Aging", "F");
+    styleHeader(summary.addRow(["Bucket", "Amount", "", "", "", ""]));
+    [
+      ["Current", data.aging.current],
+      ["1-30", data.aging.d1_30],
+      ["31-60", data.aging.d31_60],
+      ["61-90", data.aging.d61_90],
+      ["90+", data.aging.d90_plus],
+    ].forEach((r) => styleBody(summary.addRow(r), [2], []));
+    summary.columns = [{ width: 24 }, { width: 18 }, { width: 28 }, { width: 12 }, { width: 12 }, { width: 12 }];
+
+    const monthly = workbook.addWorksheet("Monthly", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(monthly, "Monthly Receivables", "D");
+    addSection(monthly, "Monthly Receipts", "D");
+    styleHeader(monthly.addRow(["Month", "Gross Received", "Net Received", ""]));
+    data.receipts_by_month.forEach((r) => styleBody(monthly.addRow([r.month, r.gross_received, r.net_received]), [2, 3], []));
+    addSection(monthly, "Monthly Outstanding", "D");
+    styleHeader(monthly.addRow(["Month", "Outstanding", "", ""]));
+    data.outstanding_by_month.forEach((r) => styleBody(monthly.addRow([r.month, r.outstanding_amount]), [2], []));
+    monthly.columns = [{ width: 16 }, { width: 18 }, { width: 18 }, { width: 12 }];
+
+    const receipts = workbook.addWorksheet("Receipts", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(receipts, "Receipts", "H");
+    addSection(receipts, "Receipts by Buyer", "H");
+    styleHeader(receipts.addRow(["Buyer", "Code", "Gross", "Net", "Receipt Count", "", "", ""]));
+    data.receipts_by_buyer.forEach((r) => styleBody(receipts.addRow([
+      r.buyer_name,
+      r.buyer_code || "",
+      r.gross_received || 0,
+      r.net_received || 0,
+      r.receipt_count || 0,
+    ]), [3, 4], [5]));
+    addSection(receipts, "Recent Receipts", "H");
+    styleHeader(receipts.addRow(["Date", "Buyer", "Code", "Method", "Reference", "Gross", "Net", ""]));
+    data.recent_receipts.forEach((r) => styleBody(receipts.addRow([
+      r.deposit_date || "",
+      r.buyer_name || "",
+      r.buyer_code || "",
+      r.method || "",
+      r.reference_no || "",
+      r.total_received,
+      r.net_received_amount,
+    ]), [6, 7], []));
+    receipts.columns = [
+      { width: 16 }, { width: 28 }, { width: 12 }, { width: 14 },
+      { width: 18 }, { width: 16 }, { width: 16 }, { width: 12 },
+    ];
+
+    const invoices = workbook.addWorksheet("Open Invoices", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(invoices, "Open Invoice Detail", "I");
+    styleHeader(invoices.addRow([
+      "Invoice No",
+      "Invoice Date",
+      "Buyer",
+      "Total",
+      "Paid",
+      "Balance",
+      "Partial Count",
+      "Trace Count",
+      "Status",
+    ]));
+    data.open_invoices.forEach((r) => styleBody(invoices.addRow([
+      r.invoice_no,
+      r.invoice_date || "",
+      r.buyer_name || "",
+      r.total_amount,
+      r.paid_amount,
+      r.balance_amount,
+      r.partial_payment_count || 0,
+      r.receipt_trace_count || 0,
+      r.status || "",
+    ]), [4, 5, 6], [7, 8]));
+    invoices.columns = [
+      { width: 18 }, { width: 14 }, { width: 28 }, { width: 16 }, { width: 16 },
+      { width: 16 }, { width: 14 }, { width: 14 }, { width: 14 },
+    ];
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `receivables_dashboard_${start}_${end}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [agingBucket, allBuyers, buyerId, data, end, start]);
 
   const agingCards = [
     { key: "ALL", label: "All Open" },
@@ -304,9 +415,9 @@ export default function ReceivablesDashboardPage() {
               </div>
             </div>
             <div className="flex gap-2">
-              <Button onClick={exportReceiptsSummary}>Receipts CSV</Button>
-              <Button onClick={exportReceiptDetail}>Receipt Detail CSV</Button>
-              <Button onClick={exportOutstanding}>Outstanding CSV</Button>
+              <Button onClick={exportExcel} disabled={!data}>
+                Export Excel
+              </Button>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">

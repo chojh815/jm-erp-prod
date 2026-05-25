@@ -1126,11 +1126,11 @@ export default function VendorDashboardPage() {
                 >
                   Reset
                 </Button>
-                <Button variant="outline" onClick={handleExportExcel} disabled={loading}>
-                  Export XLSX
+                <Button className="min-w-[92px]" variant="outline" onClick={handleExportExcel} disabled={loading}>
+                  Excel
                 </Button>
-                <Button variant="outline" onClick={handleExportPdf} disabled={loading}>
-                  Export PDF
+                <Button className="min-w-[92px]" variant="outline" onClick={handleExportPdf} disabled={loading}>
+                  PDF
                 </Button>
               </div>
             </div>

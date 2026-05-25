@@ -4,6 +4,10 @@ import useSWR from "swr";
 import AppShell from "@/components/layout/AppShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import ExcelJS from "exceljs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { useUnicodePdfFont } from "@/lib/pdfUnicodeFont";
 
 const fetcher = async (url: string) => {
   const r = await fetch(url, { cache: "no-store" });
@@ -11,6 +15,8 @@ const fetcher = async (url: string) => {
 };
 
 function fmtPct(n: number) { return `${Number(n || 0).toFixed(2)}%`; }
+function fmtInt(n: any) { return Math.trunc(Number(n || 0)).toLocaleString(); }
+function todayIso() { return new Date().toISOString().slice(0, 10); }
 function alertBadgeClass(v: string) {
   const s = (v || "").toUpperCase();
   if (s === "OVERDUE") return "bg-rose-100 text-rose-700 border border-rose-200";
@@ -28,9 +34,181 @@ export default function SampleDashboardPage() {
   const aging = data?.aging || [];
   const alerts = data?.alerts || [];
 
+  async function exportExcel() {
+    if (!data) return;
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "JM ERP";
+    workbook.created = new Date();
+
+    const navy = "FF1E3A5F";
+    const pale = "FFEFF6FF";
+    const headerFill = "FFE5EDF8";
+    const borderColor = "FFD6E0EA";
+    const border = {
+      top: { style: "thin", color: { argb: borderColor } },
+      left: { style: "thin", color: { argb: borderColor } },
+      bottom: { style: "thin", color: { argb: borderColor } },
+      right: { style: "thin", color: { argb: borderColor } },
+    } as const;
+    const intFmt = "#,##0";
+    const pctFmt = "0.00%";
+
+    const styleTitle = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.mergeCells(`A1:${lastCol}1`);
+      const titleCell = sheet.getCell("A1");
+      titleCell.value = title;
+      titleCell.font = { bold: true, size: 18, color: { argb: navy } };
+      titleCell.alignment = { horizontal: "center" };
+      sheet.mergeCells(`A2:${lastCol}2`);
+      const scopeCell = sheet.getCell("A2");
+      scopeCell.value = `Exported: ${todayIso()}`;
+      scopeCell.font = { size: 10, color: { argb: "FF64748B" } };
+      scopeCell.alignment = { horizontal: "center" };
+      sheet.addRow([]);
+    };
+    const styleSection = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+        cell.font = { bold: true, color: { argb: navy } };
+        cell.border = border;
+      });
+    };
+    const styleHeader = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+        cell.font = { bold: true, color: { argb: "FF0F172A" } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = border;
+      });
+    };
+    const styleBody = (row: ExcelJS.Row, intCols: number[] = [], pctCols: number[] = []) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = border;
+        cell.alignment = { vertical: "top", wrapText: true };
+        if (intCols.includes(colNumber)) cell.numFmt = intFmt;
+        if (pctCols.includes(colNumber)) cell.numFmt = pctFmt;
+      });
+    };
+    const addSection = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.addRow([]);
+      sheet.mergeCells(`A${sheet.rowCount + 1}:${lastCol}${sheet.rowCount + 1}`);
+      const row = sheet.addRow([title]);
+      styleSection(row);
+    };
+
+    const summary = workbook.addWorksheet("Summary", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(summary, "Sample Dashboard", "F");
+    addSection(summary, "KPI Summary", "F");
+    styleHeader(summary.addRow(["Metric", "Value", "", "", "", ""]));
+    [
+      ["Total Requests", kpis.total_requests || 0],
+      ["In Progress", kpis.in_progress || 0],
+      ["Completed", kpis.completed || 0],
+      ["Converted", kpis.converted_requests || 0],
+      ["Conversion %", Number(kpis.conversion_pct || 0) / 100],
+      ["Overdue", kpis.overdue || 0],
+      ["Avg Lead Time", kpis.avg_lead_time_days || 0],
+    ].forEach((r, idx) => styleBody(summary.addRow(r), idx === 4 ? [] : [2], idx === 4 ? [2] : []));
+    addSection(summary, "Buyer Ranking", "F");
+    styleHeader(summary.addRow(["Buyer", "Requests", "Converted", "Conversion %", "Overdue", "Waiting"]));
+    buyerRanking.forEach((r: any) => styleBody(summary.addRow([
+      r.buyer_name,
+      r.requests,
+      r.converted,
+      Number(r.conversion_pct || 0) / 100,
+      r.overdue,
+      r.waiting,
+    ]), [2, 3, 5, 6], [4]));
+    summary.columns = [{ width: 28 }, { width: 14 }, { width: 14 }, { width: 16 }, { width: 14 }, { width: 14 }];
+
+    const monthly = workbook.addWorksheet("Monthly", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(monthly, "Monthly Samples", "D");
+    addSection(monthly, "Requests", "D");
+    styleHeader(monthly.addRow(["Month", "Requests", "", ""]));
+    monthlyRequests.forEach((r: any) => styleBody(monthly.addRow([r.month, r.requests]), [2]));
+    addSection(monthly, "Converted", "D");
+    styleHeader(monthly.addRow(["Month", "Converted", "", ""]));
+    monthlyConverted.forEach((r: any) => styleBody(monthly.addRow([r.month, r.converted]), [2]));
+    monthly.columns = [{ width: 16 }, { width: 14 }, { width: 12 }, { width: 12 }];
+
+    const actions = workbook.addWorksheet("Actions", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(actions, "Sample Actions", "F");
+    addSection(actions, "Aging", "F");
+    styleHeader(actions.addRow(["Bucket", "Count", "", "", "", ""]));
+    aging.forEach((r: any) => styleBody(actions.addRow([`${r.bucket} days`, r.count]), [2]));
+    addSection(actions, "Alert List", "F");
+    styleHeader(actions.addRow(["Request No", "Title", "Buyer", "Target Ship", "Days Open", "Alert"]));
+    alerts.forEach((r: any) => styleBody(actions.addRow([
+      r.request_no || "",
+      r.request_title || "",
+      r.buyer_name || "",
+      r.target_ship_date || "",
+      r.days_open ?? 0,
+      r.alert_status || "",
+    ]), [5]));
+    actions.columns = [{ width: 18 }, { width: 34 }, { width: 24 }, { width: 14 }, { width: 12 }, { width: 18 }];
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sample_dashboard_${todayIso()}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportPdf() {
+    if (!data) return;
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    const pdfFont = await useUnicodePdfFont(doc);
+    doc.setFontSize(18);
+    doc.text("Sample Dashboard", 40, 40);
+    doc.setFontSize(9);
+    doc.text(`Exported: ${todayIso()}`, 40, 58);
+    autoTable(doc, {
+      startY: 76,
+      head: [["Metric", "Value"]],
+      body: [
+        ["Total Requests", fmtInt(kpis.total_requests)],
+        ["In Progress", fmtInt(kpis.in_progress)],
+        ["Completed", fmtInt(kpis.completed)],
+        ["Converted", fmtInt(kpis.converted_requests)],
+        ["Conversion %", fmtPct(kpis.conversion_pct || 0)],
+        ["Overdue", fmtInt(kpis.overdue)],
+        ["Avg Lead Time", `${kpis.avg_lead_time_days || 0} days`],
+      ],
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+    });
+    autoTable(doc, {
+      startY: ((doc as any).lastAutoTable?.finalY || 76) + 16,
+      head: [["Buyer", "Requests", "Converted", "Conversion %", "Overdue", "Waiting"]],
+      body: buyerRanking.map((r: any) => [r.buyer_name, r.requests, r.converted, fmtPct(r.conversion_pct), r.overdue, r.waiting]),
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+    });
+    doc.addPage("a4", "landscape");
+    doc.setFontSize(15);
+    doc.text("Alert List", 40, 40);
+    autoTable(doc, {
+      startY: 58,
+      head: [["Request No", "Title", "Buyer", "Target Ship", "Days Open", "Alert"]],
+      body: alerts.map((r: any) => [r.request_no || "", r.request_title || "", r.buyer_name || "", r.target_ship_date || "", r.days_open ?? 0, r.alert_status || ""]),
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 3 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+    });
+    doc.save(`sample_dashboard_${todayIso()}.pdf`);
+  }
+
   return (
     <AppShell title="Sample Dashboard">
       <div className="space-y-6">
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={exportExcel} disabled={!data}>Export Excel</Button>
+          <Button type="button" variant="secondary" onClick={exportPdf} disabled={!data}>PDF / Print</Button>
+        </div>
+
         <div className="grid gap-4 md:grid-cols-7">
           {[
             ["Total Requests", kpis.total_requests || 0, ""],

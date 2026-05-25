@@ -57,6 +57,73 @@ function pickAmountUSD(r: any) {
   return 0;
 }
 
+function pickLineQty(r: any) {
+  const cands = ["qty", "quantity", "order_qty", "pcs"];
+  for (const k of cands) {
+    const n = Number(r?.[k]);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+}
+
+function pickLineAmount(r: any) {
+  const amount = Number(r?.amount);
+  if (Number.isFinite(amount)) return amount;
+  const qty = pickLineQty(r);
+  const unit = Number(r?.unit_price);
+  if (Number.isFinite(qty) && Number.isFinite(unit)) return qty * unit;
+  return 0;
+}
+
+function cleanItemText(v: any) {
+  return (v ?? "").toString().trim();
+}
+
+function displayCategoryName(v: any) {
+  const raw = cleanItemText(v);
+  const key = raw.toUpperCase();
+  const map: Record<string, string> = {
+    A: "Anklet",
+    B: "Bracelet",
+    C: "Chain",
+    E: "Earring",
+    H: "Hair Pin",
+    K: "Key Ring",
+    N: "Necklace",
+    O: "Other",
+    P: "Pendant",
+    R: "Ring",
+    S: "Set",
+  };
+  return map[key] || raw || "Uncategorized";
+}
+
+function recencyScore(orderDate: string | null, end: string) {
+  if (!orderDate) return 0;
+  const last = new Date(`${orderDate.slice(0, 10)}T00:00:00`).getTime();
+  const base = new Date(`${end}T00:00:00`).getTime();
+  if (!Number.isFinite(last) || !Number.isFinite(base)) return 0;
+  const days = Math.max(0, Math.floor((base - last) / 86400000));
+  if (days <= 30) return 100;
+  if (days <= 90) return 80;
+  if (days <= 180) return 60;
+  if (days <= 365) return 35;
+  return 15;
+}
+
+function daysSince(orderDate: string | null, end: string) {
+  if (!orderDate) return null;
+  const last = new Date(`${orderDate.slice(0, 10)}T00:00:00`).getTime();
+  const base = new Date(`${end}T00:00:00`).getTime();
+  if (!Number.isFinite(last) || !Number.isFinite(base)) return null;
+  return Math.max(0, Math.floor((base - last) / 86400000));
+}
+
+function normalizeScore(value: number, max: number) {
+  if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return 0;
+  return Math.min(100, (value / max) * 100);
+}
+
 async function detectDateColumn(
   supabase: any,
   table: string,
@@ -81,6 +148,8 @@ export async function GET(req: NextRequest) {
       new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10);
 
     const end = searchParams.get("end") ?? new Date().toISOString().slice(0, 10);
+    const rawTopLimit = Number(searchParams.get("top_limit") ?? 10);
+    const topLimit = [3, 5, 10, 20].includes(rawTopLimit) ? rawTopLimit : 10;
 
     // Buyer filters (buyer_ids preferred; buyer legacy alias)
     const buyerIdsRaw = (searchParams.get("buyer_ids") ?? "").trim();
@@ -166,11 +235,19 @@ export async function GET(req: NextRequest) {
     /**
      * 2) Lines: po_lines에서 해당 headerIds 라인 금액(USD)을 집계 (amount)
      */
-    let lineRows: { id: string; po_header_id: string; amount: number }[] = [];
+    let lineRows: {
+      id: string;
+      po_header_id: string;
+      amount: number;
+      qty: number;
+      buyer_style_no: string | null;
+      jm_style_no: string | null;
+      description: string | null;
+    }[] = [];
     if (headerIds.length > 0) {
       const { data: lines, error: le } = await supabase
         .from("po_lines")
-        .select("id, po_header_id, amount, is_deleted")
+        .select("id, po_header_id, qty, unit_price, amount, buyer_style_no, jm_style_no, description, is_deleted")
         .in("po_header_id", headerIds)
         .eq("is_deleted", false);
 
@@ -181,7 +258,11 @@ export async function GET(req: NextRequest) {
       lineRows = (lines ?? []).map((r: any) => ({
         id: r.id,
         po_header_id: r.po_header_id,
-        amount: Number(r.amount) || 0,
+        amount: pickLineAmount(r),
+        qty: pickLineQty(r),
+        buyer_style_no: cleanItemText(r.buyer_style_no) || null,
+        jm_style_no: cleanItemText(r.jm_style_no) || null,
+        description: cleanItemText(r.description) || null,
       }));
     }
 
@@ -198,6 +279,20 @@ export async function GET(req: NextRequest) {
 
     const buyerSum: Record<string, number> = {};
     const buyerPoSet: Record<string, Set<string>> = {};
+    const itemMap = new Map<
+      string,
+      {
+        buyer_style_no: string | null;
+        jm_style_no: string | null;
+        description: string | null;
+        qty: number;
+        amount_usd: number;
+        order_count: number;
+        buyer_count: number;
+        poKeys: Set<string>;
+        buyers: Set<string>;
+      }
+    >();
 
     const PRODUCTION_SET = new Set(["IN_PRODUCTION", "PRODUCTION"]);
     const READY_SET = new Set(["READY"]);
@@ -228,6 +323,31 @@ export async function GET(req: NextRequest) {
       buyerSum[buyerName] = (buyerSum[buyerName] ?? 0) + ln.amount;
       buyerPoSet[buyerName] = buyerPoSet[buyerName] ?? new Set<string>();
       buyerPoSet[buyerName].add(h.id);
+
+      const itemKeyParts = [
+        ln.jm_style_no || "",
+        ln.buyer_style_no || "",
+        ln.description || "",
+      ];
+      const itemKey = itemKeyParts.join("__").trim() || ln.id;
+      const item = itemMap.get(itemKey) || {
+        buyer_style_no: ln.buyer_style_no,
+        jm_style_no: ln.jm_style_no,
+        description: ln.description,
+        qty: 0,
+        amount_usd: 0,
+        order_count: 0,
+        buyer_count: 0,
+        poKeys: new Set<string>(),
+        buyers: new Set<string>(),
+      };
+      item.qty += ln.qty;
+      item.amount_usd += ln.amount;
+      item.poKeys.add((h.po_no ?? h.id).toString());
+      item.buyers.add(buyerName);
+      item.order_count = item.poKeys.size;
+      item.buyer_count = item.buyers.size;
+      itemMap.set(itemKey, item);
 
       if (PRODUCTION_SET.has(st)) {
         productionUSD += ln.amount;
@@ -262,6 +382,265 @@ export async function GET(req: NextRequest) {
       }))
       .sort((a, b) => b.amount_usd - a.amount_usd)
       .slice(0, 20);
+
+    const productRows = Array.from(itemMap.values()).map((r) => ({
+      buyer_style_no: r.buyer_style_no,
+      jm_style_no: r.jm_style_no,
+      description: r.description,
+      qty: r.qty,
+      amount_usd: Number(r.amount_usd.toFixed(2)),
+      order_count: r.order_count,
+      buyer_count: r.buyer_count,
+    }));
+
+    const top_items_by_qty = [...productRows]
+      .sort((a, b) => b.qty - a.qty || b.amount_usd - a.amount_usd)
+      .slice(0, topLimit);
+
+    const top_items_by_amount = [...productRows]
+      .sort((a, b) => b.amount_usd - a.amount_usd || b.qty - a.qty)
+      .slice(0, topLimit);
+
+    const top_repeat_items = [...productRows]
+      .sort((a, b) => b.order_count - a.order_count || b.amount_usd - a.amount_usd)
+      .slice(0, topLimit);
+
+    const styleNos = uniq(
+      lineRows
+        .map((ln) => cleanItemText(ln.jm_style_no))
+        .filter(Boolean)
+    );
+    const devByStyle = new Map<string, { product_type: string | null; product_category: string | null }>();
+    if (styleNos.length > 0) {
+      const { data: devRows } = await supabase
+        .from("product_development_headers")
+        .select("style_no, product_type, product_category")
+        .in("style_no", styleNos);
+
+      (devRows ?? []).forEach((row: any) => {
+        const style = cleanItemText(row.style_no);
+        if (!style) return;
+        devByStyle.set(style, {
+          product_type: cleanItemText(row.product_type) || null,
+          product_category: cleanItemText(row.product_category) || null,
+        });
+      });
+    }
+
+    type PreferenceBucket = {
+      buyer_name: string;
+      key: string;
+      label: string;
+      qty: number;
+      amount_usd: number;
+      repeat_orders: number;
+      poKeys: Set<string>;
+      last_order_date: string | null;
+      score: number;
+    };
+
+    type PreferenceStyle = PreferenceBucket & {
+      jm_style_no: string | null;
+      buyer_style_no: string | null;
+      description: string | null;
+      product_type: string | null;
+      product_category: string | null;
+    };
+
+    const typeMap = new Map<string, PreferenceBucket>();
+    const categoryMap = new Map<string, PreferenceBucket>();
+    const styleMap = new Map<string, PreferenceStyle>();
+
+    for (const ln of lineRows) {
+      const h = headerById.get(ln.po_header_id);
+      if (!h) continue;
+
+      const buyerName = (h.buyer_name ?? "UNKNOWN").toString().trim() || "UNKNOWN";
+      const orderDate = (h.order_date ?? null)?.toString().slice(0, 10) || null;
+      const poKey = (h.po_no ?? h.id).toString();
+      const dev = ln.jm_style_no ? devByStyle.get(ln.jm_style_no) : undefined;
+      const productType = dev?.product_type || "Uncategorized";
+      const productCategory = displayCategoryName(dev?.product_category);
+
+      const touchBucket = (map: Map<string, PreferenceBucket>, label: string) => {
+        const key = `${buyerName}__${label}`;
+        const current =
+          map.get(key) ||
+          {
+            buyer_name: buyerName,
+            key,
+            label,
+            qty: 0,
+            amount_usd: 0,
+            repeat_orders: 0,
+            poKeys: new Set<string>(),
+            last_order_date: null,
+            score: 0,
+          };
+        current.qty += ln.qty;
+        current.amount_usd += ln.amount;
+        current.poKeys.add(poKey);
+        current.repeat_orders = current.poKeys.size;
+        if (!current.last_order_date || (orderDate && orderDate > current.last_order_date)) {
+          current.last_order_date = orderDate;
+        }
+        map.set(key, current);
+      };
+
+      touchBucket(typeMap, productType);
+      touchBucket(categoryMap, productCategory);
+
+      const styleKey = `${buyerName}__${ln.jm_style_no || ""}__${ln.buyer_style_no || ""}__${ln.description || ""}`;
+      const style =
+        styleMap.get(styleKey) ||
+        {
+          buyer_name: buyerName,
+          key: styleKey,
+          label: [ln.jm_style_no, ln.buyer_style_no].filter(Boolean).join(" / ") || ln.description || "-",
+          jm_style_no: ln.jm_style_no,
+          buyer_style_no: ln.buyer_style_no,
+          description: ln.description,
+          product_type: productType,
+          product_category: productCategory,
+          qty: 0,
+          amount_usd: 0,
+          repeat_orders: 0,
+          poKeys: new Set<string>(),
+          last_order_date: null,
+          score: 0,
+        };
+      style.qty += ln.qty;
+      style.amount_usd += ln.amount;
+      style.poKeys.add(poKey);
+      style.repeat_orders = style.poKeys.size;
+      if (!style.last_order_date || (orderDate && orderDate > style.last_order_date)) {
+        style.last_order_date = orderDate;
+      }
+      styleMap.set(styleKey, style);
+    }
+
+    const scoreAndSort = <T extends PreferenceBucket>(rows: T[], weights: { qty: number; amount: number; repeat: number; recency: number }, limit?: number) => {
+      const maxQty = Math.max(0, ...rows.map((r) => r.qty));
+      const maxAmount = Math.max(0, ...rows.map((r) => r.amount_usd));
+      const maxRepeat = Math.max(0, ...rows.map((r) => r.repeat_orders));
+      const scored = rows
+        .map((r) => ({
+          ...r,
+          amount_usd: Number(r.amount_usd.toFixed(2)),
+          score: Number(
+            (
+              normalizeScore(r.qty, maxQty) * weights.qty +
+              normalizeScore(r.amount_usd, maxAmount) * weights.amount +
+              normalizeScore(r.repeat_orders, maxRepeat) * weights.repeat +
+              recencyScore(r.last_order_date, end) * weights.recency
+            ).toFixed(1)
+          ),
+        }))
+        .sort((a, b) => b.score - a.score || b.repeat_orders - a.repeat_orders || b.amount_usd - a.amount_usd)
+        .map(({ poKeys, ...rest }) => rest);
+      return typeof limit === "number" ? scored.slice(0, limit) : scored;
+    };
+
+    const buyer_preferences = {
+      product_types: scoreAndSort(Array.from(typeMap.values()), {
+        qty: 0.25,
+        amount: 0.25,
+        repeat: 0.3,
+        recency: 0.2,
+      }, topLimit),
+      categories: scoreAndSort(Array.from(categoryMap.values()), {
+        qty: 0.25,
+        amount: 0.25,
+        repeat: 0.3,
+        recency: 0.2,
+      }, topLimit),
+      styles: scoreAndSort(Array.from(styleMap.values()), {
+        qty: 0.25,
+        amount: 0.25,
+        repeat: 0.35,
+        recency: 0.15,
+      }, topLimit),
+    };
+
+    const scoredStyles = scoreAndSort(Array.from(styleMap.values()), {
+      qty: 0.25,
+      amount: 0.25,
+      repeat: 0.35,
+      recency: 0.15,
+    }) as Array<Omit<PreferenceStyle, "poKeys">>;
+
+    const dropped_repeat_items = scoredStyles
+      .map((row) => ({
+        ...row,
+        days_since_last_order: daysSince(row.last_order_date, end),
+      }))
+      .filter((row) => row.repeat_orders >= 2 && (row.days_since_last_order ?? 0) >= 90)
+      .sort((a, b) =>
+        b.repeat_orders - a.repeat_orders ||
+        (b.days_since_last_order ?? 0) - (a.days_since_last_order ?? 0) ||
+        b.amount_usd - a.amount_usd
+      )
+      .slice(0, topLimit);
+
+    const categoryPreferenceByBuyer = new Map<string, Set<string>>();
+    for (const row of buyer_preferences.categories) {
+      if (!categoryPreferenceByBuyer.has(row.buyer_name)) {
+        categoryPreferenceByBuyer.set(row.buyer_name, new Set<string>());
+      }
+      categoryPreferenceByBuyer.get(row.buyer_name)!.add(row.label);
+    }
+
+    const orderedStyleByBuyer = new Map<string, Set<string>>();
+    for (const row of scoredStyles) {
+      const key = row.jm_style_no || row.buyer_style_no || row.description || row.label;
+      if (!orderedStyleByBuyer.has(row.buyer_name)) {
+        orderedStyleByBuyer.set(row.buyer_name, new Set<string>());
+      }
+      orderedStyleByBuyer.get(row.buyer_name)!.add(key);
+    }
+
+    const suggestionRows: Array<
+      Omit<PreferenceStyle, "poKeys"> & {
+        target_buyer_name: string;
+        source_buyer_name: string;
+        reason: string;
+        suggestion_score: number;
+      }
+    > = [];
+
+    const buyerNamesForSuggestion = Array.from(categoryPreferenceByBuyer.keys());
+    for (const targetBuyer of buyerNamesForSuggestion) {
+      const preferredCategories = categoryPreferenceByBuyer.get(targetBuyer) || new Set<string>();
+      const alreadyOrdered = orderedStyleByBuyer.get(targetBuyer) || new Set<string>();
+
+      for (const sourceStyle of scoredStyles) {
+        if (sourceStyle.buyer_name === targetBuyer) continue;
+        if (!sourceStyle.product_category || !preferredCategories.has(sourceStyle.product_category)) continue;
+
+        const styleKey = sourceStyle.jm_style_no || sourceStyle.buyer_style_no || sourceStyle.description || sourceStyle.label;
+        if (alreadyOrdered.has(styleKey)) continue;
+
+        const suggestionScore = Number(
+          (
+            sourceStyle.score * 0.55 +
+            normalizeScore(sourceStyle.repeat_orders, Math.max(1, ...scoredStyles.map((r) => r.repeat_orders))) * 0.25 +
+            recencyScore(sourceStyle.last_order_date, end) * 0.2
+          ).toFixed(1)
+        );
+
+        suggestionRows.push({
+          ...sourceStyle,
+          target_buyer_name: targetBuyer,
+          source_buyer_name: sourceStyle.buyer_name,
+          reason: `${targetBuyer} prefers ${sourceStyle.product_category}; ${sourceStyle.buyer_name} repeated this style ${sourceStyle.repeat_orders}x`,
+          suggestion_score: suggestionScore,
+        });
+      }
+    }
+
+    const next_suggestion_candidates = suggestionRows
+      .sort((a, b) => b.suggestion_score - a.suggestion_score || b.repeat_orders - a.repeat_orders || b.amount_usd - a.amount_usd)
+      .slice(0, topLimit);
 
         /**
      * 3) Shipped (Invoice Date 기준, Alignment with Performance/Home rule)
@@ -387,6 +766,7 @@ export async function GET(req: NextRequest) {
           siteIdsRaw?.toUpperCase() === "ALL"
             ? "ALL"
             : siteIdsRaw || siteLegacyRaw || "ALL",
+        top_limit: topLimit,
       },
       meta: {
         date_col_used: "order_date",
@@ -401,6 +781,16 @@ export async function GET(req: NextRequest) {
       monthly,
       status,
       buyer_breakdown,
+      product_insights: {
+        top_items_by_qty,
+        top_items_by_amount,
+        top_repeat_items,
+      },
+      buyer_preferences,
+      opportunity_insights: {
+        dropped_repeat_items,
+        next_suggestion_candidates,
+      },
     });
   } catch (e: any) {
     return NextResponse.json(

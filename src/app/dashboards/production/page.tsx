@@ -15,6 +15,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import ExcelJS from "exceljs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { useUnicodePdfFont } from "@/lib/pdfUnicodeFont";
 
 type BuyerOption = { id: string; code: string; name: string };
 
@@ -109,6 +113,10 @@ function fmtQty(v: number) {
 
 function fmtDate(v?: string | null) {
   return v ? v.slice(0, 10) : "-";
+}
+
+function exportDate() {
+  return todayIso();
 }
 
 function delayDays(v?: string | null, today = todayIso()) {
@@ -514,6 +522,235 @@ export default function ProductionDashboardPage() {
     ? `${overviewKpis.ready?.sub_value || "0"} ready POs`
     : `${new Set(readyRows.map((row) => row.po_no).filter(Boolean)).size} ready POs`;
 
+  const filterScopeText = React.useMemo(() => {
+    return [
+      `Search: ${query.trim() || "ALL"}`,
+      `Buyer: ${buyerId === "ALL" ? "ALL" : buyers.find((buyer) => buyer.id === buyerId)?.name || buyerId}`,
+      `Vendor: ${vendor}`,
+      `Ship Mode: ${shipMode}`,
+      `Scope: ${scope}`,
+      `Req Ship: ${dateFrom || "-"} ~ ${dateTo || "-"}`,
+    ].join("    ");
+  }, [query, buyerId, buyers, vendor, shipMode, scope, dateFrom, dateTo]);
+
+  const exportRows = React.useMemo(() => {
+    return scopedRows.map((row) => ({
+      PO: row.po_no || "",
+      Buyer: row.buyer_name || "",
+      Vendor: row.vendor_name || "In-house",
+      Style: row.style_no || "",
+      "Req Ship": fmtDate(row.requested_ship_date),
+      Delay: delayDays(row.requested_ship_date, today) ?? "",
+      "Ship Mode": row.ship_mode || "",
+      Status: row.status || "",
+      "Work Sheet": row.work_sheet_id || "",
+      Ready: row.ready_to_ship ? "Y" : "",
+      Qty: n(row.qty),
+      Amount: amountOf(row),
+    }));
+  }, [scopedRows, today]);
+
+  async function exportExcel() {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "JM ERP";
+    workbook.created = new Date();
+
+    const navy = "FF1E3A5F";
+    const pale = "FFEFF6FF";
+    const headerFill = "FFE5EDF8";
+    const borderColor = "FFD6E0EA";
+    const border = {
+      top: { style: "thin", color: { argb: borderColor } },
+      left: { style: "thin", color: { argb: borderColor } },
+      bottom: { style: "thin", color: { argb: borderColor } },
+      right: { style: "thin", color: { argb: borderColor } },
+    } as const;
+
+    const styleTitle = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.mergeCells(`A1:${lastCol}1`);
+      const titleCell = sheet.getCell("A1");
+      titleCell.value = title;
+      titleCell.font = { bold: true, size: 18, color: { argb: navy } };
+      titleCell.alignment = { horizontal: "center" };
+      sheet.mergeCells(`A2:${lastCol}2`);
+      const scopeCell = sheet.getCell("A2");
+      scopeCell.value = filterScopeText;
+      scopeCell.font = { size: 10, color: { argb: "FF64748B" } };
+      scopeCell.alignment = { horizontal: "center" };
+      sheet.addRow([]);
+    };
+
+    const styleHeader = (row: ExcelJS.Row) => {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
+        cell.font = { bold: true, color: { argb: "FF0F172A" } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = border;
+      });
+    };
+
+    const styleBody = (row: ExcelJS.Row, moneyCols: number[] = [], qtyCols: number[] = []) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = border;
+        cell.alignment = { vertical: "top", wrapText: true };
+        if (moneyCols.includes(colNumber)) cell.numFmt = '"USD "#,##0.00';
+        if (qtyCols.includes(colNumber)) cell.numFmt = "#,##0";
+      });
+    };
+
+    const addSection = (sheet: ExcelJS.Worksheet, title: string, lastCol: string) => {
+      sheet.addRow([]);
+      sheet.mergeCells(`A${sheet.rowCount + 1}:${lastCol}${sheet.rowCount + 1}`);
+      const row = sheet.addRow([title]);
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pale } };
+        cell.font = { bold: true, color: { argb: navy } };
+        cell.border = border;
+      });
+    };
+
+    const summary = workbook.addWorksheet("Summary", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(summary, "Production Dashboard", "E");
+    addSection(summary, "KPI Summary", "E");
+    styleHeader(summary.addRow(["Metric", "Value", "Sub", "", ""]));
+    [
+      ["Pending Orders", pendingOrdersValue, pendingOrdersSub],
+      ["In Production", inProductionValue, inProductionSub],
+      ["Ready to Ship", readyValue, readySub],
+      ["Overdue Production", overdueAmount, `${new Set(overdueRows.map((row) => row.po_no).filter(Boolean)).size} overdue POs`],
+      ["No Work Sheet Yet", noWorkSheetRows.length, `${new Set(noWorkSheetRows.map((row) => row.po_no).filter(Boolean)).size} POs not started`],
+      ["Late by 7+ Days", late7Rows.length, `${new Set(late7Rows.map((row) => row.po_no).filter(Boolean)).size} high-risk lines`],
+      ["Active Vendors", new Set(inProductionRows.map((row) => row.vendor_name || "In-house")).size, "Vendors with production lines"],
+    ].forEach((row, idx) => styleBody(summary.addRow(row), idx <= 3 ? [2] : [], idx > 3 ? [2] : []));
+
+    addSection(summary, "Vendor Summary", "E");
+    styleHeader(summary.addRow(["Vendor", "POs", "Lines", "Amount", "Risk"]));
+    vendorSummary.forEach((row) => {
+      styleBody(
+        summary.addRow([
+          row.vendor,
+          row.poCount,
+          row.lineCount,
+          row.amountUsd,
+          `Overdue ${row.overdueCount} / Ready ${row.readyCount} / No WS ${row.noWsCount}`,
+        ]),
+        [4],
+        [2, 3]
+      );
+    });
+    summary.columns = [{ width: 30 }, { width: 14 }, { width: 14 }, { width: 18 }, { width: 34 }];
+
+    const lines = workbook.addWorksheet("Production Lines", { views: [{ state: "frozen", ySplit: 4 }] });
+    styleTitle(lines, "Production Lines", "L");
+    styleHeader(lines.addRow(Object.keys(exportRows[0] || {
+      PO: "",
+      Buyer: "",
+      Vendor: "",
+      Style: "",
+      "Req Ship": "",
+      Delay: "",
+      "Ship Mode": "",
+      Status: "",
+      "Work Sheet": "",
+      Ready: "",
+      Qty: "",
+      Amount: "",
+    })));
+    exportRows.forEach((row) => {
+      styleBody(lines.addRow(Object.values(row)), [12], [6, 11]);
+    });
+    lines.columns = [
+      { width: 16 },
+      { width: 24 },
+      { width: 28 },
+      { width: 18 },
+      { width: 14 },
+      { width: 10 },
+      { width: 14 },
+      { width: 16 },
+      { width: 20 },
+      { width: 10 },
+      { width: 14 },
+      { width: 16 },
+    ];
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `production_dashboard_${exportDate()}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportPdf() {
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    const pdfFont = await useUnicodePdfFont(doc);
+    doc.setFont(pdfFont, "bold");
+    doc.setFontSize(18);
+    doc.text("Production Dashboard", 40, 40);
+    doc.setFont(pdfFont, "normal");
+    doc.setFontSize(9);
+    doc.text(filterScopeText, 40, 58, { maxWidth: 760 });
+
+    autoTable(doc, {
+      startY: 78,
+      head: [["Metric", "Value", "Sub"]],
+      body: [
+        ["Pending Orders", fmtMoney(pendingOrdersValue), pendingOrdersSub],
+        ["In Production", fmtMoney(inProductionValue), inProductionSub],
+        ["Ready to Ship", fmtMoney(readyValue), readySub],
+        ["Overdue Production", fmtMoney(overdueAmount), `${new Set(overdueRows.map((row) => row.po_no).filter(Boolean)).size} overdue POs`],
+        ["No Work Sheet Yet", String(noWorkSheetRows.length), `${new Set(noWorkSheetRows.map((row) => row.po_no).filter(Boolean)).size} POs not started`],
+        ["Late by 7+ Days", String(late7Rows.length), `${new Set(late7Rows.map((row) => row.po_no).filter(Boolean)).size} high-risk lines`],
+      ],
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+      margin: { left: 40, right: 40 },
+    });
+
+    autoTable(doc, {
+      startY: ((doc as any).lastAutoTable?.finalY || 78) + 16,
+      head: [["Vendor", "POs", "Lines", "Amount", "Risk"]],
+      body: vendorSummary.slice(0, 20).map((row) => [
+        row.vendor,
+        row.poCount,
+        row.lineCount,
+        fmtMoney(row.amountUsd),
+        `Overdue ${row.overdueCount} / Ready ${row.readyCount} / No WS ${row.noWsCount}`,
+      ]),
+      styles: { font: pdfFont, fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+      margin: { left: 40, right: 40 },
+    });
+
+    doc.addPage("a4", "landscape");
+    doc.setFont(pdfFont, "bold");
+    doc.setFontSize(14);
+    doc.text("Production Lines", 40, 40);
+    autoTable(doc, {
+      startY: 58,
+      head: [["PO", "Buyer", "Vendor", "Style", "Req Ship", "Delay", "Ship Mode", "Qty", "Amount"]],
+      body: scopedRows.slice(0, 120).map((row) => [
+        row.po_no || "",
+        row.buyer_name || "",
+        row.vendor_name || "In-house",
+        row.style_no || "",
+        fmtDate(row.requested_ship_date),
+        delayDays(row.requested_ship_date, today) ?? "",
+        row.ship_mode || "",
+        fmtQty(n(row.qty)),
+        fmtMoney(amountOf(row)),
+      ]),
+      styles: { font: pdfFont, fontSize: 7, cellPadding: 3 },
+      headStyles: { fillColor: [229, 237, 248], textColor: 20, fontStyle: "bold" },
+      margin: { left: 40, right: 40 },
+    });
+
+    doc.save(`production_dashboard_${exportDate()}.pdf`);
+  }
+
   const resetFilters = () => {
     setQuery("");
     setBuyerId("ALL");
@@ -618,6 +855,12 @@ export default function ProductionDashboardPage() {
               <div className="flex items-end gap-2 md:col-span-2">
                 <Button type="button" variant="outline" onClick={resetFilters}>
                   Reset
+                </Button>
+                <Button type="button" variant="outline" onClick={exportExcel} disabled={loading}>
+                  Export Excel
+                </Button>
+                <Button type="button" variant="secondary" onClick={exportPdf} disabled={loading}>
+                  PDF / Print
                 </Button>
                 <div className="text-sm text-slate-500">
                   Today: <span className="font-medium text-slate-700">{today}</span>

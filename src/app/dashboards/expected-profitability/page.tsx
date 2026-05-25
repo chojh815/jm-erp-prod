@@ -553,7 +553,7 @@ export default function ExpectedProfitabilityPage() {
             <div className="xl:col-span-8 flex gap-2">
               <Button onClick={() => void load()} disabled={loading}>{loading ? "Loading..." : "Search"}</Button>
               <Button variant="outline" onClick={() => void handleExportExcel()} disabled={loading || rows.length === 0}>
-                Export XLSX
+                Export Excel
               </Button>
               <Button variant="outline" onClick={handleExportPdf} disabled={loading || rows.length === 0}>
                 Export PDF
