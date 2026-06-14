@@ -76,6 +76,11 @@ function asText(v: any) {
 function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
+function chunk<T>(arr: T[], size: number) {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 function n(v: any, fallback = 0) {
   if (v === null || v === undefined) return fallback;
 
@@ -803,14 +808,22 @@ export async function GET(req: Request) {
     const shippedQtyByLineId: Record<string, number> = {};
 
     if (allPoLineIds.length > 0) {
-      const sLineRes = await supabaseAdmin
-        .from("shipment_lines")
-        .select(["id", "po_line_id", "shipment_id", "shipped_qty", "is_deleted"].join(","))
-        .in("po_line_id", uniq(allPoLineIds))
-        .eq("is_deleted", false);
+      const sLines: ShipmentLineRow[] = [];
+      for (const ids of chunk(uniq(allPoLineIds), 100)) {
+        const sLineRes = await supabaseAdmin
+          .from("shipment_lines")
+          .select(["id", "po_line_id", "shipment_id", "shipped_qty", "is_deleted"].join(","))
+          .in("po_line_id", ids)
+          .eq("is_deleted", false);
 
-      if (!sLineRes.error) {
-        const sLines = ((sLineRes.data ?? []) as unknown as ShipmentLineRow[]) || [];
+        if (sLineRes.error) {
+          throw new Error(`Failed to load shipment_lines: ${sLineRes.error.message}`);
+        }
+
+        sLines.push(...(((sLineRes.data ?? []) as unknown as ShipmentLineRow[]) || []));
+      }
+
+      if (sLines.length > 0) {
         const shipmentIds = uniq(sLines.map((r) => r.shipment_id).filter(Boolean)) as string[];
 
         let shipmentById: Record<string, ShipmentRow> = {};
