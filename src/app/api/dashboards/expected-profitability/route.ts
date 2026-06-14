@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
     if (brand) query = query.ilike("buyer_brand_name", `%${brand}%`);
     if (start) query = query.gte("order_date", start);
     if (end) query = query.lte("order_date", end);
-    if (missingOnly) query = query.eq("has_planned_cost", false);
+    if (missingOnly) query = query.is("planned_unit_cost", null);
 
     // frontend sends whole numbers like 20, 60 -> DB margin_pct is ratio, so divide by 100
     if (marginMin != null) query = query.gte("margin_pct", marginMin / 100);
@@ -72,7 +72,10 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const rows = Array.isArray(data) ? data : [];
+    const rows = (Array.isArray(data) ? data : []).map((row: any) => ({
+      ...row,
+      has_planned_cost: row.planned_unit_cost !== null && row.planned_unit_cost !== undefined,
+    }));
 
     // IMPORTANT: keep summary field names aligned with existing page.tsx
     const summary = rows.reduce(
