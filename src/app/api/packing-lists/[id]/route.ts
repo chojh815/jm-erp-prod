@@ -330,6 +330,92 @@ async function resolvePackingListHeader(id: string) {
   return { plId: null as any, header: null as any, resolved_by: "none" as const };
 }
 
+const INVOICE_SELECT =
+  "id, invoice_no, invoice_date, created_at, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text, shipment_id, status, is_deleted";
+
+function isActiveInvoice(row: any) {
+  if (!row) return false;
+  const status = String(row.status ?? "").trim().toUpperCase();
+  return row.is_deleted !== true && status !== "DELETED" && status !== "CANCELED" && status !== "CANCELLED";
+}
+
+async function findActiveInvoiceForPackingHeader(H: any) {
+  const invId = H.invoice_id ?? null;
+  if (invId && isUuid(String(invId))) {
+    const { data: invRow } = await supabaseAdmin
+      .from("invoice_headers")
+      .select(INVOICE_SELECT)
+      .eq("id", invId)
+      .maybeSingle();
+    if (isActiveInvoice(invRow)) return invRow;
+  }
+
+  const invNo =
+    H.invoice_no ??
+    H.invoice_no_text ??
+    H.invoice_number ??
+    H.invoice ??
+    null;
+  const invNoText = (invNo ?? "").toString().trim();
+  if (invNoText) {
+    const { data: invRows } = await supabaseAdmin
+      .from("invoice_headers")
+      .select(INVOICE_SELECT)
+      .eq("invoice_no", invNoText)
+      .order("created_at", { ascending: false })
+      .limit(5);
+    const inv = (invRows ?? []).find(isActiveInvoice);
+    if (inv) return inv;
+  }
+
+  if (H.shipment_id && isUuid(String(H.shipment_id))) {
+    const { data: invRows } = await supabaseAdmin
+      .from("invoice_headers")
+      .select(INVOICE_SELECT)
+      .eq("shipment_id", H.shipment_id)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    const inv = (invRows ?? []).find(isActiveInvoice);
+    if (inv) return inv;
+  }
+
+  return null;
+}
+
+async function syncPackingHeaderInvoice(plId: string, H: any) {
+  const inv = await findActiveInvoiceForPackingHeader(H);
+  if (!inv) return null;
+
+  const invNo = (inv.invoice_no ?? "").toString().trim();
+  const currentInvId = (H.invoice_id ?? "").toString();
+  const currentInvNo = (H.invoice_no ?? "").toString().trim();
+  const shouldSync = currentInvId !== inv.id || (invNo && currentInvNo !== invNo);
+
+  if (shouldSync) {
+    const changed: any = {
+      invoice_id: inv.id,
+      updated_at: new Date().toISOString(),
+    };
+    if (invNo) changed.invoice_no = invNo;
+
+    const { error } = await supabaseAdmin
+      .from("packing_list_headers")
+      .update(changed)
+      .eq("id", plId);
+
+    if (!error) Object.assign(H, changed);
+    else console.warn("PackingList invoice sync failed:", error.message);
+  }
+
+  const invDate = (inv.invoice_date ?? inv.created_at ?? null) as any;
+  if (invDate) {
+    (H as any).invoice_date = invDate;
+    (H as any).invoiceDate = invDate;
+  }
+
+  return inv;
+}
+
 export async function GET(
   _req: Request,
   ctx: { params: Promise<{ id: string }> }
@@ -351,49 +437,9 @@ export async function GET(
     // invoice_headers에서 "빈 값만" 채워서 내려줌 + DB backfill
     // ------------------------------------------------------------
     try {
-      let inv: any = null;
-
-      const invId = H.invoice_id ?? null;
-      if (invId && isUuid(String(invId))) {
-        const { data: invRow } = await supabaseAdmin
-          .from("invoice_headers")
-          .select(
-            "id, invoice_no, invoice_date, created_at, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
-          )
-          .eq("id", invId)
-          .maybeSingle();
-        inv = invRow ?? null;
-      }
-
-      if (!inv) {
-        const invNo =
-          H.invoice_no ??
-          H.invoice_no_text ??
-          H.invoice_number ??
-          H.invoice ??
-          null;
-        const invNoText = (invNo ?? "").toString().trim();
-        if (invNoText) {
-          const { data: invRow } = await supabaseAdmin
-            .from("invoice_headers")
-            .select(
-              "id, invoice_no, invoice_date, created_at, shipper_name, shipper_address, consignee_text, notify_party_text, remarks, coo_text"
-            )
-            .eq("invoice_no", invNoText)
-            .maybeSingle();
-          inv = invRow ?? null;
-        }
-      }
+      const inv = await syncPackingHeaderInvoice(plId, H);
 
       if (inv) {
-        // ✅ Packing List PDF에서 Invoice Date를 표시할 수 있도록 invoice_date를 헤더에 주입
-        // - invoice_headers.invoice_date가 있으면 우선 사용
-        // - 없으면 invoice_headers.created_at을 폴백으로 사용
-        const invDate = (inv.invoice_date ?? inv.created_at ?? null) as any;
-        if (!(H as any).invoice_date && invDate) (H as any).invoice_date = invDate;
-        // 프론트/기존 코드 호환용(혹시 invoiceDate를 쓰는 경우)
-        if (!(H as any).invoiceDate && invDate) (H as any).invoiceDate = invDate;
-
         const patch: any = {};
         patch.shipper_name = pickTextIfEmpty(H.shipper_name, inv.shipper_name);
         patch.shipper_address = pickTextIfEmpty(H.shipper_address, inv.shipper_address);
@@ -509,6 +555,7 @@ export async function PUT(
 
     const plId = resolved.plId as string;
     const header = resolved.header as any;
+    await syncPackingHeaderInvoice(plId, header);
 
     const body = await req.json().catch(() => ({}));
     const headerIn = body?.header || {};

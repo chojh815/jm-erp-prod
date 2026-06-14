@@ -33,7 +33,7 @@ export async function GET(_req: NextRequest) {
   try {
     const { data, error } = await supabaseAdmin
       .from("user_profiles")
-      .select("user_id, email, name, role, created_at")
+      .select("user_id, email, name, role, is_active, created_at")
       .order("created_at", { ascending: true });
 
     if (error) {
@@ -48,6 +48,7 @@ export async function GET(_req: NextRequest) {
         email: row.email,
         name: row.name,
         role: row.role,
+        is_active: row.is_active ?? true,
         created_at: row.created_at,
       })) ?? [];
 
@@ -111,10 +112,11 @@ export async function POST(req: NextRequest) {
           email,
           name,
           role,
+          is_active: true,
         },
         { onConflict: "user_id" }
       )
-      .select("user_id, email, name, role, created_at")
+      .select("user_id, email, name, role, is_active, created_at")
       .single();
 
     if (error) {
@@ -128,6 +130,7 @@ export async function POST(req: NextRequest) {
       email: data.email,
       name: data.name,
       role: data.role,
+      is_active: data.is_active ?? true,
       created_at: data.created_at,
     };
 
@@ -152,12 +155,13 @@ export async function PUT(req: NextRequest) {
     const updates: any = {};
     if ("name" in body) updates.name = body.name ?? null;
     if ("role" in body) updates.role = body.role ?? "viewer";
+    if ("is_active" in body) updates.is_active = body.is_active !== false;
 
     const { data, error } = await supabaseAdmin
       .from("user_profiles")
       .update(updates)
       .eq("user_id", id)
-      .select("user_id, email, name, role, created_at")
+      .select("user_id, email, name, role, is_active, created_at")
       .single();
 
     if (error) {
@@ -171,6 +175,7 @@ export async function PUT(req: NextRequest) {
       email: data.email,
       name: data.name,
       role: data.role,
+      is_active: data.is_active ?? true,
       created_at: data.created_at,
     };
 

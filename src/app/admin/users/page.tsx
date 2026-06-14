@@ -61,6 +61,7 @@ export default function AdminUsersPage() {
   // UI에서 바로 반영하기 위한 로컬 dirty 상태(perm_key -> state)
   const [localState, setLocalState] = useState<Map<string, OverrideState>>(new Map());
   const [saving, setSaving] = useState(false);
+  const [statusSaving, setStatusSaving] = useState(false);
 
   const filteredUsers = useMemo(() => {
     const qq = q.trim().toLowerCase();
@@ -194,6 +195,10 @@ export default function AdminUsersPage() {
 
   async function saveChanges() {
     if (!selectedUserId) return;
+    if (selectedUser?.is_active === false) {
+      alert("This user is inactive. Reactivate the user before changing permissions.");
+      return;
+    }
     if (!window.confirm("Do you want to save these permission changes? Existing overrides will be overwritten.")) return;
     setSaving(true);
 
@@ -240,6 +245,49 @@ export default function AdminUsersPage() {
       alert(e?.message || "Save failed.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function changeSelectedUserStatus(nextActive: boolean) {
+    if (!selectedUserId || !selectedUser) return;
+
+    const action = nextActive ? "reactivate" : "deactivate";
+    const message = nextActive
+      ? `Reactivate ${selectedUser.email || "this user"}?\n\nPrevious role and permission overrides will be kept.`
+      : `Deactivate ${selectedUser.email || "this user"}?\n\nERP access will be blocked, but role and permission overrides will be kept for possible reactivation.`;
+
+    if (!window.confirm(message)) return;
+
+    try {
+      setStatusSaving(true);
+      const res = await fetch(
+        `/api/admin/users/${encodeURIComponent(selectedUserId)}/status`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ is_active: nextActive }),
+        }
+      );
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(json?.error || `Failed to ${action} user.`);
+        return;
+      }
+
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.user_id === selectedUserId
+            ? { ...u, is_active: json?.user?.is_active ?? nextActive }
+            : u
+        )
+      );
+      setLocalState(new Map());
+      alert(nextActive ? "User reactivated." : "User deactivated.");
+    } catch (e: any) {
+      alert(e?.message || `Failed to ${action} user.`);
+    } finally {
+      setStatusSaving(false);
     }
   }
 
@@ -309,19 +357,55 @@ export default function AdminUsersPage() {
               <div className="text-lg font-semibold">Permission Overrides</div>
               <div className="text-sm text-slate-500">
                 User: <span className="font-medium">{selectedUser?.email || "-"}</span>{" "}
-                · role: <span className="font-medium">{selectedUser?.role || "viewer"}</span>
+                · role: <span className="font-medium">{selectedUser?.role || "viewer"}</span>{" "}
+                · status:{" "}
+                <span
+                  className={cx(
+                    "font-medium",
+                    selectedUser?.is_active === false ? "text-red-600" : "text-green-700"
+                  )}
+                >
+                  {selectedUser?.is_active === false ? "inactive" : "active"}
+                </span>
               </div>
             </div>
 
-            <Button onClick={saveChanges} disabled={saving || localState.size === 0}>
-              {saving ? "Saving..." : `Save (${localState.size})`}
-            </Button>
+            <div className="flex items-center gap-2">
+              {selectedUser?.is_active === false ? (
+                <Button
+                  onClick={() => changeSelectedUserStatus(true)}
+                  disabled={!selectedUserId || statusSaving}
+                  className="bg-green-600 hover:bg-green-700"
+                >
+                  {statusSaving ? "Saving..." : "Reactivate User"}
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => changeSelectedUserStatus(false)}
+                  disabled={!selectedUserId || statusSaving}
+                  variant="destructive"
+                >
+                  {statusSaving ? "Saving..." : "Deactivate User"}
+                </Button>
+              )}
+              <Button
+                onClick={saveChanges}
+                disabled={saving || localState.size === 0 || selectedUser?.is_active === false}
+              >
+                {saving ? "Saving..." : `Save (${localState.size})`}
+              </Button>
+            </div>
           </div>
 
           <div className="p-4">
             <div className="text-xs text-slate-500 mb-3">
               Click a permission to cycle: <b>Default</b> → <b>+ Allow</b> → <b>- Deny</b> → Default
             </div>
+            {selectedUser?.is_active === false && (
+              <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                This user is inactive. ERP access is blocked, and previous role/permission settings are preserved.
+              </div>
+            )}
 
             {loadingPerms ? (
               <div className="text-sm text-slate-500">Loading permissions...</div>
@@ -345,10 +429,14 @@ export default function AdminUsersPage() {
                       key={perm}
                       className={cx(
                         "border rounded-md px-3 py-2 text-left hover:bg-slate-50 transition",
+                        selectedUser?.is_active === false && "opacity-60 cursor-not-allowed",
                         st === "allow" && "border-green-500",
                         st === "deny" && "border-red-500"
                       )}
-                      onClick={() => cycleState(perm)}
+                      onClick={() => {
+                        if (selectedUser?.is_active === false) return;
+                        cycleState(perm);
+                      }}
                       title="Click to cycle override state"
                     >
                       <div className="flex items-center justify-between">
