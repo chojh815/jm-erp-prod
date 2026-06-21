@@ -215,6 +215,19 @@ export async function POST(req: NextRequest) {
 
     const styleNo = upper(body.styleNo || body.style_no);
     if (!styleNo) return bad("Style No. is required.", 400);
+    const createOnly = body.createOnly === true;
+
+    if (createOnly) {
+      const existing = await getHeaderByStyleNo(styleNo);
+      if (existing.error) {
+        return bad("Failed to check the new style number.", 500, {
+          detail: existing.error?.message,
+        });
+      }
+      if (existing.data?.id) {
+        return bad("This style number already exists. Enter a new style number.", 409);
+      }
+    }
 
     const productCategory = body.productCategory ?? body.product_category ?? null;
     const productType = body.productType ?? body.product_type ?? null;
@@ -250,12 +263,18 @@ export async function POST(req: NextRequest) {
       is_deleted: false,
     };
 
-    const up = await supabaseAdmin
-      .from(T_HEADERS)
-      .upsert(headerPayload, { onConflict: "style_no" })
-      .select("*")
-      .eq("style_no", styleNo)
-      .maybeSingle();
+    const up = createOnly
+      ? await supabaseAdmin
+          .from(T_HEADERS)
+          .insert(headerPayload)
+          .select("*")
+          .maybeSingle()
+      : await supabaseAdmin
+          .from(T_HEADERS)
+          .upsert(headerPayload, { onConflict: "style_no" })
+          .select("*")
+          .eq("style_no", styleNo)
+          .maybeSingle();
 
     if (up.error) {
       console.error("header upsert error:", up.error);

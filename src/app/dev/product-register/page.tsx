@@ -22,7 +22,7 @@ import {
 
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { isValidStyleNo } from "@/lib/styleNo";
 
 type DevRole = AppRole;
@@ -89,9 +89,12 @@ export default function ProductRegisterPage() {
 
   const [isPrintMode, setIsPrintMode] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const [exportingExcel, setExportingExcel] = React.useState(false);
 
   const [styleNo, setStyleNo] = React.useState("JN250001");
   const [styleError, setStyleError] = React.useState<string | null>(null);
+  const [loadedStyleNo, setLoadedStyleNo] = React.useState<string | null>(null);
+  const [duplicateSourceStyleNo, setDuplicateSourceStyleNo] = React.useState<string | null>(null);
 
   // ✅ Legacy(기존제품) 입력 모드: 스타일 번호 형식 제한 없이 저장 허용
   // - 기존 상품을 DB에 처음 등록할 때(레거시 번호) 사용
@@ -528,6 +531,46 @@ export default function ProductRegisterPage() {
     ]);
     setBaseStyleNo("");
     setColorSuffix("");
+    setLoadedStyleNo(null);
+    setDuplicateSourceStyleNo(null);
+  };
+
+  const handleDuplicateAsNew = () => {
+    const source = (loadedStyleNo || styleNo || "").trim().toUpperCase();
+    if (!loadedStyleNo || !source) {
+      alert("Please load an existing style first.");
+      return;
+    }
+
+    setDuplicateSourceStyleNo(source);
+    setLoadedStyleNo(null);
+    setStyleNo("");
+    setStyleError(null);
+    setLegacyStyleMode(false);
+    setImageFile(null);
+    setImagePreview(null);
+    setDevDate(new Date().toISOString().slice(0, 10));
+  };
+
+  const cancelDuplicate = async () => {
+    const source = duplicateSourceStyleNo;
+    if (!source) return;
+
+    try {
+      const res = await fetch(
+        `/api/dev/products?styleNo=${encodeURIComponent(source)}`,
+        { cache: "no-store" }
+      );
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok || !data?.header) {
+        alert(data?.error || "Failed to reload the source style.");
+        return;
+      }
+      applyLoadedStyleFromApi(data);
+    } catch (err) {
+      console.error("cancel duplicate reload error:", err);
+      alert("Failed to reload the source style.");
+    }
   };
 
   // ===== Delete (DB에서 현재 스타일 삭제) =====
@@ -596,69 +639,336 @@ export default function ProductRegisterPage() {
   const fxUSD = currency === "CNY" ? total * 0.14 : 0;
   const fxVND = currency === "CNY" ? total * 3500 : 0;
 
-  // ===== Excel Export =====
-  const handleExportExcel = () => {
+  // ===== Styled Excel Export =====
+  const handleExportExcel = async () => {
     if (!validateAllNumbers()) return;
 
-    const headerRows = [
-      ["Style No", styleNo],
-      ["Product Name", productType],
-      ["Category", productCategory],
-      ["Weight (g)", weight],
-      ["Size", size],
-      ["Plating Color", platingColor],
-      ["Development Date", devDate],
-      ["Developer", developer],
-      ["Currency", currency],
-      ["Remarks", remarks],
-      [],
-    ];
+    setExportingExcel(true);
+    try {
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "JM ERP";
+      workbook.created = new Date();
+      workbook.calcProperties.fullCalcOnLoad = true;
 
-    const materialHeader = [
-      ["Materials"],
-      ["Name", "Spec", "Qty", "Unit Cost", "Supplier", "Amount"],
-    ];
+      const sheet = workbook.addWorksheet("Product Costing", {
+        views: [{ state: "frozen", ySplit: 2 }],
+        pageSetup: {
+          paperSize: 9,
+          orientation: "portrait",
+          fitToPage: true,
+          fitToWidth: 1,
+          fitToHeight: 0,
+          margins: {
+            left: 0.3,
+            right: 0.3,
+            top: 0.45,
+            bottom: 0.45,
+            header: 0.2,
+            footer: 0.2,
+          },
+        },
+        headerFooter: {
+          oddFooter: "&LJM ERP&CProduct Development Costing&RPage &P of &N",
+        },
+      });
 
-    const materialRows = getActiveMaterials().map((m) => {
-      const q = toNumber(m.qty) ?? 0;
-      const p = toNumber(m.unitPrice) ?? 0;
-      const amt = q * p;
-      return [m.name, m.spec, m.qty, m.unitPrice, m.supplier, amt ? amt.toFixed(4) : ""];
-    });
+      const navy = "FF1E3A5F";
+      const teal = "FF52718A";
+      const paleBlue = "FFEAF1F8";
+      const paleTeal = "FFF3F7F9";
+      const lightGray = "FFF3F4F6";
+      const white = "FFFFFFFF";
+      const dark = "FF111827";
+      const muted = "FF64748B";
+      const border = { style: "thin", color: { argb: "FFCBD5E1" } } as const;
+      const allBorders = { top: border, left: border, bottom: border, right: border };
+      const baseFont = { name: "Arial", size: 10, color: { argb: dark } };
 
-    const operationHeader = [
-      [],
-      ["Operations"],
-      ["Name", "Qty", "Unit Cost", "Supplier", "Amount"],
-    ];
+      sheet.columns = [
+        { width: 5 },
+        { width: 15 },
+        { width: 15 },
+        { width: 17 },
+        { width: 13 },
+        { width: 11 },
+        { width: 14 },
+        { width: 14 },
+        { width: 14 },
+        { width: 16 },
+      ];
+      sheet.properties.defaultRowHeight = 20;
 
-    const operationRows = getActiveOperations().map((o) => {
-      const q = toNumber(o.qty) ?? 0;
-      const p = toNumber(o.unitPrice) ?? 0;
-      const amt = q * p;
-      return [o.name, o.qty, o.unitPrice, o.supplier, amt ? amt.toFixed(4) : ""];
-    });
+      const styleCells = (rowFrom: number, rowTo: number, colFrom = 1, colTo = 10) => {
+        for (let rowNo = rowFrom; rowNo <= rowTo; rowNo += 1) {
+          for (let colNo = colFrom; colNo <= colTo; colNo += 1) {
+            const cell = sheet.getCell(rowNo, colNo);
+            cell.font = baseFont;
+            cell.border = allBorders;
+            cell.alignment = { vertical: "middle", wrapText: true };
+          }
+        }
+      };
 
-    const totalRows = [
-      [],
-      ["Material Total", materialTotal.toFixed(4)],
-      ["Operation Total", operationTotal.toFixed(4)],
-      ["Total", total.toFixed(4)],
-    ];
+      const mergeValue = (
+        range: string,
+        value: any,
+        options?: {
+          fill?: string;
+          bold?: boolean;
+          color?: string;
+          horizontal?: "left" | "center" | "right";
+          size?: number;
+        }
+      ) => {
+        sheet.mergeCells(range);
+        const cell = sheet.getCell(range.split(":")[0]);
+        cell.value = value ?? "";
+        cell.font = {
+          name: "Arial",
+          size: options?.size ?? 10,
+          bold: options?.bold ?? false,
+          color: { argb: options?.color ?? dark },
+        };
+        if (options?.fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: options.fill } };
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: options?.horizontal ?? "left",
+          wrapText: true,
+        };
+      };
 
-    const wsData = [
-      ...headerRows,
-      ...materialHeader,
-      ...materialRows,
-      ...operationHeader,
-      ...operationRows,
-      ...totalRows,
-    ];
+      sheet.mergeCells("A1:J2");
+      const titleCell = sheet.getCell("A1");
+      titleCell.value = "PRODUCT DEVELOPMENT COSTING";
+      titleCell.font = { name: "Arial", size: 20, bold: true, color: { argb: white } };
+      titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: navy } };
+      titleCell.alignment = { horizontal: "center", vertical: "middle" };
+      styleCells(1, 2);
+      titleCell.font = { name: "Arial", size: 20, bold: true, color: { argb: white } };
+      titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: navy } };
+      sheet.getRow(1).height = 28;
+      sheet.getRow(2).height = 14;
 
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Costing");
-    XLSX.writeFile(wb, `${styleNo || "style"}_costing.xlsx`);
+      styleCells(4, 9);
+      const labelOptions = { fill: paleBlue, bold: true, color: navy };
+      mergeValue("A4:B4", "Style No.", labelOptions);
+      mergeValue("C4:D4", styleNo, { bold: true, size: 12 });
+      mergeValue("E4:F4", "Product Category", labelOptions);
+      sheet.getCell("G4").value = productCategory || "-";
+
+      mergeValue("A5:B5", "Product Name", labelOptions);
+      mergeValue("C5:G5", productType || "-");
+      mergeValue("A6:B6", "Weight (g)", labelOptions);
+      mergeValue("C6:D6", toNumber(weight) ?? 0, { horizontal: "right" });
+      mergeValue("E6:F6", "Size", labelOptions);
+      sheet.getCell("G6").value = size || "-";
+      mergeValue("A7:B7", "Plating Color", labelOptions);
+      mergeValue("C7:D7", platingColor || "-");
+      mergeValue("E7:F7", "Development Date", labelOptions);
+      sheet.getCell("G7").value = devDate || "-";
+      mergeValue("A8:B8", "Developer", labelOptions);
+      mergeValue("C8:D8", developer || "-");
+      mergeValue("E8:F8", "Currency", labelOptions);
+      sheet.getCell("G8").value = currency;
+      mergeValue("A9:B9", "Remarks / Description", labelOptions);
+      mergeValue("C9:G9", remarks || "-");
+      sheet.getRow(5).height = 26;
+      sheet.getRow(9).height = 38;
+
+      sheet.mergeCells("H4:J9");
+      const imageCell = sheet.getCell("H4");
+      imageCell.value = "No image";
+      imageCell.font = { name: "Arial", size: 10, italic: true, color: { argb: muted } };
+      imageCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: lightGray } };
+      imageCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      if (imagePreview) {
+        try {
+          const imageResponse = await fetch(imagePreview);
+          if (imageResponse.ok) {
+            const imageBlob = await imageResponse.blob();
+            const imageData = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ""));
+              reader.onerror = () => reject(reader.error);
+              reader.readAsDataURL(imageBlob);
+            });
+            const extension = imageBlob.type.includes("png") ? "png" : "jpeg";
+            const imageId = workbook.addImage({ base64: imageData, extension });
+            sheet.addImage(imageId, "H4:J9");
+            imageCell.value = "";
+          }
+        } catch (imageError) {
+          console.warn("Excel image embed skipped:", imageError);
+        }
+      }
+
+      let rowNo = 11;
+      const addSectionTitle = (title: string) => {
+        styleCells(rowNo, rowNo);
+        mergeValue(`A${rowNo}:J${rowNo}`, title, {
+          fill: navy,
+          bold: true,
+          color: white,
+          size: 11,
+        });
+        sheet.getRow(rowNo).height = 24;
+        rowNo += 1;
+      };
+
+      const addTableHeader = (labels: string[]) => {
+        styleCells(rowNo, rowNo);
+        sheet.mergeCells(`B${rowNo}:C${rowNo}`);
+        sheet.mergeCells(`D${rowNo}:E${rowNo}`);
+        sheet.mergeCells(`H${rowNo}:I${rowNo}`);
+        const cells = ["A", "B", "D", "F", "G", "H", "J"];
+        cells.forEach((col, index) => {
+          const cell = sheet.getCell(`${col}${rowNo}`);
+          cell.value = labels[index];
+          cell.font = { name: "Arial", size: 10, bold: true, color: { argb: white } };
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: teal } };
+          cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+        });
+        for (let col = 1; col <= 10; col += 1) {
+          sheet.getCell(rowNo, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: teal } };
+        }
+        sheet.getRow(rowNo).height = 26;
+        rowNo += 1;
+      };
+
+      const activeMaterials = getActiveMaterials();
+      addSectionTitle("MATERIAL COMPOSITION");
+      addTableHeader(["#", "Material Name", "Spec / Description", "Qty", "Unit Cost", "Supplier", "Amount"]);
+      activeMaterials.forEach((material, index) => {
+        const currentRow = rowNo;
+        const qty = toNumber(material.qty) ?? 0;
+        const unitCost = toNumber(material.unitPrice) ?? 0;
+        styleCells(currentRow, currentRow);
+        sheet.mergeCells(`B${currentRow}:C${currentRow}`);
+        sheet.mergeCells(`D${currentRow}:E${currentRow}`);
+        sheet.mergeCells(`H${currentRow}:I${currentRow}`);
+        sheet.getCell(`A${currentRow}`).value = index + 1;
+        sheet.getCell(`B${currentRow}`).value = material.name || "-";
+        sheet.getCell(`D${currentRow}`).value = material.spec || "-";
+        sheet.getCell(`F${currentRow}`).value = qty;
+        sheet.getCell(`G${currentRow}`).value = unitCost;
+        sheet.getCell(`H${currentRow}`).value = material.supplier || "-";
+        sheet.getCell(`J${currentRow}`).value = {
+          formula: `F${currentRow}*G${currentRow}`,
+          result: qty * unitCost,
+        };
+        ["A", "F", "G", "J"].forEach((col) => {
+          sheet.getCell(`${col}${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+        });
+        sheet.getCell(`F${currentRow}`).numFmt = "#,##0.####";
+        sheet.getCell(`G${currentRow}`).numFmt = "#,##0.0000";
+        sheet.getCell(`J${currentRow}`).numFmt = "#,##0.0000";
+        if (index % 2 === 1) {
+          for (let col = 1; col <= 10; col += 1) {
+            sheet.getCell(currentRow, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: paleTeal } };
+          }
+        }
+        sheet.getRow(currentRow).height = 24;
+        rowNo += 1;
+      });
+
+      styleCells(rowNo, rowNo);
+      mergeValue(`A${rowNo}:I${rowNo}`, "Material Total", { fill: lightGray, bold: true, horizontal: "right" });
+      sheet.getCell(`J${rowNo}`).value = materialTotal;
+      sheet.getCell(`J${rowNo}`).font = { name: "Arial", size: 10, bold: true, color: { argb: dark } };
+      sheet.getCell(`J${rowNo}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: lightGray } };
+      sheet.getCell(`J${rowNo}`).numFmt = "#,##0.0000";
+      rowNo += 2;
+
+      const activeOperations = getActiveOperations();
+      addSectionTitle("OPERATIONS / LABOR PROCESS");
+      addTableHeader(["#", "Process", "Description", "Qty", "Unit Cost", "Supplier", "Amount"]);
+      activeOperations.forEach((operation, index) => {
+        const currentRow = rowNo;
+        const qty = toNumber(operation.qty) ?? 0;
+        const unitCost = toNumber(operation.unitPrice) ?? 0;
+        styleCells(currentRow, currentRow);
+        sheet.mergeCells(`B${currentRow}:C${currentRow}`);
+        sheet.mergeCells(`D${currentRow}:E${currentRow}`);
+        sheet.mergeCells(`H${currentRow}:I${currentRow}`);
+        sheet.getCell(`A${currentRow}`).value = index + 1;
+        sheet.getCell(`B${currentRow}`).value = operation.name || "-";
+        sheet.getCell(`D${currentRow}`).value = "-";
+        sheet.getCell(`F${currentRow}`).value = qty;
+        sheet.getCell(`G${currentRow}`).value = unitCost;
+        sheet.getCell(`H${currentRow}`).value = operation.supplier || "-";
+        sheet.getCell(`J${currentRow}`).value = {
+          formula: `F${currentRow}*G${currentRow}`,
+          result: qty * unitCost,
+        };
+        ["A", "F", "G", "J"].forEach((col) => {
+          sheet.getCell(`${col}${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+        });
+        sheet.getCell(`F${currentRow}`).numFmt = "#,##0.####";
+        sheet.getCell(`G${currentRow}`).numFmt = "#,##0.0000";
+        sheet.getCell(`J${currentRow}`).numFmt = "#,##0.0000";
+        if (index % 2 === 1) {
+          for (let col = 1; col <= 10; col += 1) {
+            sheet.getCell(currentRow, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: paleTeal } };
+          }
+        }
+        sheet.getRow(currentRow).height = 24;
+        rowNo += 1;
+      });
+
+      styleCells(rowNo, rowNo);
+      mergeValue(`A${rowNo}:I${rowNo}`, "Operation Total", { fill: lightGray, bold: true, horizontal: "right" });
+      sheet.getCell(`J${rowNo}`).value = operationTotal;
+      sheet.getCell(`J${rowNo}`).font = { name: "Arial", size: 10, bold: true, color: { argb: dark } };
+      sheet.getCell(`J${rowNo}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: lightGray } };
+      sheet.getCell(`J${rowNo}`).numFmt = "#,##0.0000";
+      rowNo += 2;
+
+      styleCells(rowNo, rowNo);
+      mergeValue(`A${rowNo}:I${rowNo}`, `TOTAL COST (${currency})`, {
+        fill: teal,
+        bold: true,
+        color: white,
+        horizontal: "right",
+        size: 12,
+      });
+      const totalCell = sheet.getCell(`J${rowNo}`);
+      totalCell.value = total;
+      totalCell.font = { name: "Arial", size: 12, bold: true, color: { argb: white } };
+      totalCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: teal } };
+      totalCell.alignment = { horizontal: "right", vertical: "middle" };
+      totalCell.numFmt = "#,##0.0000";
+      sheet.getRow(rowNo).height = 28;
+
+      if (currency === "CNY") {
+        rowNo += 1;
+        styleCells(rowNo, rowNo);
+        mergeValue(
+          `A${rowNo}:J${rowNo}`,
+          `Reference conversion: KRW ${fxKRW.toFixed(0)} / USD ${fxUSD.toFixed(2)} / VND ${fxVND.toFixed(0)}`,
+          { fill: paleBlue, color: muted, horizontal: "right" }
+        );
+      }
+
+      sheet.pageSetup.printArea = `A1:J${rowNo}`;
+      sheet.autoFilter = undefined;
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${styleNo || "style"}_costing.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Styled Excel export failed:", error);
+      alert("Failed to export Excel.");
+    } finally {
+      setExportingExcel(false);
+    }
   };
 
   // ===== PDF Export =====
@@ -713,34 +1023,25 @@ export default function ProductRegisterPage() {
     // 기본 헤더 필드
     if (header.style_no || header.styleNo) {
       const sn = header.style_no ?? header.styleNo;
-      if (sn && typeof sn === "string") setStyleNo(sn.toUpperCase());
+      if (sn && typeof sn === "string") {
+        const normalized = sn.toUpperCase();
+        setStyleNo(normalized);
+        setLoadedStyleNo(normalized);
+        setDuplicateSourceStyleNo(null);
+      }
     }
 
-    if (header.product_category) {
-      setProductCategory(header.product_category as ProductCategoryCode);
-    }
-    if (header.product_type) {
-      setProductType(header.product_type as string);
-    }
-    if (header.weight != null || header.weight_g != null) {
-      setWeight(String(header.weight ?? header.weight_g ?? ""));
-    }
-    if (header.size || header.size_text) {
-      setSize((header.size ?? header.size_text) as string);
-    }
-    if (header.dev_date) {
-      setDevDate(header.dev_date as string);
-    }
-    if (header.developer) {
-      setDeveloper(header.developer as string);
-    }
+    setProductCategory((header.product_category ?? "") as ProductCategoryCode | "");
+    setProductType(String(header.product_type ?? ""));
+    setWeight(String(header.weight ?? header.weight_g ?? ""));
+    setSize(String(header.size ?? header.size_text ?? ""));
+    setDevDate(String(header.dev_date ?? new Date().toISOString().slice(0, 10)));
+    setDeveloper(String(header.developer ?? ""));
     setPlatingColor((header.plating_color ?? "") as string);
-    if (header.remarks) {
-      setRemarks(header.remarks as string);
-    }
-    if (header.currency) {
-      setCurrency(header.currency as "CNY" | "USD" | "KRW" | "VND");
-    }
+    setRemarks(String(header.remarks ?? ""));
+    setCurrency((header.currency ?? "CNY") as "CNY" | "USD" | "KRW" | "VND");
+    setBaseStyleNo(String(header.base_style_no ?? ""));
+    setColorSuffix(String(header.color_suffix ?? ""));
 
     // 이미지
     const imageUrls = header?.image_urls ?? data?.image_urls ?? null;
@@ -861,6 +1162,7 @@ export default function ProductRegisterPage() {
     if (!validateAllNumbers()) return;
 
     const trimmed = s(styleNo).trim().toUpperCase();
+    const duplicateSource = duplicateSourceStyleNo;
 
     if (!trimmed) {
       alert("Style No. is required.");
@@ -886,6 +1188,12 @@ export default function ProductRegisterPage() {
       // ✅ 레거시: /api/dev/products로 존재여부만 판단 (형식검사 없음)
       exists = await checkExistsByProductsApi(trimmed);
       // 레거시도 덮어쓰기 확인은 동일
+      if (exists && duplicateSource) {
+        const msg = `Style ${trimmed} already exists. Enter a new style number for the duplicate.`;
+        setStyleError(msg);
+        alert(msg);
+        return;
+      }
       if (exists) {
         const ok = window.confirm(
           [
@@ -928,6 +1236,12 @@ export default function ProductRegisterPage() {
 
         exists = !!json.exists;
 
+        if (exists && duplicateSource) {
+          const msg = `Style ${trimmed} already exists. Enter a new style number for the duplicate.`;
+          setStyleError(msg);
+          alert(msg);
+          return;
+        }
         if (exists) {
           const ok = window.confirm(
             [
@@ -977,6 +1291,8 @@ export default function ProductRegisterPage() {
       currency,
       baseStyleNo: baseStyleNo.trim() || null,
       colorSuffix: colorSuffix.trim() || null,
+      createOnly: Boolean(duplicateSource),
+      duplicatedFromStyleNo: duplicateSource,
       materials: activeMaterials.map((m, index) => ({
         rowIndex: index + 1,
         name: m.name.trim() || null,
@@ -1013,7 +1329,12 @@ export default function ProductRegisterPage() {
 
       const baseMsg = exists
         ? "기존 스타일이 성공적으로 업데이트되었고, 이전 버전은 History에 저장되었습니다."
+        : duplicateSource
+        ? `${duplicateSource} 스타일을 복제하여 새 스타일 ${trimmed}로 저장했습니다.`
         : "새 스타일이 성공적으로 저장되었습니다.";
+
+      setLoadedStyleNo(trimmed);
+      setDuplicateSourceStyleNo(null);
 
       // ===== 이미지가 선택된 경우 → 추가 업로드 =====
       if (imageFile) {
@@ -1340,6 +1661,17 @@ export default function ProductRegisterPage() {
                 History
               </Button>
 
+              <Button
+                type="button"
+                variant="outline"
+                className="h-8 px-3 text-xs bg-slate-100"
+                onClick={handleDuplicateAsNew}
+                disabled={!loadedStyleNo || Boolean(duplicateSourceStyleNo) || saving}
+                title={loadedStyleNo ? "Copy this style and save it with a new style number" : "Load an existing style first"}
+              >
+                Duplicate / Save as New
+              </Button>
+
               <div className="flex items-center gap-2">
                 <span className="text-slate-600">Base currency:</span>
                 <Select
@@ -1363,6 +1695,27 @@ export default function ProductRegisterPage() {
           </CardHeader>
 
           <CardContent className="space-y-6">
+            {duplicateSourceStyleNo && !isPrintMode && (
+              <div className="flex flex-col gap-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-blue-900">
+                    Duplicating from: {duplicateSourceStyleNo}
+                  </div>
+                  <div className="mt-1 text-xs text-blue-700">
+                    Header details, materials, and labor are copied. Enter a new style number and select a new image, then save as a new style.
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-8 shrink-0 border-blue-300 bg-white text-xs"
+                  onClick={cancelDuplicate}
+                  disabled={saving}
+                >
+                  Cancel Duplicate
+                </Button>
+              </div>
+            )}
             <div className="grid grid-cols-1 lg:grid-cols-[2.2fr,1fr] gap-6">
               <div className="space-y-3 text-sm">
                 <div className="grid grid-cols-[1.3fr,auto] gap-2 items-end">
@@ -2179,7 +2532,7 @@ export default function ProductRegisterPage() {
                     variant="outline"
                     className="h-10 px-4 text-sm border-red-500 text-red-600 hover:bg-red-50"
                     onClick={handleDelete}
-                    disabled={saving || !s(styleNo).trim()}
+                    disabled={saving || !s(styleNo).trim() || Boolean(duplicateSourceStyleNo)}
                   >
                     Delete
                   </Button>
@@ -2189,9 +2542,9 @@ export default function ProductRegisterPage() {
                     variant="outline"
                     className="h-10 px-4 text-sm"
                     onClick={handleExportExcel}
-                    disabled={hasInvalidNumericFields}
+                    disabled={hasInvalidNumericFields || exportingExcel}
                   >
-                    Export Excel
+                    {exportingExcel ? "Exporting..." : "Export Excel"}
                   </Button>
                   <Button
                     type="button"
@@ -2208,7 +2561,11 @@ export default function ProductRegisterPage() {
                     onClick={handleSave}
                     disabled={saving || hasInvalidNumericFields}
                   >
-                    {saving ? "Saving..." : "Save"}
+                    {saving
+                      ? "Saving..."
+                      : duplicateSourceStyleNo
+                      ? "Save as New Style"
+                      : "Save"}
                   </Button>
                 </>
               )}
