@@ -1,6 +1,45 @@
 import React from "react";
-import { Document, Page, Text, View, StyleSheet, Image } from "@react-pdf/renderer";
+import fs from "fs";
+import path from "path";
+import { Document, Page, Text, View, StyleSheet, Image, Font } from "@react-pdf/renderer";
 import { getCompanyStampByOrigin } from "@/lib/companyStamp";
+
+const PDF_FONT_FAMILY = "NotoSansCJK";
+const PDF_SC_FONT_FAMILY = "NotoSansSC";
+
+function registerPdfFonts() {
+  const regular = path.join(process.cwd(), "public", "fonts", "NotoSansKR-Regular.ttf");
+  const bold = path.join(process.cwd(), "public", "fonts", "NotoSansKR-Bold.ttf");
+  const scRegular = path.join(process.cwd(), "public", "fonts", "NotoSansSC-Regular.ttf");
+  const scBold = path.join(process.cwd(), "public", "fonts", "NotoSansSC-Bold.ttf");
+
+  if (
+    !fs.existsSync(regular) ||
+    !fs.existsSync(bold) ||
+    !fs.existsSync(scRegular) ||
+    !fs.existsSync(scBold)
+  ) {
+    console.warn("Proforma PDF CJK fonts are missing from public/fonts.");
+    return;
+  }
+
+  Font.register({
+    family: PDF_FONT_FAMILY,
+    fonts: [
+      { src: regular, fontWeight: 400 },
+      { src: bold, fontWeight: 700 },
+    ],
+  });
+  Font.register({
+    family: PDF_SC_FONT_FAMILY,
+    fonts: [
+      { src: scRegular, fontWeight: 400 },
+      { src: scBold, fontWeight: 700 },
+    ],
+  });
+}
+
+registerPdfFonts();
 
 /* =========================
    Types
@@ -76,6 +115,27 @@ const intComma = (v: any) =>
 
 const show = (v?: string | null) => (v && v.trim() ? v : "-");
 
+function multilingualText(v?: string | null) {
+  const value = show(v);
+  const runs: Array<{ text: string; isHan: boolean }> = [];
+
+  for (const char of Array.from(value)) {
+    const isHan = /\p{Script=Han}/u.test(char);
+    const last = runs[runs.length - 1];
+    if (last && last.isHan === isHan) last.text += char;
+    else runs.push({ text: char, isHan });
+  }
+
+  return runs.map((run, index) => (
+    <Text
+      key={`${index}-${run.isHan ? "han" : "other"}`}
+      style={{ fontFamily: run.isHan ? PDF_SC_FONT_FAMILY : PDF_FONT_FAMILY }}
+    >
+      {run.text}
+    </Text>
+  ));
+}
+
 /**
  * ✅ React-PDF는 공백/하이픈이 없는 "긴 토큰"을 줄바꿈 못해서 옆 칸 침범함.
  * 해결: 일정 간격마다 Zero-Width Space(\u200B)를 삽입해 강제로 줄바꿈 포인트를 만든다.
@@ -122,7 +182,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 40,
     paddingBottom: 40,
     fontSize: FONT_BASE,
-    fontFamily: "Helvetica",
+    fontFamily: PDF_FONT_FAMILY,
   },
 
   /* Title */
@@ -424,7 +484,7 @@ const ProformaInvoicePDF: React.FC<{
                     {softWrapToken(l.buyer_style_no)}
                   </Text>
                   <Text style={[styles.td, styles.tdCenter, { width: "24%" }]}>
-                    {show(l.description)}
+                    {multilingualText(l.description)}
                   </Text>
                   <Text style={[styles.td, styles.tdCenter, { width: "12%" }]}>
                     {softWrapToken(l.hs_code, 5)}
