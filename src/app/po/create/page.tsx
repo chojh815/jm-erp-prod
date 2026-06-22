@@ -2996,7 +2996,7 @@ const canCreateProforma =
                               <SelectContent>
                                 <SelectItem value="USD">USD</SelectItem>
                                 <SelectItem value="EUR">EUR</SelectItem>
-                                <SelectItem value="JPY">JPY</SelectItem>
+                                <SelectItem value="KRW">KRW</SelectItem>
                               </SelectContent>
                             </Select>
                           </div>
