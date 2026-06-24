@@ -563,6 +563,20 @@ export default function ShipmentDetailPage() {
         <Button variant="outline" onClick={() => router.back()}>
           Back
         </Button>
+        {!editMode ? (
+          <Button variant="secondary" onClick={enterEditMode}>
+            Edit Shipment
+          </Button>
+        ) : (
+          <>
+            <Button variant="outline" onClick={cancelEditMode} disabled={saving}>
+              Cancel Edit
+            </Button>
+            <Button onClick={saveEdits} disabled={saving}>
+              {saving ? "Saving..." : "Save"}
+            </Button>
+          </>
+        )}
 
         <AlertDialog>
           <AlertDialogTrigger asChild>
@@ -764,7 +778,7 @@ export default function ShipmentDetailPage() {
             <CardTitle>Shipment Lines (Grouped by PO)</CardTitle>
             {!editMode ? (
               <Button variant="secondary" onClick={enterEditMode}>
-                Enable Partial / Split
+                Edit Lines / Split
               </Button>
             ) : (
               <div className="flex items-center gap-2">

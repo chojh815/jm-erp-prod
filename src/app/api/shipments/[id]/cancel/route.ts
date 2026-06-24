@@ -57,6 +57,7 @@ export async function POST(
       .from("invoice_headers")
       .select("id")
       .eq("shipment_id", id)
+      .eq("is_deleted", false)
       .limit(1);
 
     if (invErr) {
