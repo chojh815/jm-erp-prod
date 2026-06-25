@@ -157,6 +157,25 @@ function n(v: any, fallback = 0) {
   return Number.isNaN(x) ? fallback : x;
 }
 
+function physicalCartonCount(lines: Array<Pick<PackingListLine, "carton_no_from" | "carton_no_to" | "cartons">>) {
+  const cartonNos = new Set<number>();
+
+  for (const line of lines) {
+    const from = Math.floor(n(line.carton_no_from, 0));
+    const to = Math.floor(n(line.carton_no_to, 0));
+    if (from <= 0 || to <= 0) continue;
+
+    const start = Math.min(from, to);
+    const end = Math.max(from, to);
+    for (let cartonNo = start; cartonNo <= end; cartonNo += 1) {
+      cartonNos.add(cartonNo);
+    }
+  }
+
+  if (cartonNos.size > 0) return cartonNos.size;
+  return lines.reduce((sum, line) => sum + n(line.cartons, 0), 0);
+}
+
 /** ✅ FIX: safeNum 누락으로 빌드 에러 → n()을 그대로 alias로 제공 */
 function safeNum(v: any, fallback = 0) {
   return n(v, fallback);
@@ -457,7 +476,7 @@ export default function PackingListDetailPage() {
 
   const totals = React.useMemo(() => {
     const alive = lines.filter((l) => !l.is_deleted).map(recomputeLine);
-    const totalCartons = alive.reduce((s, l) => s + n(l.cartons, 0), 0);
+    const totalCartons = physicalCartonCount(alive);
     const totalQty = alive.reduce((s, l) => s + n(l.qty, 0), 0);
     const totalNW = alive.reduce((s, l) => s + n(l.total_nw, 0), 0);
     const totalGW = alive.reduce((s, l) => s + n(l.total_gw, 0), 0);
@@ -730,6 +749,7 @@ export default function PackingListDetailPage() {
     const firstCartons = cartons - 1;
     const lastCartons = 1;
 
+    const baseQty = Math.max(0, n(base.qty, 0));
     const newLastQty = n(splitLastQty, 0);
     const newLastGW = n(splitLastGW, 0);
     const newLastNW = n(splitLastNW, 0);
@@ -740,6 +760,7 @@ export default function PackingListDetailPage() {
       carton_no_from: firstFrom,
       carton_no_to: firstTo,
       cartons: firstCartons,
+      qty: Math.max(0, baseQty - newLastQty),
       description: s(base.description),
     });
 

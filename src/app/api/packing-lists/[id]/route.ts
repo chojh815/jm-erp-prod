@@ -31,6 +31,25 @@ function pickIfEmpty(cur: any, fallback: any) {
   return isEmptyNumber(cur) ? fallback : cur;
 }
 
+function physicalCartonCount(lines: any[]) {
+  const cartonNos = new Set<number>();
+
+  for (const line of lines) {
+    const from = Math.floor(num(line?.carton_no_from, 0));
+    const to = Math.floor(num(line?.carton_no_to, 0));
+    if (from <= 0 || to <= 0) continue;
+
+    const start = Math.min(from, to);
+    const end = Math.max(from, to);
+    for (let cartonNo = start; cartonNo <= end; cartonNo += 1) {
+      cartonNos.add(cartonNo);
+    }
+  }
+
+  if (cartonNos.size > 0) return cartonNos.size;
+  return lines.reduce((sum, line) => sum + num(line?.cartons, 0), 0);
+}
+
 function isBlankText(v: any) {
   return v === null || v === undefined || String(v).trim() === "";
 }
@@ -248,7 +267,7 @@ function enrichFromShipment(lines: any[], shipmentLines: any[]) {
 }
 
 function computeTotals(lines: any[]) {
-  let total_cartons = 0;
+  const total_cartons = physicalCartonCount(lines);
   let total_qty = 0;
   let total_nw = 0;
   let total_gw = 0;
@@ -256,7 +275,6 @@ function computeTotals(lines: any[]) {
 
   for (const r of lines) {
     const cartons = num(r.cartons, 0);
-    total_cartons += cartons;
     total_qty += num(r.qty, 0);
     total_nw += cartons * num(r.nw_per_carton, 0);
     total_gw += cartons * num(r.gw_per_carton, 0);
