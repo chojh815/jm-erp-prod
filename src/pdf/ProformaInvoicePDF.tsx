@@ -154,10 +154,13 @@ function softWrapToken(v?: string | null, every = 6) {
   });
 }
 
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out.length ? out : [[]];
+function paginateLines<T>(arr: T[], firstPageSize: number, continuationPageSize: number): T[][] {
+  if (!arr.length) return [[]];
+  const out: T[][] = [arr.slice(0, firstPageSize)];
+  for (let i = firstPageSize; i < arr.length; i += continuationPageSize) {
+    out.push(arr.slice(i, i + continuationPageSize));
+  }
+  return out;
 }
 
 /* =========================
@@ -170,8 +173,8 @@ const FONT_BASE = 10;
 const FONT_TABLE = 8;        // ↓ 조금 더 축소
 const FONT_TABLE_HEAD = 8.5; // ↓ 조금 더 축소
 
-// ✅ 페이지당 라인 수 (헤더 반복 포함)
-const ROWS_PER_PAGE = 18;
+const FIRST_PAGE_ROWS = 13;
+const CONTINUATION_PAGE_ROWS = 16;
 
 /* =========================
    Styles
@@ -183,6 +186,33 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
     fontSize: FONT_BASE,
     fontFamily: PDF_FONT_FAMILY,
+  },
+  continuationHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+    paddingBottom: 7,
+    marginBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#64748b",
+  },
+  continuationTitle: {
+    fontSize: 14,
+    fontWeight: 700 as any,
+  },
+  continuationMeta: {
+    fontSize: 8.5,
+    color: "#475569",
+    textAlign: "right",
+  },
+  pageNumber: {
+    position: "absolute",
+    bottom: 18,
+    left: 40,
+    right: 40,
+    fontSize: 8,
+    color: "#64748b",
+    textAlign: "center",
   },
 
   /* Title */
@@ -444,6 +474,18 @@ function TableHeader() {
   );
 }
 
+function ContinuationHeader({ header }: { header: ProformaHeaderPDF }) {
+  return (
+    <View style={styles.continuationHeader} fixed>
+      <Text style={styles.continuationTitle}>Proforma Invoice - Continued</Text>
+      <View>
+        <Text style={styles.continuationMeta}>PI No: {show(header.invoice_no)}</Text>
+        <Text style={styles.continuationMeta}>Buyer: {show(header.buyer_name)}</Text>
+      </View>
+    </View>
+  );
+}
+
 /* =========================
    Component
 ========================= */
@@ -456,7 +498,7 @@ const ProformaInvoicePDF: React.FC<{
     hasThreeDecimalUnitPrice(line.unit_price)
   );
   const subtotal = lines.reduce((s, l) => s + n(l.amount), 0);
-  const pages = chunk(lines, ROWS_PER_PAGE);
+  const pages = paginateLines(lines, FIRST_PAGE_ROWS, CONTINUATION_PAGE_ROWS);
 
   const base = (assetsBaseUrl ?? "").replace(/\/$/, "");
   const stamp = getCompanyStampByOrigin(header.shipping_origin_code);
@@ -469,14 +511,13 @@ const ProformaInvoicePDF: React.FC<{
 
         return (
           <Page key={pageIdx} size="A4" style={styles.page}>
-            {/* ✅ 2페이지 넘어가도 헤더 반복 */}
-            <HeaderBlock header={header} />
+            {pageIdx === 0 ? <HeaderBlock header={header} /> : <ContinuationHeader header={header} />}
 
             {/* Table */}
             <View style={styles.table}>
               <TableHeader />
               {pageLines.map((l, i) => (
-                <View key={`${pageIdx}-${i}`} style={styles.tr}>
+                <View key={`${pageIdx}-${i}`} style={styles.tr} wrap={false}>
                   <Text style={[styles.td, styles.tdCenter, { width: "16%" }]}>
                     {softWrapToken(l.po_no)}
                   </Text>
@@ -522,6 +563,11 @@ const ProformaInvoicePDF: React.FC<{
                 </View>
               </>
             ) : null}
+            <Text
+              fixed
+              style={styles.pageNumber}
+              render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`}
+            />
           </Page>
         );
       })}
