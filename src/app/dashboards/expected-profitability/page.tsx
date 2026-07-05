@@ -67,6 +67,7 @@ type Row = {
   has_planned_cost: boolean;
   source_cost_currency?: string | null;
   source_fx_rate_to_usd?: number | null;
+  source_cny_per_usd?: number | null;
 };
 
 type BuyerOption = {
@@ -89,13 +90,15 @@ export default function ExpectedProfitabilityPage() {
   const [buyers, setBuyers] = React.useState<BuyerOption[]>([]);
   const [summary, setSummary] = React.useState<any>(null);
   const [q, setQ] = React.useState("");
-  const [brand, setBrand] = React.useState("");
   const [buyerId, setBuyerId] = React.useState("ALL");
   const [start, setStart] = React.useState("");
   const [end, setEnd] = React.useState("");
   const [marginMin, setMarginMin] = React.useState("");
   const [marginMax, setMarginMax] = React.useState("");
   const [missingOnly, setMissingOnly] = React.useState(false);
+  const [cnyPerUsd, setCnyPerUsd] = React.useState("6.8");
+  const [fxMonth, setFxMonth] = React.useState(() => new Date().toISOString().slice(0, 7));
+  const [savingFx, setSavingFx] = React.useState(false);
 
   const [editing, setEditing] = React.useState<Row | null>(null);
   const [extraRows, setExtraRows] = React.useState<ExtraCostRow[]>([]);
@@ -108,13 +111,17 @@ export default function ExpectedProfitabilityPage() {
     try {
       const sp = new URLSearchParams();
       if (q.trim()) sp.set("q", q.trim());
-      if (brand.trim()) sp.set("brand", brand.trim());
       if (buyerId !== "ALL") sp.set("buyer_id", buyerId);
       if (start) sp.set("start", start);
       if (end) sp.set("end", end);
       if (marginMin.trim()) sp.set("margin_min", marginMin.trim());
       if (marginMax.trim()) sp.set("margin_max", marginMax.trim());
       if (missingOnly) sp.set("missing_only", "true");
+      const parsedCnyPerUsd = Number(cnyPerUsd);
+      if (!Number.isFinite(parsedCnyPerUsd) || parsedCnyPerUsd <= 0) {
+        throw new Error("CNY per USD must be greater than 0");
+      }
+      sp.set("cny_per_usd", String(parsedCnyPerUsd));
 
       const res = await fetch(`/api/dashboards/expected-profitability?${sp.toString()}`, {
         cache: "no-store",
@@ -129,11 +136,51 @@ export default function ExpectedProfitabilityPage() {
     } finally {
       setLoading(false);
     }
-  }, [q, brand, buyerId, start, end, marginMin, marginMax, missingOnly]);
+  }, [q, buyerId, start, end, marginMin, marginMax, missingOnly, cnyPerUsd]);
 
   React.useEffect(() => {
     void load();
   }, [load]);
+
+  React.useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/dashboards/expected-profitability/fx-rate?month=${fxMonth}`, { cache: "no-store" });
+        const json = await res.json().catch(() => ({}));
+        if (active && res.ok && json?.success && Number(json.cny_per_usd) > 0) {
+          setCnyPerUsd(String(json.cny_per_usd));
+        }
+      } catch {
+        // Keep the editable fallback rate when the migration is not deployed yet.
+      }
+    })();
+    return () => { active = false; };
+  }, [fxMonth]);
+
+  async function saveMonthlyFx() {
+    const rate = Number(cnyPerUsd);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      toast.error("CNY per USD must be greater than 0");
+      return;
+    }
+    setSavingFx(true);
+    try {
+      const res = await fetch("/api/dashboards/expected-profitability/fx-rate", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ effective_month: fxMonth, cny_per_usd: rate }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success) throw new Error(json?.error || "Failed to save FX rate");
+      toast.success(`Monthly FX saved: 1 USD = ${rate} CNY`);
+      await load();
+    } catch (e: any) {
+      toast.error("FX save failed", { description: e?.message ?? "Server error" });
+    } finally {
+      setSavingFx(false);
+    }
+  }
 
   async function openEditor(row: Row) {
     try {
@@ -179,11 +226,11 @@ export default function ExpectedProfitabilityPage() {
     const parts = [
       q.trim() ? `Search: ${q.trim()}` : "",
       buyerId !== "ALL" ? `Buyer: ${buyerName || buyerId}` : "",
-      brand.trim() ? `Brand: ${brand.trim()}` : "",
       start ? `Order Start: ${start}` : "",
       end ? `Order End: ${end}` : "",
       marginMin.trim() ? `Min Margin: ${marginMin.trim()}%` : "",
       marginMax.trim() ? `Max Margin: ${marginMax.trim()}%` : "",
+      `FX: 1 USD = ${cnyPerUsd} CNY`,
       missingOnly ? "Missing planned cost only" : "",
     ].filter(Boolean);
     return parts.length ? parts.join(" | ") : "All records";
@@ -192,6 +239,8 @@ export default function ExpectedProfitabilityPage() {
   function plannedCostSource(row: Row) {
     if (!row.has_planned_cost) return "No Cost";
     const currency = row.source_cost_currency || "USD";
+    const cnyRate = Number(row.source_cny_per_usd);
+    if (Number.isFinite(cnyRate) && cnyRate > 0) return `1 USD = ${cnyRate.toFixed(4)} CNY`;
     const fx = Number(row.source_fx_rate_to_usd ?? 1);
     return Number.isFinite(fx) && fx !== 1 ? `${currency} to USD @ ${fx.toFixed(4)}` : currency;
   }
@@ -473,10 +522,6 @@ export default function ExpectedProfitabilityPage() {
               </Select>
             </div>
             <div>
-              <Label>Brand</Label>
-              <Input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="Brand" />
-            </div>
-            <div>
               <Label>Order Start</Label>
               <div className="relative">
                 <Input
@@ -526,6 +571,22 @@ export default function ExpectedProfitabilityPage() {
               <Label>Max Margin %</Label>
               <Input value={marginMax} onChange={(e) => setMarginMax(e.target.value)} placeholder="e.g. 60" />
             </div>
+            <div>
+              <Label>CNY per USD</Label>
+              <Input
+                type="number"
+                min="0.0001"
+                step="0.1"
+                value={cnyPerUsd}
+                onChange={(e) => setCnyPerUsd(e.target.value)}
+                placeholder="e.g. 6.8"
+              />
+              <div className="mt-1 text-[11px] text-muted-foreground">1 USD = {cnyPerUsd || "-"} CNY</div>
+            </div>
+            <div>
+              <Label>FX Effective Month</Label>
+              <Input type="month" value={fxMonth} onChange={(e) => setFxMonth(e.target.value)} />
+            </div>
             <div className="flex items-end">
               <button
                 type="button"
@@ -552,6 +613,9 @@ export default function ExpectedProfitabilityPage() {
 
             <div className="xl:col-span-8 flex gap-2">
               <Button onClick={() => void load()} disabled={loading}>{loading ? "Loading..." : "Search"}</Button>
+              <Button variant="outline" onClick={() => void saveMonthlyFx()} disabled={savingFx}>
+                {savingFx ? "Saving FX..." : "Save Monthly FX"}
+              </Button>
               <Button variant="outline" onClick={() => void handleExportExcel()} disabled={loading || rows.length === 0}>
                 Export Excel
               </Button>
@@ -608,8 +672,9 @@ export default function ExpectedProfitabilityPage() {
                         <div>
                           <div>{fmtMoney(r.planned_unit_cost)}</div>
                           <div className="text-[11px] text-muted-foreground">
-                            {r.source_cost_currency || "USD"}
-                            {Number(r.source_fx_rate_to_usd ?? 1) !== 1 ? ` → USD @ ${Number(r.source_fx_rate_to_usd).toFixed(4)}` : ""}
+                            {Number(r.source_cny_per_usd) > 0
+                              ? `1 USD = ${Number(r.source_cny_per_usd).toFixed(4)} CNY`
+                              : r.source_cost_currency || "USD"}
                           </div>
                         </div>
                       ) : (

@@ -249,6 +249,7 @@ function splitIds(v: string): string[] {
 }
 
 export default function ProfitabilityClient() {
+  const [viewMode, setViewMode] = useState<"ACTUAL" | "COMPARE">("ACTUAL");
   // Filters
   const [preset, setPreset] = useState<string>("LAST_12_MONTHS");
   const [start, setStart] = useState<string>(start12MonthsISO());
@@ -275,7 +276,10 @@ export default function ProfitabilityClient() {
     })
   );
 
-  const url = useMemo(() => `/api/dashboards/profitability?${appliedKey}`, [appliedKey]);
+  const url = useMemo(
+    () => `/api/dashboards/profitability?${appliedKey}&include_expected_only=${viewMode === "COMPARE"}`,
+    [appliedKey, viewMode]
+  );
   const { data, isLoading, mutate } = useSWR<ApiResp>(url, fetcher);
   const shipmentUrl = useMemo(
     () => `/api/dashboards/profitability/shipments?${appliedKey}`,
@@ -690,14 +694,21 @@ export default function ProfitabilityClient() {
           </CardContent>
         </Card>
 
+        <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as "ACTUAL" | "COMPARE")}>
+          <TabsList>
+            <TabsTrigger value="ACTUAL">Actual Profitability</TabsTrigger>
+            <TabsTrigger value="COMPARE">Expected vs Actual</TabsTrigger>
+          </TabsList>
+        </Tabs>
+
         {/* KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
           <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Revenue (USD)</CardTitle></CardHeader>
+            <CardHeader className="pb-2"><CardTitle className="text-sm">{viewMode === "COMPARE" ? "Order / Actual Revenue (USD)" : "Revenue (USD)"}</CardTitle></CardHeader>
             <CardContent className="text-2xl font-semibold">{fmtMoney(k?.revenue_usd)}</CardContent>
           </Card>
           <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Planned COGS (USD)</CardTitle></CardHeader>
+            <CardHeader className="pb-2"><CardTitle className="text-sm">{viewMode === "COMPARE" ? "Expected COGS (USD)" : "Planned COGS (USD)"}</CardTitle></CardHeader>
             <CardContent className="text-2xl font-semibold">{fmtMoney(k?.planned_cogs_usd)}</CardContent>
           </Card>
           <Card>
@@ -854,7 +865,7 @@ export default function ProfitabilityClient() {
                     <th className="text-right p-2">Net Margin</th>
                     <th className="text-left p-2">Vendor</th>
                     <th className="text-left p-2">Site</th>
-                    <th className="text-center p-2">Actual</th>
+                    <th className="text-center p-2">{viewMode === "COMPARE" ? "Stage" : "Actual"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -884,7 +895,15 @@ export default function ProfitabilityClient() {
                       <td className="p-2">{r.vendor_name || ""}</td>
                       <td className="p-2">{r.site_name || ""}</td>
                       <td className="p-2 text-center">
-                        {Number(r.actual_coverage || 0) > 0 ? (
+                        {viewMode === "COMPARE" ? (
+                          Number(r.actual_coverage || 0) > 0 ? (
+                            <Badge>Actual Complete</Badge>
+                          ) : r.invoice_no ? (
+                            <Badge variant="secondary">In Progress</Badge>
+                          ) : (
+                            <Badge variant="outline">Expected Only</Badge>
+                          )
+                        ) : Number(r.actual_coverage || 0) > 0 ? (
                           <Badge>Y</Badge>
                         ) : (
                           <Badge variant="outline">N</Badge>

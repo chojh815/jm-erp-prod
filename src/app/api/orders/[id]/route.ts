@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { assertApiPermission } from "@/lib/api-guard";
+import { createExpectedMarginSnapshot } from "@/lib/expectedMarginSnapshot";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -872,6 +873,20 @@ export async function PUT(
       console.error("Read Saved Lines Error:", readLinesErr);
     }
 
+    let expectedSnapshot: any = null;
+    if (String(updatedHeader?.status ?? patch.status ?? "").toUpperCase() === "CONFIRMED") {
+      try {
+        expectedSnapshot = await createExpectedMarginSnapshot({
+          poHeaderId,
+          userId: headerIn?.updated_by ?? null,
+          userEmail: headerIn?.updated_by_email ?? null,
+        });
+      } catch (snapshotError: any) {
+        console.error("Expected margin snapshot failed:", snapshotError);
+        expectedSnapshot = { created: 0, error: snapshotError?.message ?? "Snapshot failed" };
+      }
+    }
+
     return NextResponse.json({
       success: true,
       header: updatedHeader,
@@ -882,6 +897,7 @@ export async function PUT(
       lines: savedLines ?? [],
       linesReceived: incomingLines.length,
       lineIdsSaved: savedIds,
+      expectedSnapshot,
     });
   } catch (err: any) {
     console.error("Update PO Fatal:", err);

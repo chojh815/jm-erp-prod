@@ -387,6 +387,18 @@ export async function GET(req: NextRequest) {
     if (wsRes.error) throw wsRes.error;
     const wsLines = wsRes.data || [];
 
+    const expectedSnapshotRes = poLineIds.length
+      ? await supabaseAdmin
+          .from("expected_margin_snapshots")
+          .select("po_line_id,total_unit_cost_usd,expected_cogs_usd,expected_margin_usd,expected_margin_pct,cny_per_usd,snapshot_at")
+          .in("po_line_id", poLineIds)
+      : ({ data: [], error: null } as any);
+    const snapshotMissing =
+      expectedSnapshotRes.error?.code === "42P01" ||
+      /does not exist|schema cache/i.test(String(expectedSnapshotRes.error?.message ?? ""));
+    if (expectedSnapshotRes.error && !snapshotMissing) throw expectedSnapshotRes.error;
+    const expectedSnapshots = expectedSnapshotRes.data || [];
+
     const vendorIdsFromWs = Array.from(new Set(wsLines.map((x: any) => x.vendor_id).filter(Boolean)));
     const poSiteIds = Array.from(new Set(poHeaders.map((x: any) => x.site_id).filter(Boolean)));
     const vendorRes = vendorIdsFromWs.length
@@ -530,6 +542,9 @@ export async function GET(req: NextRequest) {
     const poLineById = new Map(poLines.map((x: any) => [x.id, x]));
     const poHeaderById = new Map(poHeaders.map((x: any) => [x.id, x]));
     const wsByPoLineId = new Map(wsLines.map((x: any) => [x.po_line_id, x]));
+    const expectedSnapshotByPoLineId = new Map(
+      expectedSnapshots.map((x: any) => [x.po_line_id, x])
+    );
     const vendorById = new Map(vendors.map((x: any) => [x.id, x]));
     const siteById = new Map<string, any>(sites.map((x: any) => [String(x.id), x]));
     const expenseHeaderById = new Map(expenseHeaders.map((x: any) => [x.id, x]));
@@ -659,6 +674,7 @@ export async function GET(req: NextRequest) {
         const poHeaderId = s((poLine as any)?.po_header_id) || s((line as any).po_header_id) || null;
         const poHeader: any = poHeaderId ? poHeaderById.get(poHeaderId) : null;
         const ws: any = poLineId ? wsByPoLineId.get(poLineId) : null;
+        const expectedSnapshot: any = poLineId ? expectedSnapshotByPoLineId.get(poLineId) : null;
         const vendor: any = ws?.vendor_id ? vendorById.get(ws.vendor_id) : null;
 
         const buyerId = (poHeader as any)?.buyer_id ?? headerBuyerId ?? null;
@@ -707,15 +723,32 @@ export async function GET(req: NextRequest) {
           shippedQty * num((line as any).unit_price ?? (poLine as any)?.unit_price);
 
         const productionMode = s(ws?.production_mode || (ws?.vendor_id ? "OUTSOURCED" : "IN_HOUSE")).toUpperCase();
-        const plannedUnitUsd = num(ws?.vendor_unit_cost_usd) || devUnitUsd;
+        const plannedUnitUsd =
+          num(expectedSnapshot?.total_unit_cost_usd) ||
+          num(ws?.vendor_unit_cost_usd) ||
+          devUnitUsd;
         const actualAmt = num(ws?.actual_amt);
-        const actualUnitUsd =
-          actualAmt > 0 && shippedQty > 0
-            ? actualAmt / shippedQty
-            : num(ws?.actual_vendor_unit_cost_usd) || num(ws?.actual_unit);
+        const actualFx =
+          num(ws?.actual_fx_rate) ||
+          num(ws?.fx_rate) ||
+          num(expectedSnapshot?.cny_per_usd) ||
+          6.8;
+        const actualUnitLocal = num(ws?.actual_unit);
+        const actualUnitUsd = productionMode === "IN_HOUSE"
+          ? actualAmt > 0 && shippedQty > 0
+            ? actualAmt / actualFx / shippedQty
+            : actualUnitLocal / actualFx
+          : actualAmt > 0 && shippedQty > 0
+          ? actualAmt / shippedQty
+          : num(ws?.actual_vendor_unit_cost_usd) || actualUnitLocal;
         const plannedCogsUsd = plannedUnitUsd > 0 ? plannedUnitUsd * shippedQty : 0;
-        const actualCogsUsd =
-          actualAmt > 0 ? actualAmt : actualUnitUsd > 0 ? actualUnitUsd * shippedQty : 0;
+        const actualCogsUsd = actualAmt > 0
+          ? productionMode === "IN_HOUSE"
+            ? actualAmt / actualFx
+            : actualAmt
+          : actualUnitUsd > 0
+          ? actualUnitUsd * shippedQty
+          : 0;
 
         const hasActual = actualCogsUsd > 0.0001;
         const useFallback = !hasActual && plannedCogsUsd > 0.0001;

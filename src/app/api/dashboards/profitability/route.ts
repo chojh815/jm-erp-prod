@@ -524,6 +524,7 @@ export async function GET(req: NextRequest) {
     const vendorIds = (searchParams.get("vendor_ids") || "ALL").split(",").filter(Boolean);
     const siteIds = (searchParams.get("site_ids") || "ALL").split(",").filter(Boolean);
     const q = (searchParams.get("q") || "").trim();
+    const includeExpectedOnly = searchParams.get("include_expected_only") === "true";
     const limit = Math.min(Math.max(Number(searchParams.get("limit") || "500"), 50), 5000);
 
     const rpcArgs = {
@@ -538,6 +539,88 @@ export async function GET(req: NextRequest) {
     };
 
     const sourceRows = await loadFallbackRows({ start, end, buyerIds, vendorIds, siteIds, q, limit });
+    if (includeExpectedOnly) {
+    const existingPoLineIds = new Set(
+      sourceRows.map((row: any) => s(row.po_line_id)).filter(Boolean)
+    );
+
+    let expectedQuery = supabaseAdmin
+      .from("expected_margin_snapshots")
+      .select(
+        "po_header_id,po_line_id,po_no,jm_style_no,buyer_style_no,revenue_usd,expected_cogs_usd,snapshot_at"
+      )
+      .order("snapshot_at", { ascending: false })
+      .limit(limit);
+    if (q) {
+      expectedQuery = expectedQuery.or(
+        `po_no.ilike.%${q}%,jm_style_no.ilike.%${q}%,buyer_style_no.ilike.%${q}%`
+      );
+    }
+    const expectedResult = await expectedQuery;
+    const expectedMissing =
+      expectedResult.error?.code === "42P01" ||
+      /does not exist|schema cache/i.test(String(expectedResult.error?.message ?? ""));
+    if (expectedResult.error && !expectedMissing) throw expectedResult.error;
+
+    const expectedCandidates = (expectedResult.data ?? []).filter(
+      (row: any) => !existingPoLineIds.has(s(row.po_line_id))
+    );
+    const expectedHeaderIds = Array.from(
+      new Set(expectedCandidates.map((row: any) => row.po_header_id).filter(Boolean))
+    );
+    const expectedHeadersResult = expectedHeaderIds.length
+      ? await supabaseAdmin
+          .from("po_headers")
+          .select("id,order_date,buyer_id,buyer_name,buyer_brand_name,site_id,currency")
+          .in("id", expectedHeaderIds)
+      : ({ data: [], error: null } as any);
+    if (expectedHeadersResult.error) throw expectedHeadersResult.error;
+    const expectedHeaderById = new Map(
+      (expectedHeadersResult.data ?? []).map((row: any) => [String(row.id), row])
+    );
+
+    if (!vendorIds.length || vendorIds[0] === "ALL") {
+      for (const snapshot of expectedCandidates) {
+        const header: any = expectedHeaderById.get(String((snapshot as any).po_header_id));
+        if (!header) continue;
+        if (start && s(header.order_date) < start) continue;
+        if (end && s(header.order_date) > end) continue;
+        if (buyerIds.length && buyerIds[0] !== "ALL" && !buyerIds.includes(String(header.buyer_id))) continue;
+        if (siteIds.length && siteIds[0] !== "ALL" && !siteIds.includes(String(header.site_id))) continue;
+        sourceRows.push({
+          invoice_id: null,
+          invoice_no: null,
+          invoice_date: header.order_date ?? (snapshot as any).snapshot_at ?? null,
+          buyer_id: header.buyer_id ?? null,
+          buyer_name: header.buyer_name ?? null,
+          buyer_code: null,
+          brand_name: header.buyer_brand_name ?? null,
+          po_no: (snapshot as any).po_no ?? null,
+          po_line_id: (snapshot as any).po_line_id ?? null,
+          jm_style: (snapshot as any).jm_style_no ?? null,
+          buyer_style: (snapshot as any).buyer_style_no ?? null,
+          vendor_id: null,
+          vendor_name: null,
+          site_id: header.site_id ?? null,
+          site_name: header.site_id ?? null,
+          currency: header.currency ?? "USD",
+          fx_rate_to_usd: null,
+          revenue_local: (snapshot as any).revenue_usd ?? null,
+          revenue_usd: (snapshot as any).revenue_usd ?? null,
+          planned_cogs_usd: (snapshot as any).expected_cogs_usd ?? null,
+          actual_cogs_usd: null,
+          freight_usd: null,
+          other_expenses_usd: null,
+          factory_overhead_usd: null,
+          profit_usd: null,
+          margin_pct: null,
+          net_profit_usd: null,
+          net_margin_pct: null,
+          actual_coverage: 0,
+        });
+      }
+    }
+    }
 
     const rawRows: ProfitRow[] = (sourceRows || []).map((r: any) => ({
       invoice_id: r.invoice_id ?? null,

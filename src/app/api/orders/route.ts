@@ -1,6 +1,7 @@
 // src/app/api/orders/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { createExpectedMarginSnapshot } from "@/lib/expectedMarginSnapshot";
 
 /**
  * JM ERP - Orders (PO) API
@@ -616,12 +617,27 @@ const useSequentialLineNo = hasDupLineNo;
       if (delAllErr) return bad(delAllErr.message || "Failed to remove lines", 500);
     }
 
+    let expectedSnapshot: any = null;
+    if (String(savedHeader.status ?? status ?? "").toUpperCase() === "CONFIRMED") {
+      try {
+        expectedSnapshot = await createExpectedMarginSnapshot({
+          poHeaderId,
+          userId: headerIn?.updated_by ?? headerIn?.created_by ?? null,
+          userEmail: headerIn?.updated_by_email ?? headerIn?.created_by_email ?? null,
+        });
+      } catch (snapshotError: any) {
+        console.error("Expected margin snapshot failed:", snapshotError);
+        expectedSnapshot = { created: 0, error: snapshotError?.message ?? "Snapshot failed" };
+      }
+    }
+
     return ok({
       header_id: poHeaderId,
       headerId: poHeaderId,
       po_no: savedHeader.po_no ?? poNo,
       poNo: savedHeader.po_no ?? poNo,
       status: savedHeader.status ?? status,
+      expectedSnapshot,
     });
   } catch (e: any) {
     const msg = e?.message || String(e);
