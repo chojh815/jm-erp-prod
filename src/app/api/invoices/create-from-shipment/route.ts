@@ -268,6 +268,7 @@ export async function POST(req: Request) {
           color,
           size,
           description,
+          unit_price_precise,
           unit_price,
           qty,
           amount
@@ -290,10 +291,14 @@ export async function POST(req: Request) {
       const qty = safeNumber(l.shipped_qty);
       const poQty = safeNumber(l.po_lines?.qty);
       const poAmount = maybeNumber(l.po_lines?.amount);
-      const amount =
+      const unitPrice =
         poAmount != null && poQty > 0
-          ? round2((poAmount * qty) / poQty)
-          : round2(qty * safeNumber(l.po_lines?.unit_price, safeNumber(l.unit_price)));
+          ? round3(poAmount / poQty)
+          : safeNumber(
+              l.po_lines?.unit_price_precise,
+              safeNumber(l.po_lines?.unit_price, safeNumber(l.unit_price))
+            );
+      const amount = round2(qty * unitPrice);
       return round2(s + amount);
     }, 0);
 
@@ -378,11 +383,11 @@ export async function POST(req: Request) {
       const unitPrice =
         poAmount != null && poQty > 0
           ? round3(poAmount / poQty)
-          : safeNumber(l.po_lines?.unit_price, safeNumber(l.unit_price));
-      const amount =
-        poAmount != null && poQty > 0
-          ? round2((poAmount * qty) / poQty)
-          : round2(qty * unitPrice);
+          : safeNumber(
+              l.po_lines?.unit_price_precise,
+              safeNumber(l.po_lines?.unit_price, safeNumber(l.unit_price))
+            );
+      const amount = round2(qty * unitPrice);
 
       return {
         invoice_id: invoiceId,

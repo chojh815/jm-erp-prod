@@ -347,7 +347,7 @@ export async function POST(req: NextRequest) {
       const lineRows = group.map((row) => {
         const poLine = poLineById.get(row.po_line_id);
         const unitPrice = num(
-          pickFirst(poLine, ["unit_price", "unitPrice", "price", "unit_cost"]) ?? 0,
+          pickFirst(poLine, ["unit_price_precise", "unitPricePrecise", "unit_price", "unitPrice", "price", "unit_cost"]) ?? 0,
           0
         );
         const orderQty = num(

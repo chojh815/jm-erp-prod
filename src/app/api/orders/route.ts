@@ -46,6 +46,16 @@ function num(v: any, fallback: number | null = 0): number | null {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
+function inferUnitPriceFromAmount(row: any): number | null {
+  const precise = Number(row?.unit_price_precise ?? row?.unitPricePrecise);
+  if (Number.isFinite(precise) && precise > 0) return precise;
+
+  const qty = Number(row?.qty ?? 0);
+  const amount = Number(row?.amount ?? 0);
+  if (!Number.isFinite(qty) || qty <= 0) return null;
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return Math.round((amount / qty + Number.EPSILON) * 1000000) / 1000000;
+}
 function pickStr(obj: any, keys: string[]): string | undefined {
   for (const k of keys) {
     const v = obj?.[k];
@@ -262,7 +272,20 @@ export async function GET(req: Request) {
 
     if (lErr) return bad(lErr.message, 500);
 
-    return ok({ header: headerAny, lines: lines || [] });
+    const normalizedLines = ((lines || []) as any[]).map((line) => {
+      const inferred = inferUnitPriceFromAmount(line);
+      const stored = Number(line?.unit_price ?? 0);
+      const shouldUseInferred =
+        inferred !== null &&
+        Number.isFinite(stored) &&
+        Math.abs(inferred - stored) > 0.000001;
+
+      return shouldUseInferred
+        ? { ...line, unit_price: inferred }
+        : line;
+    });
+
+    return ok({ header: headerAny, lines: normalizedLines });
   } catch (e: any) {
     return bad(e?.message || "Unexpected error", 500);
   }
@@ -538,6 +561,7 @@ const useSequentialLineNo = hasDupLineNo;
 
         qty,
         unit_price: unitPrice,
+        unit_price_precise: unitPrice,
         amount,
 
         currency: str(ln.currency) ?? str(savedHeader?.currency),

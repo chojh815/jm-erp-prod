@@ -191,7 +191,7 @@ export async function POST(req: Request) {
     // ---- Create shipment lines ----
     const toLineRow = (pl: any) => {
       const orderQty = num(pl?.order_qty ?? pl?.qty ?? pl?.quantity ?? 0, 0);
-      const unitPrice = num(pl?.unit_price ?? pl?.price ?? 0, 0);
+      const unitPrice = num(pl?.unit_price_precise ?? pl?.unitPricePrecise ?? pl?.unit_price ?? pl?.price ?? 0, 0);
       const amount = num(pl?.amount ?? orderQty * unitPrice, 0);
 
       return {
