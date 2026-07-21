@@ -221,10 +221,14 @@ export async function GET(req: NextRequest) {
         const settled = applied + Math.max(invId ? (settledByInvoiceId.get(invId) || 0) : 0, invNo ? (settledByInvoiceNo.get(invNo) || 0) : 0);
         const fallbackBalance = Math.max(0, total - settled);
         const hasComputedSettlement = settled > 0.0001;
+        const statusKey = String(r?.status ?? "").toUpperCase();
+        const shouldTrustExplicitBalance =
+          explicitBalanceExists &&
+          (explicitBalance > 0.0001 || explicitPaid > 0.0001 || statusKey === "PAID");
         const balance =
           hasComputedSettlement
             ? fallbackBalance
-            : explicitBalanceExists
+            : shouldTrustExplicitBalance
               ? explicitBalance
               : fallbackBalance;
 

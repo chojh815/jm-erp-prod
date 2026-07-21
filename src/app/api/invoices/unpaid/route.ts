@@ -166,7 +166,12 @@ export async function GET(req: NextRequest) {
       const a = explicitPaidExists ? toNum(explicitPaidRaw) : fallbackApplied;
       const settled = a + toNum(settledExtra.get(inv.id) || 0);
       const fallbackBalance = Math.max(0, toNum(inv.total_amount) - settled);
-      const bal = settled > 0.0001 ? fallbackBalance : explicitBalanceExists ? toNum(explicitBalanceRaw) : fallbackBalance;
+      const explicitBalance = toNum(explicitBalanceRaw);
+      const statusKey = String(inv?.status || "").toUpperCase();
+      const shouldTrustExplicitBalance =
+        explicitBalanceExists &&
+        (explicitBalance > 0.0001 || a > 0.0001 || statusKey === "PAID");
+      const bal = settled > 0.0001 ? fallbackBalance : shouldTrustExplicitBalance ? explicitBalance : fallbackBalance;
       const po_nos = poMap.get(inv.id) || [];
       return {
         id: inv.id,

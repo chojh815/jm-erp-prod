@@ -217,6 +217,27 @@ export async function POST(req: Request) {
     if (!shipment) return bad("Shipment not found.", 404);
     if (!shipment.buyer_id) return bad("buyer_id is required in Shipment.", 400);
 
+    // Return the existing active invoice instead of creating another one for
+    // the same shipment. Do not filter by is_latest so legacy rows where the
+    // flag is null are protected as well.
+    const { data: existingInvoice, error: existingErr } = await supabaseAdmin
+      .from("invoice_headers")
+      .select("id, invoice_no")
+      .eq("shipment_id", shipmentId)
+      .eq("is_deleted", false)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existingErr) throw new Error(existingErr.message);
+    if (existingInvoice?.id) {
+      return ok({
+        invoice_id: existingInvoice.id,
+        invoice_no: existingInvoice.invoice_no,
+        already_exists: true,
+      });
+    }
+
     const buyerId = shipment.buyer_id;
 
     // 2) buyer defaults + invoice no
@@ -316,6 +337,9 @@ export async function POST(req: Request) {
         invoice_no: invoiceNo,
         invoice_date: invoiceDate,
         status: "DRAFT",
+        is_deleted: false,
+        revision_no: 0,
+        is_latest: true,
 
         buyer_id: buyerId,
         buyer_name: shipment.buyer_name ?? null,
