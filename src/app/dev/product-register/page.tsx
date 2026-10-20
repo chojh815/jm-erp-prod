@@ -1392,19 +1392,17 @@ export default function ProductRegisterPage() {
     const base = baseStyleNo.trim().toUpperCase();
     const suffix = colorSuffix.trim().toUpperCase();
 
-    if (base.length !== 8) {
-      alert("Base style no. must be exactly 8 characters (e.g. JN250001).");
+    if (!legacyStyleMode && (base.length !== 8 || !isValidStyleNo(base))) {
+      alert("Base style no. must follow the JM format (e.g. JN250001). For older numbers, enable Legacy style.");
       return;
     }
 
-    if (suffix.length !== 1) {
-      alert("Color suffix must be exactly 1 character (e.g. A, B, C).");
+    if (!/^[A-Z]$/.test(suffix)) {
+      alert("Color suffix must be one letter from A to Z (e.g. A, B, C).");
       return;
     }
 
-    const newStyleNo = `${base}${suffix}`; // 9 chars
-    setStyleNo(newStyleNo);
-    setLegacyStyleMode(false);
+    const newStyleNo = `${base}${suffix}`;
 
     try {
       const res = await fetch(
@@ -1416,6 +1414,9 @@ export default function ProductRegisterPage() {
         alert(data.error || "Failed to load base style.");
         return;
       }
+
+      setStyleNo(newStyleNo);
+      setStyleError(null);
 
       // Copy materials & operations from base style
       const matRows: MaterialRow[] =
