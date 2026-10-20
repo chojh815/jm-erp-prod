@@ -1,6 +1,7 @@
 // src/app/api/packing-lists/create-from-shipment/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { packingListNumberFromInvoice } from "@/lib/packingListNumber";
 
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
@@ -30,8 +31,7 @@ function derivePackingListNoFromInvoiceNo(invoiceNo: string) {
   // invoice: JMI-LDC-25-0001  -> PL-LDC-25-0001
   // invoice: JMI-251234       -> PL-251234
   if (!invoiceNo) return null;
-  if (invoiceNo.startsWith("JMI-")) return invoiceNo.replace(/^JMI-/, "PL-");
-  return `PL-${invoiceNo}`;
+  return packingListNumberFromInvoice(invoiceNo);
 }
 
 function safeText(v: any) {
@@ -56,15 +56,17 @@ async function findInvoiceByShipmentId(shipmentId: string) {
 
     linkQ = notDeletedOrNull(linkQ);
 
-    const { data: link, error: linkErr } = await linkQ.maybeSingle();
+    const { data: links, error: linkErr } = await linkQ;
     if (linkErr) throw new Error(linkErr.message);
 
-    const invId = link?.invoice_id ?? null;
-    if (invId && isUuid(String(invId))) {
+    const invIds = (links || []).map((link) => link.invoice_id).filter((id) => isUuid(String(id)));
+    if (invIds.length) {
       let invQ = supabaseAdmin
         .from("invoice_headers")
         .select("id, invoice_no, invoice_date, is_deleted")
-        .eq("id", invId);
+        .in("id", invIds)
+        .order("created_at", { ascending: false })
+        .limit(1);
 
       invQ = notDeletedOrNull(invQ);
 
@@ -87,7 +89,8 @@ async function findInvoiceByShipmentId(shipmentId: string) {
 
     invQ2 = notDeletedOrNull(invQ2);
 
-    const { data: invRow2, error: invErr2 } = await invQ2.maybeSingle();
+    const { data: invRow2, error: invErr2 } = await invQ2
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (invErr2) throw new Error(invErr2.message);
 
     if (invRow2?.id) invoice = invRow2;
@@ -101,6 +104,8 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => null);
     const shipmentId = body?.shipmentId;
     if (!shipmentId || !isUuid(shipmentId)) return bad("Invalid shipmentId", 400);
+    const currentInvoice = await findInvoiceByShipmentId(shipmentId);
+    if (!currentInvoice?.invoice_no) return bad("Invoice must be created first for this shipment.", 409);
 
     // ------------------------------------------------------------
     // 0) 이미 PL 있으면 재사용 (중복 생성 방지)
@@ -110,7 +115,10 @@ export async function POST(req: Request) {
       let q = supabaseAdmin
         .from("packing_list_headers")
         .select("*")
-        .eq("shipment_id", shipmentId);
+        .eq("shipment_id", shipmentId)
+        .or(`invoice_id.eq.${currentInvoice.id},invoice_id.is.null`)
+        .order("created_at", { ascending: false })
+        .limit(1);
       q = notDeletedOrNull(q);
 
       const { data: existing, error } = await q.maybeSingle();
@@ -174,7 +182,7 @@ export async function POST(req: Request) {
     // 2) invoice 조회 (PL No 파생용) - 없으면 생성 막음(정책)
     //    ✅ invoice_shipments 우선 + fallback 포함
     // ------------------------------------------------------------
-    const invoice = await findInvoiceByShipmentId(shipmentId);
+    const invoice = currentInvoice;
     if (!invoice?.invoice_no) {
       return bad("Invoice must be created first for this shipment.", 409);
     }

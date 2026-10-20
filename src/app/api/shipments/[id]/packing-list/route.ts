@@ -1,6 +1,7 @@
 // src/app/api/shipments/[id]/packing-list/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { packingListNumberFromInvoice } from "@/lib/packingListNumber";
 
 /**
  * ✅ v5
@@ -167,6 +168,21 @@ async function getShipmentOr404(shipmentId: string) {
 }
 
 async function getLatestInvoiceHeaderByShipment(shipmentId: string) {
+  const { data: links, error: linkError } = await supabaseAdmin
+    .from("invoice_shipments")
+    .select("invoice_id")
+    .eq("shipment_id", shipmentId)
+    .or("is_deleted.is.null,is_deleted.eq.false");
+  const invoiceIds = !linkError
+    ? (links || []).map((row) => row.invoice_id).filter(Boolean)
+    : [];
+  if (invoiceIds.length) {
+    const { data: linked, error } = await supabaseAdmin
+      .from("invoice_headers").select("*").in("id", invoiceIds)
+      .eq("is_deleted", false).order("created_at", { ascending: false }).limit(1);
+    if (error) throw new Error(error.message);
+    if (linked?.[0]) return linked[0];
+  }
   const { data, error } = await supabaseAdmin
     .from("invoice_headers")
     .select("*")
@@ -178,12 +194,14 @@ async function getLatestInvoiceHeaderByShipment(shipmentId: string) {
   return data?.[0] ?? null;
 }
 
-async function findExistingPackingList(shipmentId: string) {
-  const { data, error } = await supabaseAdmin
+async function findExistingPackingList(shipmentId: string, invoiceId?: string) {
+  let query = supabaseAdmin
     .from("packing_list_headers")
     .select("*")
     .eq("shipment_id", shipmentId)
-    .eq("is_deleted", false)
+    .eq("is_deleted", false);
+  if (invoiceId) query = query.or(`invoice_id.eq.${invoiceId},invoice_id.is.null`);
+  const { data, error } = await query
     .order("created_at", { ascending: false })
     .limit(1);
 
@@ -264,7 +282,8 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     const shipmentId = ctx?.params?.id;
     if (!isUuid(shipmentId)) return bad("Invalid shipment id", 400);
 
-    const pl = await findExistingPackingList(shipmentId);
+    const inv = await getLatestInvoiceHeaderByShipment(shipmentId);
+    const pl = await findExistingPackingList(shipmentId, inv?.id);
     return ok({ packing_list: pl });
   } catch (e: any) {
     console.error(e);
@@ -373,7 +392,7 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
     const totalGwCalc = sLines.reduce((a, r: any) => a + num(r.gw, 0), 0);
     const totalNwCalc = sLines.reduce((a, r: any) => a + num(r.nw, 0), 0);
 
-    const existing = await findExistingPackingList(shipmentId);
+    const existing = await findExistingPackingList(shipmentId, inv.id);
 
     const buildLineRows = (packingListId: string) =>
       sLines.map((r: any, idx: number) => {
@@ -455,11 +474,7 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
       });
     }
 
-    const genNo = await generatePackingListNo(
-      shipment.shipping_origin_code ?? null,
-      shipment.etd ?? shipment.created_at ?? null
-    );
-    const packingListNo = genNo || null;
+    const packingListNo = packingListNumberFromInvoice(inv.invoice_no);
 
     const headerPayload: Record<string, any> = {
       shipment_id: shipment.id,

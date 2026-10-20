@@ -121,6 +121,8 @@ export async function POST(
     const insertBase: any = {
       invoice_no: newInvoiceNo,
 
+      shipment_id: (header as any).shipment_id ?? null,
+
       buyer_id: (header as any).buyer_id ?? null,
       buyer_name: (header as any).buyer_name ?? null,
 
@@ -162,6 +164,7 @@ export async function POST(
 
       // ✅ 여기서 revision_of_invoice_id / revision_no 는 절대 삭제하지 않는다
       const dropKeys = [
+        "shipment_id",
         "payment_term",
         "destination",
         "shipping_origin_code",
