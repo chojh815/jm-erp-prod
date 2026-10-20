@@ -1,6 +1,7 @@
 // src/app/api/invoices/create-from-shipment/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { generateInvoiceNumber, invoiceToday } from "@/lib/invoiceNumber";
 
 function bad(message: string, status = 400, extra?: any) {
   return NextResponse.json({ success: false, error: message, ...extra }, { status });
@@ -243,7 +244,8 @@ export async function POST(req: Request) {
     // 2) buyer defaults + invoice no
     const buyerDefaults = await getBuyerDefaults(buyerId);
     const buyerCode = await getBuyerCode(buyerId);
-    const invoiceNo = await generateInvoiceNo(buyerCode);
+    const invoiceDate = toDate10(body?.invoice_date) ?? invoiceToday();
+    const invoiceNo = await generateInvoiceNumber(buyerCode, invoiceDate);
 
     // 3) ship_mode (shipment에는 없으니 po_headers에서 가져오고, 없으면 SEA)
     let shipMode: "AIR" | "SEA" = "SEA";
@@ -329,7 +331,6 @@ export async function POST(req: Request) {
     const total_nw = safeNumber(shipment.total_nw, 0);
 
     // 6) invoice header insert (스키마에 있는 컬럼 최대한 채움)
-    const invoiceDate = toDate10(body?.invoice_date) ?? toDate10(new Date().toISOString());
 
     const { data: header, error: ihErr } = await supabaseAdmin
       .from("invoice_headers")

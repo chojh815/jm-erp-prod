@@ -1,6 +1,7 @@
 // src/app/api/shipments/[id]/invoice/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { generateInvoiceNumber, invoiceToday } from "@/lib/invoiceNumber";
 
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
@@ -307,29 +308,8 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     // 6) invoice_no 생성 (너가 정한 포맷: JMI-{buyerCode}-{yy}-{seq4})
     // buyerCode 없으면 "BUYER"로 대체
     const bc = String(buyerCode || "BUYER").toUpperCase();
-    const now = new Date();
-    const yy = String(now.getFullYear()).slice(-2);
-    const prefix = `JMI-${bc}-${yy}-`;
-
-    const { data: recent, error: rErr } = await supabaseAdmin
-      .from("invoice_headers")
-      .select("invoice_no,created_at")
-      .ilike("invoice_no", `${prefix}%`)
-      .order("created_at", { ascending: false })
-      .limit(300);
-
-    if (rErr) return bad(rErr.message, 500);
-
-    let maxSeq = 0;
-    for (const row of recent || []) {
-      const v = String((row as any).invoice_no || "");
-      if (!v.startsWith(prefix)) continue;
-      const tail = v.slice(prefix.length);
-      const n = Number(tail);
-      if (Number.isFinite(n)) maxSeq = Math.max(maxSeq, n);
-    }
-    const seq4 = String(maxSeq + 1).padStart(4, "0");
-    const invoiceNo = `${prefix}${seq4}`;
+    const invoiceDate = toDate10(body?.invoice_date) ?? invoiceToday();
+    const invoiceNo = await generateInvoiceNumber(bc, invoiceDate);
 
     // 7) totals (invoice는 Amount 중심)
     const totalAmount = (sLines || []).reduce((s: number, l: any) => {
@@ -387,7 +367,7 @@ export async function POST(req: Request, { params }: { params: { id: string } })
       coo_text: `MADE IN ${originToCountry((shipment as any).shipping_origin_code)}`,
 
       shipment_id: shipmentId,
-      invoice_date: toDate10(body?.invoice_date) ?? toDate10(now.toISOString()),
+      invoice_date: invoiceDate,
 
       created_by: body?.created_by ?? null,
       created_by_email: body?.created_by_email ?? null,

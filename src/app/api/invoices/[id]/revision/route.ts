@@ -1,6 +1,7 @@
 // src/app/api/invoices/[id]/revision/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { generateInvoiceNumber, invoiceToday } from "@/lib/invoiceNumber";
 
 function bad(message: string, status = 400) {
   return NextResponse.json({ success: false, error: message }, { status });
@@ -99,7 +100,8 @@ export async function POST(
     if (!buyerId) return bad("buyer_id is missing in invoice header.", 400);
 
     const buyerCode = await getBuyerCode(buyerId);
-    const newInvoiceNo = await generateInvoiceNo(buyerCode);
+    const invoiceDate = invoiceToday();
+    const newInvoiceNo = await generateInvoiceNumber(buyerCode, invoiceDate);
 
     // 5) 기존 최신 is_latest=false 처리 (있으면)
     try {
@@ -120,6 +122,7 @@ export async function POST(
     // 6) 새 헤더 insert (원본 복사 + revision 메타 + DRAFT)
     const insertBase: any = {
       invoice_no: newInvoiceNo,
+      invoice_date: invoiceDate,
 
       shipment_id: (header as any).shipment_id ?? null,
 
