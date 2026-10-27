@@ -1,3 +1,4 @@
+import { calculatePoLineAmounts, addPoAmounts, poAmountsByCurrency } from "@/lib/poAmounts";
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -31,7 +32,7 @@ const COMPUTED_STATUS_SET = new Set<ComputedPoStatus>([
   "CANCELLED",
 ]);
 
-const EXCLUDED_SHIPMENT_STATUSES = new Set(["CANCELLED", "CANCELED", "DELETED"]);
+const EXCLUDED_SHIPMENT_STATUSES = new Set(["CANCELLED", "CANCELED", "DELETED", "VOID"]);
 const CANCELLED_PO_STATUSES = new Set(["CANCELLED", "CANCELED"]);
 
 /**
@@ -150,7 +151,7 @@ function getSortValue(it: any, field: SortField, dir: SortDir) {
     case "SHIP_MODE":
       return normStr(it.shipMode);
     case "SUBTOTAL":
-      return n(it.subtotal, 0);
+      return n(it.sortAmount ?? it.subtotal, 0);
     case "NONE":
     default:
       return null;
@@ -298,6 +299,7 @@ type PoLineRow = {
   plating_color: string | null;
   hs_code: string | null;
   qty: number | null;
+  qty_cancelled?: number | null;
   uom: string | null;
   unit_price: number | null;
   amount: number | null;
@@ -397,6 +399,7 @@ export async function GET(req: Request) {
             "plating_color",
             "hs_code",
             "qty",
+            "qty_cancelled",
             "uom",
             "unit_price",
             "amount",
@@ -453,13 +456,16 @@ export async function GET(req: Request) {
       const shipmentByLine: Record<string, { shipmentNo?: string | null; status?: string | null }> =
         {};
 
+      const detailAllocated: Record<string, number> = {};
+      const detailShipped: Record<string, number> = {};
       if (lineIds.length > 0) {
         const sLineRes = await supabaseAdmin
           .from("shipment_lines")
-          .select(["po_line_id", "shipment_id", "is_deleted"].join(","))
+          .select(["po_line_id", "shipment_id", "shipped_qty", "is_deleted"].join(","))
           .in("po_line_id", lineIds)
           .eq("is_deleted", false);
 
+        if (sLineRes.error) throw new Error(sLineRes.error.message);
         if (!sLineRes.error) {
           const sLines = ((sLineRes.data ?? []) as unknown as ShipmentLineRow[]) || [];
           const shipmentIds = uniq(sLines.map((r) => r.shipment_id).filter(Boolean)) as string[];
@@ -472,6 +478,7 @@ export async function GET(req: Request) {
               .in("id", shipmentIds)
               .eq("is_deleted", false);
 
+            if (shipRes.error) throw new Error(shipRes.error.message);
             if (!shipRes.error) {
               const ships = ((shipRes.data ?? []) as unknown as ShipmentRow[]) || [];
               for (const s of ships) shipmentsMap[s.id] = s;
@@ -483,6 +490,9 @@ export async function GET(req: Request) {
             const sid = sl.shipment_id;
             if (!lid || !sid) continue;
             const sh = shipmentsMap[sid];
+            if (!sh || EXCLUDED_SHIPMENT_STATUSES.has(normStr(sh.status))) continue;
+            detailAllocated[lid] = (detailAllocated[lid] ?? 0) + n(sl.shipped_qty);
+            if (SHIPPED_COMPLETE_SHIPMENT_STATUSES.has(normStr(sh.status))) detailShipped[lid] = (detailShipped[lid] ?? 0) + n(sl.shipped_qty);
             shipmentByLine[lid] = {
               shipmentNo: sh?.shipment_no ?? null,
               status: sh?.status ?? null,
@@ -506,6 +516,7 @@ export async function GET(req: Request) {
         uom: r.uom,
         unitPrice: r.unit_price,
         amount: r.amount,
+        ...calculatePoLineAmounts(r, detailShipped[r.id] ?? 0, detailAllocated[r.id] ?? 0, isCancelledPoStatus(hdr.status)),
         upc: r.upc,
         remark: r.remark,
 
@@ -679,6 +690,7 @@ export async function GET(req: Request) {
           "buyer_style_no",
           "jm_style_no",
           "qty",
+          "qty_cancelled",
           "unit_price",
           "amount",
           "is_deleted",
@@ -689,6 +701,7 @@ export async function GET(req: Request) {
         .order("po_header_id", { ascending: true })
         .order("line_no", { ascending: true, nullsFirst: true });
 
+      if (sumRes.error) throw new Error(sumRes.error.message);
       if (!sumRes.error) {
         const lines = (sumRes.data as any[]) ?? [];
         for (const r of lines) {
@@ -834,6 +847,7 @@ export async function GET(req: Request) {
             .in("id", shipmentIds)
             .eq("is_deleted", false);
 
+          if (shipRes.error) throw new Error(shipRes.error.message);
           if (!shipRes.error) {
             const ships = ((shipRes.data ?? []) as unknown as ShipmentRow[]) || [];
             for (const sh of ships) {
@@ -883,23 +897,22 @@ export async function GET(req: Request) {
       const lineSubtotalCents = s.lineCount > 0 ? s.totalAmountCents : 0;
       const computedSubtotal = fromCents(lineSubtotalCents);
 
-      let allocatedQty = 0;
-      let shippedQty = 0;
-      for (const lineId of s.lineIds) {
-        allocatedQty += allocQtyByLineId[lineId] ?? 0;
-        shippedQty += shippedQtyByLineId[lineId] ?? 0;
-      }
-
-      const computedStatus = classifyPoStatus({
-        totalOrderQty: s.totalOrderQty,
-        totalAllocatedQty: allocatedQty,
-        totalShippedQty: shippedQty,
-      });
-
       const rawHeaderStatus = h.status ?? null;
-      const finalStatus: ComputedPoStatus = isCancelledPoStatus(rawHeaderStatus)
-        ? "CANCELLED"
-        : computedStatus;
+      const amountsByLine = s.lineIds.map((lineId) => calculatePoLineAmounts(
+        lineRowById[lineId], shippedQtyByLineId[lineId] ?? 0, allocQtyByLineId[lineId] ?? 0, isCancelledPoStatus(rawHeaderStatus)
+      ));
+      const amounts = addPoAmounts(amountsByLine.map((r) => r.amounts));
+      const quantities = amountsByLine.reduce((sum, r) => {
+        for (const key of Object.keys(sum) as (keyof typeof sum)[]) sum[key] += r.totals[key];
+        return sum;
+      }, { orderQty: 0, allocatedQty: 0, shippedQty: 0, cancelledQty: 0, pendingQty: 0, remainingQty: 0 });
+      const computedStatus = classifyPoStatus({
+        totalOrderQty: quantities.orderQty - quantities.cancelledQty,
+        totalAllocatedQty: quantities.allocatedQty,
+        totalShippedQty: quantities.shippedQty,
+      });
+      const finalStatus: ComputedPoStatus = isCancelledPoStatus(rawHeaderStatus) || (quantities.orderQty > 0 && quantities.cancelledQty === quantities.orderQty)
+        ? "CANCELLED" : computedStatus;
 
       return {
         id: h.id,
@@ -917,6 +930,9 @@ export async function GET(req: Request) {
         currency: h.currency,
         subtotal: computedSubtotal,
         amount: computedSubtotal,
+        amounts,
+        lineIds: s.lineIds,
+        sortAmount: pendingOnly ? amounts.pending : amounts.order,
 
         status: finalStatus,
         rawHeaderStatus,
@@ -939,12 +955,7 @@ export async function GET(req: Request) {
         mainUnitPrice: fl?.unit_price ?? null,
         mainAmount: fl?.amount ?? null,
 
-        totals: {
-          orderQty: s.totalOrderQty,
-          allocatedQty,
-          shippedQty,
-          remainingQty: Math.max(0, s.totalOrderQty - allocatedQty),
-        },
+        totals: quantities,
       };
     });
 
@@ -956,7 +967,7 @@ export async function GET(req: Request) {
     if (pendingOnly) {
       itemsBase = itemsBase.filter((it) => {
         if (isCancelledPoStatus(it.rawHeaderStatus)) return false;
-        return n(it.totals.orderQty, 0) - n(it.totals.shippedQty, 0) > 0;
+        return n(it.totals.pendingQty, 0) > 0;
       });
     }
 
@@ -964,7 +975,7 @@ export async function GET(req: Request) {
       const today = new Date().toISOString().slice(0, 10);
       itemsBase = itemsBase.filter((it) => {
         if (isCancelledPoStatus(it.rawHeaderStatus)) return false;
-        const pendingQty = n(it.totals.orderQty, 0) - n(it.totals.shippedQty, 0);
+        const pendingQty = n(it.totals.pendingQty, 0);
         const reqShipDate = asText(it.reqShipDate).trim().slice(0, 10);
         return pendingQty > 0 && !!reqShipDate && reqShipDate < today;
       });
@@ -1008,38 +1019,23 @@ export async function GET(req: Request) {
     const to = from + pageSize;
     const items = itemsSorted.slice(from, to);
 
-    const pageTotalsByCurrencyCents: Record<string, number> = {};
-    for (const it of items) {
-      if (isCancelledPoStatus(it.rawHeaderStatus)) continue;
-      const cur = asText(it.currency).trim() || "";
-      const vCents = toCents((it as any).subtotal);
-      pageTotalsByCurrencyCents[cur] = (pageTotalsByCurrencyCents[cur] ?? 0) + vCents;
-    }
-    const pageSubtotal = fromCents(Object.values(pageTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0));
-    const pageTotalsByCurrency: Record<string, number> = {};
-    for (const [cur, cents] of Object.entries(pageTotalsByCurrencyCents)) {
-      pageTotalsByCurrency[cur] = fromCents(cents ?? 0);
-    }
-
-    const grandTotalsByCurrencyCents: Record<string, number> = {};
-    for (const it of itemsFiltered) {
-      if (isCancelledPoStatus(it.rawHeaderStatus)) continue;
-      const cur = asText(it.currency).trim() || "";
-      grandTotalsByCurrencyCents[cur] = (grandTotalsByCurrencyCents[cur] ?? 0) + toCents(it.subtotal);
-    }
-    const grandTotal = fromCents(
-      Object.values(grandTotalsByCurrencyCents).reduce((a, b) => a + (b ?? 0), 0)
-    );
-    const grandTotalsByCurrency: Record<string, number> = {};
-    for (const [cur, cents] of Object.entries(grandTotalsByCurrencyCents)) {
-      grandTotalsByCurrency[cur] = fromCents(cents ?? 0);
-    }
+    const amountBasis = pendingOnly ? "pending" : "order";
+    const pageAmountsByCurrency = poAmountsByCurrency(items.filter((it) => it.status !== "CANCELLED"));
+    const grandAmountsByCurrency = poAmountsByCurrency(itemsFiltered.filter((it) => it.status !== "CANCELLED"));
+    const pageTotalsByCurrency = Object.fromEntries(Object.entries(pageAmountsByCurrency).map(([cur, amounts]) => [cur, amounts[amountBasis]]));
+    const grandTotalsByCurrency = Object.fromEntries(Object.entries(grandAmountsByCurrency).map(([cur, amounts]) => [cur, amounts[amountBasis]]));
+    // Scalar totals are only meaningful when every result uses one currency.
+    const pageSubtotal = Object.keys(pageTotalsByCurrency).length === 1 ? Object.values(pageTotalsByCurrency)[0] : null;
+    const grandTotal = Object.keys(grandTotalsByCurrency).length === 1 ? Object.values(grandTotalsByCurrency)[0] : null;
 
     return ok({
       items,
       page,
       pageSize,
       total: count,
+      amountBasis,
+      pageAmountsByCurrency,
+      grandAmountsByCurrency,
       pageSubtotal,
       pageTotalsByCurrency,
       grandTotal,
@@ -1050,9 +1046,9 @@ export async function GET(req: Request) {
       statusLogic: {
         cancelled: "PO header status CANCELLED/CANCELED always overrides computed shipment status",
         open: "No non-cancelled shipment allocation exists",
-        partial: "Allocated qty > 0 but allocated qty < order qty",
-        allocated: "Allocated qty >= order qty but shipped-complete qty < order qty",
-        shipped: "Shipped-complete qty >= order qty",
+        partial: "Some active Shipment quantity exists and uncancelled order quantity is not fully allocated",
+        allocated: "Uncancelled order quantity is fully allocated but not shipped-complete",
+        shipped: "Shipped-complete quantity covers the uncancelled order quantity",
         excludedShipmentStatuses: Array.from(EXCLUDED_SHIPMENT_STATUSES),
         shippedCompleteShipmentStatuses: Array.from(SHIPPED_COMPLETE_SHIPMENT_STATUSES),
       },

@@ -30,6 +30,8 @@ import {
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import ExcelJS from "exceljs";
+import { emptyPoAmounts, type PoAmounts, type PoQuantities } from "@/lib/poAmounts";
+import { buildPoAmountExportRows, poAmountExportColumns } from "@/lib/poAmountExport";
 
 interface PoHeaderItem {
   id: string;
@@ -47,6 +49,10 @@ interface PoHeaderItem {
 
   currency: string | null;
   subtotal: number | null;
+  amounts: PoAmounts;
+  totals?: PoQuantities;
+  lineIds?: string[];
+  sortAmount?: number;
   status: string | null;
 
   mainQty: number | null;
@@ -68,6 +74,8 @@ interface PoLineItem {
   unit: string | null;
   price: number | null;
   amount: number | null;
+  amounts: PoAmounts;
+  totals?: PoQuantities;
 
   deliveryDate: string | null;
   shipmentMode: string | null;
@@ -184,6 +192,10 @@ function normalizeHeader(raw: any): PoHeaderItem {
         : raw?.subtotal !== null && raw?.subtotal !== undefined
           ? Number(raw.subtotal)
           : null,
+    amounts: raw?.amounts ?? { ...emptyPoAmounts(), order: Number(raw?.subtotal ?? 0), pending: Number(raw?.subtotal ?? 0) },
+    totals: raw?.totals,
+    lineIds: raw?.lineIds,
+    sortAmount: raw?.sortAmount,
     status: raw?.status ?? null,
     mainQty:
       typeof raw?.mainQty === "number"
@@ -222,6 +234,8 @@ function normalizeLine(raw: any): PoLineItem {
     unit: raw?.unit ?? raw?.uom ?? raw?.unit_of_measure ?? null,
     price: raw?.price ?? raw?.unitPrice ?? raw?.unit_price ?? null,
     amount: raw?.amount ?? null,
+    amounts: raw?.amounts ?? { ...emptyPoAmounts(), order: Number(raw?.amount ?? 0), pending: Number(raw?.amount ?? 0) },
+    totals: raw?.totals,
 
     deliveryDate:
       raw?.deliveryDate ??
@@ -408,7 +422,7 @@ function getSortValue(it: PoHeaderItem, field: SortField, dir: SortDir) {
     case "SHIP_MODE":
       return normStr(it.shipMode);
     case "SUBTOTAL":
-      return normNum(it.subtotal);
+      return normNum(it.sortAmount ?? it.subtotal);
     case "NONE":
     default:
       return null;
@@ -535,6 +549,7 @@ export default function PurchaseOrderListPage() {
   const [total, setTotal] = useState(0);
 
   // totals (API-provided, filter-wide)
+  const [amountBasis, setAmountBasis] = useState<"order" | "pending">("order");
   const [grandTotal, setGrandTotal] = useState<number | null>(null);
   const [grandTotalsByCurrency, setGrandTotalsByCurrency] = useState<Record<string, number> | null>(null);
   const [pageTotalsByCurrency, setPageTotalsByCurrency] = useState<Record<string, number> | null>(null);
@@ -767,6 +782,7 @@ export default function PurchaseOrderListPage() {
       const rawItems = json?.items ?? [];
       const normalized = rawItems.map(normalizeHeader);
 
+      setAmountBasis(json?.amountBasis === "pending" ? "pending" : "order");
       setItems(normalized);
       setTotal(json?.total ?? 0);
       setPage(json?.page ?? p);
@@ -1008,496 +1024,119 @@ export default function PurchaseOrderListPage() {
     return all;
   }
 
-  // ---------- export excel ----------
+  // Excel and PDF share one set of rows, amounts, and currency-separated totals.
+  const [exporting, setExporting] = useState(false);
+  const loadAmountExport = async () => {
+    const allHeaders = await fetchAllHeadersForExport();
+    const headers = multiSortItems(allHeaders, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
+    const linesByHeader: Record<string, PoLineItem[]> = {};
+    // Keep the request count bounded for large PO lists.
+    for (let start = 0; start < headers.length; start += 5) {
+      await Promise.all(headers.slice(start, start + 5).map(async (header) => {
+        const response = await fetch(`/api/orders/list?detailFor=${encodeURIComponent(header.id)}`, { cache: "no-store" });
+        const result = await safeJson<any>(response);
+        if (!response.ok || !result?.success) throw new Error(result?.error || "Failed to load PO lines for export.");
+        linesByHeader[header.id] = (result.lines ?? []).map(normalizeLine);
+      }));
+    }
+    return { headers, rows: buildPoAmountExportRows(headers, linesByHeader) };
+  };
+
   const handleExportExcel = async () => {
-    if (total === 0) return alert("No data to export.");
-
-    async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
-      const params = new URLSearchParams();
-      params.set("detailFor", headerId);
-
-      const res = await fetch(`/api/orders/list?${params.toString()}`);
-      const json = await safeJson<any>(res);
-
-      if (!res.ok) {
-        throw new Error(json?.error ?? "Failed to load PO lines.");
-      }
-
-      const rawLines = json?.lines ?? [];
-      return rawLines.map(normalizeLine);
-    }
-
-    const header = [
-      "PO No",
-      "Buyer",
-      "Brand",
-      "Buyer Style No",
-      "Order Date",
-      "Req. Ship Date",
-      "Ship Mode",
-      "Cur.",
-      "Qty",
-      "Unit Price",
-      "Subtotal",
-      "Status",
-    ];
-
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("PO List", { views: [{ state: "frozen", ySplit: 6 }] });
-    const headerFill = "FF374151";
-    const sectionFill = "FFF3F4F6";
-    const subtotalFill = "FFE5E7EB";
-    const border = { style: "thin", color: { argb: "FFD1D5DB" } } as const;
-    const moneyFmt = '#,##0.00;[Red]-#,##0.00';
-    const qtyFmt = '#,##0';
-
-    sheet.columns = [
-      { width: 18 }, { width: 24 }, { width: 18 }, { width: 22 },
-      { width: 14 }, { width: 16 }, { width: 14 }, { width: 10 },
-      { width: 12 }, { width: 14 }, { width: 16 }, { width: 14 },
-    ];
-
-    sheet.mergeCells("A1:L1");
-    sheet.getCell("A1").value = "Purchase Order List";
-    sheet.getCell("A1").font = { bold: true, size: 18, color: { argb: "FF111827" } };
-    sheet.getRow(1).height = 26;
-
-    const sortLabel = `1) ${s1Field} ${s1Dir}  2) ${s2Field} ${s2Dir}  3) ${s3Field} ${s3Dir}`;
-    sheet.mergeCells("A2:L2");
-    sheet.getCell("A2").value = `Sort: ${sortLabel}`;
-    sheet.getCell("A2").font = { size: 11, color: { argb: "FF334155" } };
-
-    function styleHeader(row: ExcelJS.Row) {
-      row.height = 22;
-      row.eachCell((cell) => {
+    if (total === 0 || exporting) return;
+    setExporting(true);
+    try {
+      const { headers, rows } = await loadAmountExport();
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("PO List", { views: [{ state: "frozen", ySplit: 4 }] });
+      sheet.columns = [18, 24, 16, 22, 14, 16, 12, 10, 12, 14, 17, 17, 17, 17, 14].map((width) => ({ width }));
+      sheet.mergeCells("A1:O1");
+      sheet.getCell("A1").value = "Purchase Order List";
+      sheet.getCell("A1").font = { bold: true, size: 18 };
+      sheet.getRow(1).height = 28;
+      sheet.mergeCells("A2:O2");
+      sheet.getCell("A2").value = `${headers.length} POs | Order - Shipped - Cancelled = Pending | Totals shown separately by currency`;
+      sheet.addRow([]);
+      const titleRow = sheet.addRow(poAmountExportColumns);
+      titleRow.height = 24;
+      titleRow.eachCell((cell) => {
         cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
-        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerFill } };
-        cell.alignment = { horizontal: "center", vertical: "middle" };
-        cell.border = { top: border, left: border, bottom: border, right: border };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF334155" } };
+        cell.alignment = { vertical: "middle", horizontal: "center" };
       });
-    }
-
-    function styleBody(row: ExcelJS.Row, moneyCols: number[] = [], qtyCols: number[] = []) {
-      row.eachCell((cell, col) => {
-        cell.border = { top: border, left: border, bottom: border, right: border };
-        cell.alignment = { vertical: "middle", horizontal: moneyCols.includes(col) || qtyCols.includes(col) ? "right" : "left" };
-        if (moneyCols.includes(col)) cell.numFmt = moneyFmt;
-        if (qtyCols.includes(col)) cell.numFmt = qtyFmt;
-      });
-    }
-
-    function styleTotal(row: ExcelJS.Row) {
-      row.eachCell((cell) => {
-        cell.font = { bold: true, color: { argb: "FF111827" } };
-        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: subtotalFill } };
-      });
-      styleBody(row, [10, 11], [9]);
-    }
-
-    sheet.addRow([]);
-    const headerRow = sheet.addRow(header);
-    styleHeader(headerRow);
-
-    try {
-      let grandSum = 0;
-      let totalLines = 0;
-
-      const allHeaders = await fetchAllHeadersForExport();
-      const allSorted = multiSortItems(allHeaders, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
-      sheet.getCell("A2").value = `Sort: ${sortLabel} | Total: ${allSorted.length} POs`;
-
-      for (const it of allSorted) {
-        const lines = await fetchLinesForHeaderId(it.id);
-        const includeInTotals = !isCanceledPoStatus(it.status);
-
-        let poSum = 0;
-
-        if (!lines || lines.length === 0) {
-          const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
-          poSum = includeInTotals ? headerSubtotal : 0;
-          grandSum += poSum;
-          totalLines += 1;
-
-          const row = sheet.addRow([
-            it.poNo,
-            it.buyerName ?? "-",
-            it.mainBuyerBrand ?? "-",
-            "-",
-            it.orderDate ?? "-",
-            it.reqShipDate ?? "-",
-            it.shipMode ?? "-",
-            it.currency ?? "-",
-            "-",
-            "-",
-            headerSubtotal,
-            it.status ?? "-",
-          ]);
-          styleBody(row, [10, 11], [9]);
-
-          const subtotalRow = sheet.addRow([
-            it.poNo,
-            "",
-            "",
-            "PO Subtotal",
-            "",
-            "",
-            "",
-            it.currency ?? "-",
-            "",
-            "",
-            poSum,
-            "",
-          ]);
-          styleTotal(subtotalRow);
-
-          sheet.addRow([]);
-          continue;
-        }
-
-        lines.forEach((ln) => {
-          totalLines += 1;
-          const style =
-            (ln.buyerStyleNo ?? "").trim() ||
-            (ln.jmStyleNo ?? "").trim() ||
-            "-";
-
-          const qtyNum = typeof ln.qty === "number" ? ln.qty : null;
-
-          const priceNum =
-            typeof ln.price === "number"
-              ? ln.price
-              : typeof ln.unitPrice === "number"
-                ? ln.unitPrice
-                : null;
-
-          let amount: number | null = null;
-          if (typeof ln.amount === "number") amount = ln.amount;
-          else if (typeof qtyNum === "number" && typeof priceNum === "number")
-            amount = qtyNum * priceNum;
-
-          if (includeInTotals && typeof amount === "number") poSum += amount;
-
-          const row = sheet.addRow([
-            it.poNo,
-            it.buyerName ?? "-",
-            it.mainBuyerBrand ?? "-",
-            style,
-            it.orderDate ?? "-",
-            it.reqShipDate ?? "-",
-            it.shipMode ?? "-",
-            it.currency ?? "-",
-            typeof qtyNum === "number" ? qtyNum : "-",
-            typeof priceNum === "number" ? priceNum : "-",
-            typeof amount === "number" ? amount : "-",
-            it.status ?? "-",
-          ]);
-          styleBody(row, [10, 11], [9]);
+      for (const entry of rows) {
+        const row = sheet.addRow(entry.values);
+        row.eachCell((cell, column) => {
+          cell.alignment = { horizontal: column >= 9 && column <= 14 ? "right" : "left", vertical: "middle" };
+          if (column === 9) cell.numFmt = "#,##0";
+          if (column >= 10 && column <= 14) cell.numFmt = "#,##0.00";
+          if (entry.kind !== "line") {
+            cell.font = { bold: true };
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: entry.kind === "currency_total" ? "FFDBEAFE" : "FFF1F5F9" } };
+          }
+          if (column === 14) cell.font = { bold: true, color: { argb: "FF1D4ED8" } };
         });
-
-        grandSum += poSum;
-
-        const subtotalRow = sheet.addRow([
-          it.poNo,
-          "",
-          "",
-          "PO Subtotal",
-          "",
-          "",
-          "",
-          it.currency ?? "-",
-          "",
-          "",
-          poSum,
-          "",
-        ]);
-        styleTotal(subtotalRow);
-
-        sheet.addRow([]);
       }
-
-      const curSet = new Set(allHeaders.map((x) => (x.currency ?? "").trim()).filter(Boolean));
-      const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
-      const grandRow = sheet.addRow([
-        "",
-        "",
-        "",
-        "Grand Total",
-        "",
-        "",
-        "",
-        curLabel,
-        "",
-        "",
-        grandSum,
-        "",
-      ]);
-      styleTotal(grandRow);
-      sheet.getCell("A2").value = `Sort: ${sortLabel} | Total: ${allSorted.length} POs / ${totalLines} Lines`;
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.message ?? "Failed to export.");
-      return;
+      sheet.autoFilter = "A4:O4";
+      const buffer = await workbook.xlsx.writeBuffer();
+      const url = URL.createObjectURL(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `po-list-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error: any) {
+      alert(error?.message || "Failed to export Excel.");
+    } finally {
+      setExporting(false);
     }
-
-    sheet.autoFilter = { from: "A4", to: "L4" };
-    const buffer = await workbook.xlsx.writeBuffer();
-    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `po-list-${new Date().toISOString().slice(0, 10)}.xlsx`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
   };
 
-  // ---------- export pdf ----------
   const handleExportPdf = async () => {
-    if (total === 0) return alert("No data to export.");
-
-    async function fetchLinesForHeaderId(headerId: string): Promise<PoLineItem[]> {
-      const params = new URLSearchParams();
-      params.set("detailFor", headerId);
-
-      const res = await fetch(`/api/orders/list?${params.toString()}`);
-      const json = await safeJson<any>(res);
-
-      if (!res.ok) {
-        throw new Error(json?.error ?? "Failed to load PO lines.");
-      }
-
-      const rawLines = json?.lines ?? [];
-      return rawLines.map(normalizeLine);
-    }
-
-    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
-
-    doc.setFontSize(14);
-    doc.text("Purchase Order List", 40, 40);
-
-    const sortLabel = `1) ${s1Field} ${s1Dir}  2) ${s2Field} ${s2Dir}  3) ${s3Field} ${s3Dir}`;
-    const body: any[] = [];
-
-    const nf0 = new Intl.NumberFormat("en-US");
-    const nf2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-    let totalLines = 0;
-    let totalPOs = 0;
-
+    if (total === 0 || exporting) return;
+    setExporting(true);
     try {
-      let grandSum = 0;
-
-      const allHeaders = await fetchAllHeadersForExport();
-      const allSorted = multiSortItems(allHeaders, s1Field, s1Dir, s2Field, s2Dir, s3Field, s3Dir);
-      totalPOs = allSorted.length;
-
-      for (const it of allSorted) {
-        const lines = await fetchLinesForHeaderId(it.id);
-        const includeInTotals = !isCanceledPoStatus(it.status);
-
-        let poSum = 0;
-
-        if (!lines || lines.length === 0) {
-          totalLines += 1;
-          const headerSubtotal = typeof it.subtotal === "number" ? it.subtotal : 0;
-          poSum = includeInTotals ? headerSubtotal : 0;
-
-          body.push([
-            it.poNo,
-            it.buyerName ?? "-",
-            it.mainBuyerBrand ?? "-",
-            "-",
-            it.orderDate ?? "-",
-            it.reqShipDate ?? "-",
-            it.shipMode ?? "-",
-            it.currency ?? "-",
-            "-",
-            "-",
-            nf2.format(headerSubtotal),
-            it.status ?? "-",
-          ]);
-
-          body.push([
-            "__PO_SUBTOTAL__",
-            it.poNo,
-            "",
-            "PO Subtotal",
-            "",
-            "",
-            "",
-            it.currency ?? "-",
-            "",
-            "",
-            nf2.format(poSum),
-            "",
-          ]);
-
-          grandSum += poSum;
-          continue;
-        }
-
-        lines.forEach((ln, idx) => {
-          totalLines += 1;
-
-          const style =
-            (ln.buyerStyleNo ?? "").trim() ||
-            (ln.jmStyleNo ?? "").trim() ||
-            "-";
-
-          const qtyNum = typeof ln.qty === "number" ? ln.qty : null;
-          const qty = typeof qtyNum === "number" ? nf0.format(qtyNum) : "-";
-
-          const priceNum =
-            typeof ln.price === "number"
-              ? ln.price
-              : typeof ln.unitPrice === "number"
-                ? ln.unitPrice
-                : null;
-
-          const unitPrice = typeof priceNum === "number" ? nf2.format(priceNum) : "-";
-
-          let amount: number | null = null;
-          if (typeof ln.amount === "number") amount = ln.amount;
-          else if (typeof qtyNum === "number" && typeof priceNum === "number")
-            amount = qtyNum * priceNum;
-
-          if (includeInTotals && typeof amount === "number") poSum += amount;
-
-          const showHeaderCols = idx === 0;
-
-          body.push([
-            showHeaderCols ? it.poNo : "",
-            showHeaderCols ? (it.buyerName ?? "-") : "",
-            showHeaderCols ? (it.mainBuyerBrand ?? "-") : "",
-            style,
-            showHeaderCols ? (it.orderDate ?? "-") : "",
-            showHeaderCols ? (it.reqShipDate ?? "-") : "",
-            showHeaderCols ? (it.shipMode ?? "-") : "",
-            showHeaderCols ? (it.currency ?? "-") : "",
-            qty,
-            unitPrice,
-            typeof amount === "number" ? nf2.format(amount) : "-",
-            showHeaderCols ? (it.status ?? "-") : "",
-          ]);
-        });
-
-        body.push([
-          "__PO_SUBTOTAL__",
-          it.poNo,
-          "",
-          "PO Subtotal",
-          "",
-          "",
-          "",
-          it.currency ?? "-",
-          "",
-          "",
-          nf2.format(poSum),
-          "",
-        ]);
-
-        grandSum += poSum;
-      }
-
-      const curSet = new Set(allSorted.map((x) => (x.currency ?? "").trim()).filter(Boolean));
-      const curLabel = curSet.size === 1 ? Array.from(curSet)[0] : curSet.size === 0 ? "" : "MIX";
-      body.push([
-        "__GRAND_TOTAL__",
-        "",
-        "",
-        "Grand Total",
-        "",
-        "",
-        "",
-        curLabel,
-        "",
-        "",
-        nf2.format(grandSum),
-        "",
-      ]);
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.message ?? "Failed to export.");
-      return;
+      const { headers, rows } = await loadAmountExport();
+      const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+      doc.setFontSize(14);
+      doc.text("Purchase Order List", 24, 30);
+      doc.setFontSize(8);
+      doc.text(`${headers.length} POs | Order - Shipped - Cancelled = Pending | Totals shown separately by currency`, 24, 45);
+      const widths = [62, 64, 38, 62, 45, 45, 30, 26, 36, 40, 51, 51, 51, 51, 42];
+      autoTable(doc, {
+        startY: 56,
+        margin: { left: 24, right: 24, bottom: 28 },
+        head: [poAmountExportColumns.map((label) => label.replace(" Amount", "\nAmount"))],
+        body: rows.map((entry) => entry.values.map((value, index) => typeof value === "number" ? (index === 8 ? new Intl.NumberFormat("en-US").format(value) : fmtMoney2(value)) : value)),
+        styles: { fontSize: 7, cellPadding: 2, overflow: "linebreak" },
+        headStyles: { fillColor: [51, 65, 85] },
+        columnStyles: Object.fromEntries(widths.map((width, index) => [index, { cellWidth: width, halign: index >= 8 && index <= 13 ? "right" : "left" }])) as any,
+        didParseCell: (data) => {
+          if (data.section !== "body") return;
+          const entry = rows[data.row.index];
+          if (entry?.kind !== "line") {
+            data.cell.styles.fontStyle = "bold";
+            data.cell.styles.fillColor = entry?.kind === "currency_total" ? [219, 234, 254] : [241, 245, 249];
+          }
+          if (data.column.index === 13) {
+            data.cell.styles.textColor = [29, 78, 216];
+            data.cell.styles.fontStyle = "bold";
+          }
+        },
+        didDrawPage: () => {
+          doc.setFontSize(8);
+          doc.text(`Page ${doc.getCurrentPageInfo().pageNumber}`, doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 12, { align: "center" });
+        },
+      });
+      doc.save(`po-list-${new Date().toISOString().slice(0, 10)}.pdf`);
+    } catch (error: any) {
+      alert(error?.message || "Failed to export PDF.");
+    } finally {
+      setExporting(false);
     }
-
-    doc.setFontSize(9);
-    doc.text(
-      `Sort: ${sortLabel} | Total: ${totalPOs} POs / ${totalLines} Lines`,
-      40,
-      58
-    );
-
-    autoTable(doc, {
-      startY: 70,
-      head: [[
-        "PO No",
-        "Buyer",
-        "Brand",
-        "Buyer Style No",
-        "Order Date",
-        "Req. Ship Date",
-        "Ship Mode",
-        "Cur.",
-        "Qty",
-        "Unit Price",
-        "Subtotal",
-        "Status",
-      ]],
-      body,
-      styles: { fontSize: 8, cellPadding: 3, overflow: "linebreak" },
-      margin: { left: 24, right: 24 },
-      headStyles: { fillColor: [40, 130, 180], textColor: 255 },
-      columnStyles: {
-        0: { cellWidth: 68 },
-        1: { cellWidth: 95 },
-        2: { cellWidth: 68 },
-        3: { cellWidth: 95 },
-        4: { cellWidth: 60 },
-        5: { cellWidth: 66 },
-        6: { cellWidth: 52 },
-        7: { cellWidth: 34 },
-        8: { cellWidth: 46, halign: "right" },
-        9: { cellWidth: 52, halign: "right" },
-        10: { cellWidth: 62, halign: "right" },
-        11: { cellWidth: 60, halign: "center", overflow: "ellipsize" },
-      },
-      didParseCell: (data) => {
-        const rawRow = (data.row as any)?.raw as any[];
-        const marker = rawRow?.[0];
-        if (data.section === "body" && (marker === "__PO_SUBTOTAL__" || marker === "__GRAND_TOTAL__")) {
-          data.cell.text = [""];
-          if (data.column.index === 3) data.cell.text = [marker === "__GRAND_TOTAL__" ? "Grand Total" : "PO Subtotal"];
-          if (data.column.index === 10) data.cell.text = [String(rawRow?.[10] ?? "")];
-          if (data.column.index === 7) data.cell.text = [String(rawRow?.[7] ?? "")];
-
-          data.cell.styles.fontStyle = "bold";
-          data.cell.styles.fillColor = marker === "__GRAND_TOTAL__" ? [230, 230, 230] : [245, 245, 245];
-        }
-
-        if (data.section === "body" && data.column.index === 0) {
-          const v = String((data.cell.raw as any) ?? "");
-          if (v === "__PO_SUBTOTAL__" || v === "__GRAND_TOTAL__") data.cell.text = [""];
-        }
-      },
-      didDrawPage: function () {
-        const pageCount = (doc as any).internal.getNumberOfPages?.() || 1;
-        const pageNum = (doc as any).internal.getCurrentPageInfo?.().pageNumber || 1;
-
-        const pageW = doc.internal.pageSize.getWidth();
-        const pageH = doc.internal.pageSize.getHeight();
-
-        doc.setFontSize(9);
-        const text = `Page ${pageNum} / ${pageCount}`;
-        doc.text(text, pageW / 2, pageH - 20, { align: "center" });
-      },
-    });
-
-    const blobUrl = doc.output("bloburl");
-    window.open(blobUrl, "_blank");
   };
-
   const handleView = (po: PoHeaderItem) => {
     if (!po.poNo) return alert("PO No is missing.");
     router.push(`/po/create?poNo=${encodeURIComponent(po.poNo)}`);
@@ -1656,7 +1295,7 @@ export default function PurchaseOrderListPage() {
           <SelectItem value="PO_NO">PO No</SelectItem>
           <SelectItem value="BUYER">Buyer</SelectItem>
           <SelectItem value="SHIP_MODE">Ship Mode</SelectItem>
-          <SelectItem value="SUBTOTAL">Subtotal</SelectItem>
+          <SelectItem value="SUBTOTAL">Amount (current view)</SelectItem>
         </SelectContent>
       </Select>
     </div>
@@ -1870,7 +1509,7 @@ export default function PurchaseOrderListPage() {
                       <th className="px-4 py-2 border-b">Req. Ship Date</th>
                       <th className="px-4 py-2 border-b">Ship Mode</th>
                       <th className="px-4 py-2 border-b">Cur.</th>
-                      <th className="px-4 py-2 border-b text-right">Subtotal</th>
+                      <th className="px-4 py-2 border-b text-right">Amount</th>
                       <th className="px-4 py-2 border-b">Status</th>
                       <th className="px-4 py-2 border-b">Action</th>
                     </tr>
@@ -1916,8 +1555,13 @@ export default function PurchaseOrderListPage() {
                           <td className="px-4 py-2">{it.reqShipDate ?? "-"}</td>
                           <td className="px-4 py-2">{it.shipMode ?? "-"}</td>
                           <td className="px-4 py-2">{it.currency ?? "-"}</td>
-                          <td className="px-4 py-2 text-right">
-                            {typeof it.subtotal === "number" ? fmtMoney2(it.subtotal) : "0.00"}
+                          <td className="px-4 py-3 text-right min-w-[190px] tabular-nums">
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between gap-5 text-xs text-slate-500"><span>Order</span><span>{fmtMoney2(it.amounts.order)}</span></div>
+                              <div className="flex items-center justify-between gap-5 text-xs text-slate-500"><span>Shipped</span><span>{fmtMoney2(it.amounts.shipped)}</span></div>
+                              {it.amounts.cancelled > 0 && <div className="flex items-center justify-between gap-5 text-xs text-amber-700"><span>Cancelled</span><span>{fmtMoney2(it.amounts.cancelled)}</span></div>}
+                              <div className={`flex items-center justify-between gap-5 border-t border-slate-200 pt-1 text-sm font-semibold ${it.amounts.pending > 0 ? "text-blue-700" : "text-slate-500"}`}><span>Pending</span><span>{fmtMoney2(it.amounts.pending)}</span></div>
+                            </div>
                           </td>
                           <td className="px-4 py-2">
                             <span className={getStatusBadgeClass(it.status)}>{it.status ?? "-"}</span>
@@ -1943,7 +1587,7 @@ export default function PurchaseOrderListPage() {
                   Total: <span className="font-semibold">{total}</span> POs
                 </div>
                 <div className="text-sm text-slate-600">
-                  Page Subtotal:{" "}
+                  {amountBasis === "pending" ? "Page Pending Amount:" : "Page Order Amount:"}{" "}
                   <span className="font-semibold">
                     {(() => {
                       const entries = Object.entries(pageTotalsByCurrency ?? {}).filter(
@@ -1951,16 +1595,7 @@ export default function PurchaseOrderListPage() {
                       );
 
                       if (entries.length === 0) {
-                        const sum = items.reduce(
-                          (acc, it) =>
-                            acc +
-                            (typeof it.subtotal === "number" && Number.isFinite(it.subtotal)
-                              ? it.subtotal
-                              : 0),
-                          0
-                        );
-                        const curLabel = items.length === 0 ? "" : "MIX";
-                        return (curLabel ? `${curLabel} ` : "") + fmtMoney2(sum);
+                        return "-";
                       }
 
                       if (entries.length === 1) {
@@ -1978,17 +1613,17 @@ export default function PurchaseOrderListPage() {
                   </span>
                 </div>
                 <div className="text-sm text-slate-600">
-                  Grand Total (All Pages):{" "}
+                  {amountBasis === "pending" ? "Total Pending (All Pages):" : "Total Order (All Pages):"}{" "}
                   <span className="font-semibold">
                     {fmtTotalsByCurrency(grandTotalsByCurrency) || "-"}
                   </span>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={handleExportExcel}>
+                  <Button variant="outline" size="sm" onClick={handleExportExcel} disabled={exporting || loading}>
                     Export Excel
                   </Button>
-                  <Button variant="outline" size="sm" onClick={handleExportPdf}>
-                    Export PDF (jsPDF)
+                  <Button variant="outline" size="sm" onClick={handleExportPdf} disabled={exporting || loading}>
+                    Export PDF
                   </Button>
                 </div>
 
