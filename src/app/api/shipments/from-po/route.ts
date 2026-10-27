@@ -1,3 +1,4 @@
+import { assertShipmentCapacity, allocatedByPoLine } from "@/lib/shippingQuantityGuard";
 /**
  * src/app/api/shipments/from-po/route.ts
  *
@@ -135,8 +136,11 @@ export async function POST(req: Request) {
       .eq("is_deleted", false);
 
     if (lineErr) return bad(lineErr.message, 500);
-    const poLines = lines ?? [];
+    const allocated = await allocatedByPoLine((lines ?? []).map((r: any) => r.id));
+    const poLines = (lines ?? []).map((r: any) => ({ ...r, remaining_qty: Math.max(0, num(r.qty ?? r.order_qty) - num(r.qty_cancelled) - (allocated.get(r.id) ?? 0)) })).filter((r: any) => r.remaining_qty > 0);
     if (!poLines.length) return bad("No PO lines found.", 400);
+
+    await assertShipmentCapacity(poLines.map((r: any) => ({ po_line_id: r.id, shipped_qty: r.remaining_qty })), poIds);
 
     // ---- Create shipment header (safe columns only) ----
     const shipDate =
@@ -192,7 +196,7 @@ export async function POST(req: Request) {
     const toLineRow = (pl: any) => {
       const orderQty = num(pl?.order_qty ?? pl?.qty ?? pl?.quantity ?? 0, 0);
       const unitPrice = num(pl?.unit_price_precise ?? pl?.unitPricePrecise ?? pl?.unit_price ?? pl?.price ?? 0, 0);
-      const amount = num(pl?.amount ?? orderQty * unitPrice, 0);
+      const amount = Math.round(num(pl.remaining_qty) * unitPrice * 100) / 100;
 
       return {
         shipment_id: shipmentId,
@@ -208,7 +212,7 @@ export async function POST(req: Request) {
         size: pl?.size ?? null,
 
         order_qty: orderQty,
-        shipped_qty: orderQty, // 기본: full ship
+        shipped_qty: pl.remaining_qty,
         unit_price: unitPrice,
         amount,
 
@@ -237,6 +241,6 @@ export async function POST(req: Request) {
       url: `/shipments/${shipmentId}`,
     });
   } catch (e: any) {
-    return bad(e?.message ?? "Unexpected error.", 500);
+    return bad(e?.message ?? "Unexpected error.", e?.status ?? 500);
   }
 }

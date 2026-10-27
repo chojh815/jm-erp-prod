@@ -1,3 +1,4 @@
+import { validateShipmentSource } from "@/lib/shippingQuantityGuard";
 // src/app/api/packing-lists/create-from-shipment/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -104,6 +105,7 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => null);
     const shipmentId = body?.shipmentId;
     if (!shipmentId || !isUuid(shipmentId)) return bad("Invalid shipmentId", 400);
+    await validateShipmentSource(shipmentId);
     const currentInvoice = await findInvoiceByShipmentId(shipmentId);
     if (!currentInvoice?.invoice_no) return bad("Invoice must be created first for this shipment.", 409);
 
@@ -412,6 +414,6 @@ export async function POST(req: Request) {
     });
   } catch (e: any) {
     console.error(e);
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }

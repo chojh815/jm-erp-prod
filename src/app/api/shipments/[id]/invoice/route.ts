@@ -1,3 +1,4 @@
+import { validateShipmentSource } from "@/lib/shippingQuantityGuard";
 // src/app/api/shipments/[id]/invoice/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -154,7 +155,7 @@ export async function GET(_: Request, { params }: { params: { id: string } }) {
     return ok({ invoice: data ?? null });
   } catch (e: any) {
     console.error("Shipment invoice link error:", e);
-    return bad(e?.message || "Failed to load linked invoice", 500);
+    return bad(e?.message || "Failed to load linked invoice", e?.status ?? 500);
   }
 }
 
@@ -167,6 +168,7 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   try {
     const shipmentId = params.id;
     if (!shipmentId) return bad("Shipment ID is required", 400);
+    await validateShipmentSource(shipmentId);
     // 🔒 DUPLICATE INVOICE GUARD
     const { data: existingInvoice, error: existingErr } = await supabaseAdmin
       .from("invoice_headers")
@@ -386,7 +388,7 @@ export async function POST(req: Request, { params }: { params: { id: string } })
 
     // 9) invoice_lines insert (Shipment lines → Invoice lines)
     const lineRows = (sLines || []).map((l: any, idx: number) => {
-      const qty = l.shipped_qty ?? l.order_qty ?? null;
+      const qty = l.shipped_qty ?? l.qty ?? null;
       const poMeta = poMetaByPoLineId.get(l?.po_line_id);
       const poQty = num(poMeta?.qty, 0);
       const poAmount = poMeta?.amount;
@@ -451,6 +453,6 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     return ok({ invoice: invoiceHeader });
   } catch (e: any) {
     console.error("Create invoice from shipment error:", e);
-    return bad(e?.message || "Failed to create invoice", 500);
+    return bad(e?.message || "Failed to create invoice", e?.status ?? 500);
   }
 }

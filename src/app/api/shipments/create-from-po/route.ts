@@ -1,3 +1,4 @@
+import { assertShipmentCapacity } from "@/lib/shippingQuantityGuard";
 // src/app/api/shipments/create-from-po/route.ts
 // 부분선적 잔량 기준 버전
 // - 기존 shipment_lines 누적수량을 차감해 remaining 기준 검증
@@ -262,7 +263,7 @@ export async function POST(req: NextRequest) {
     const alreadyShippedByLineId = new Map<string, number>();
     for (const row of shipmentLines) {
       const shipmentId = safeStr((row as any)?.shipment_id);
-      if (allowedShipmentIdSet.size && !allowedShipmentIdSet.has(shipmentId)) continue;
+      if (!allowedShipmentIdSet.has(shipmentId)) continue;
       const poLineId = safeStr((row as any)?.po_line_id);
       if (!poLineId) continue;
       alreadyShippedByLineId.set(
@@ -303,6 +304,8 @@ export async function POST(req: NextRequest) {
         );
       }
     }
+
+    await assertShipmentCapacity(effectiveIncoming, poIds);
 
     const modeGroups = new Map<string, NormalizedIncomingLine[]>();
     for (const row of effectiveIncoming) {
@@ -418,6 +421,6 @@ export async function POST(req: NextRequest) {
 
     return ok({ created: createdShipments });
   } catch (e: any) {
-    return bad(e?.message ?? "Unknown error", 500);
+    return bad(e?.message ?? "Unknown error", e?.status ?? 500);
   }
 }

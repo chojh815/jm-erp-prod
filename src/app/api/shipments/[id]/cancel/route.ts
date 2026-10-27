@@ -1,3 +1,4 @@
+import { assertShipmentEditable } from "@/lib/shippingQuantityGuard";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -50,6 +51,8 @@ export async function POST(
       return ok({ id, alreadyCancelled: true });
     }
 
+    await assertShipmentEditable(id);
+
     // 3) (Optional) Prevent cancel if invoice already linked
     // Some deployments store invoice link as invoice_headers.shipment_id.
     // If your schema differs, you can remove this block safely.
@@ -93,6 +96,6 @@ export async function POST(
 
     return ok({ id });
   } catch (e: any) {
-    return bad(e?.message ?? "Unexpected error", 500);
+    return bad(e?.message ?? "Unexpected error", e?.status ?? 500);
   }
 }

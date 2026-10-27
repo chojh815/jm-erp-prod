@@ -1,3 +1,5 @@
+import { quantity } from "@/lib/shippingQuantityRules";
+import { assertShipmentEditable } from "@/lib/shippingQuantityGuard";
 // src/app/api/shipments/[id]/split/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -29,9 +31,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     const shipmentId = String(id || "").trim();
     if (!isUuid(shipmentId)) return bad("Invalid shipment id", 400);
 
+    await assertShipmentEditable(shipmentId);
     const body = await req.json().catch(() => ({}));
     const shipmentLineId = String(body?.shipment_line_id || "").trim();
-    const splitQty = Math.max(0, num(body?.split_qty, 0));
+    const splitQty = quantity(body?.split_qty);
     const newShipMode = safe(body?.new_ship_mode || body?.ship_mode || "");
     const carrier = safe(body?.carrier || "");
     const trackingNo = safe(body?.tracking_no || "");
@@ -125,6 +128,6 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return ok({ new_shipment_id: newShipment.id });
   } catch (e: any) {
     console.error(e);
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }

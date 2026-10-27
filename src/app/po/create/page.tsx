@@ -2282,45 +2282,6 @@ const res = await fetch(saveUrl, {
       }
 
 
-// ✅ qty_cancelled 저장(별도 API): /api/orders/{po_no}/cancel-lines
-// - /api/orders POST가 라인에 qty_cancelled를 저장하지 않는 환경에서도 안정적으로 동작하게 분리
-const resolvedPoNo = String(poNo || data?.po_no || "").trim();
-if (resolvedPoNo) {
-  const payloadCancel = {
-    cancel_reason: cancelReason || null,
-    cancel_date: cancelDateToSave || null,
-    lines: (linesToSave || []).map((l) => ({
-      po_line_id: l.id,
-      qty_cancelled: Number(l.qty_cancelled ?? 0) || 0,
-    })),
-  };
-
-  // qty_cancelled가 하나라도 있거나, 취소 저장/검증이 필요할 때 호출
-  const shouldCallCancel =
-    payloadCancel.lines.some((x: any) => (Number(x.qty_cancelled) || 0) > 0) ||
-    targetStatus === "CANCELLED";
-
-  if (shouldCallCancel) {
-    const resCancel = await fetch(
-      `/api/orders/${encodeURIComponent(resolvedPoNo)}/cancel-lines`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payloadCancel),
-      }
-    );
-    const dataCancel = await resCancel.json().catch(() => null);
-    if (!resCancel.ok) {
-      console.error("cancel-lines error:", dataCancel);
-      alert(
-        (dataCancel && (dataCancel.error || dataCancel.message)) ||
-          `Failed to save cancel qty (status ${resCancel.status}).`
-      );
-      // cancel qty 저장 실패해도 PO 자체 저장은 성공했으니 여기서 return은 하지 않음
-    }
-  }
-}
-
       // keep header id (create/update)
       if (data?.headerId || data?.header_id) {
         setPoHeaderId(String(data.headerId ?? data.header_id));

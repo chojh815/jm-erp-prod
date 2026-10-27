@@ -1,3 +1,5 @@
+import { cancellableQuantity } from "@/lib/shippingQuantityRules";
+import { allocatedByPoLine } from "@/lib/shippingQuantityGuard";
 // src/app/api/orders/[id]/cancel-lines/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -78,28 +80,13 @@ export async function PUT(
       .from("po_lines")
       .select("id, qty, qty_cancelled")
       .eq("po_header_id", poHeaderId)
-      .in("id", lineIds)
       .eq("is_deleted", false);
 
     if (plErr) return bad("Failed to load po_lines", 500, { detail: plErr.message });
     if (!poLines || poLines.length === 0) return bad("No matching po_lines", 404);
 
-    // 4) shipped qty map (shipment_lines)
-    const { data: shippedRows, error: shErr } = await supabaseAdmin
-      .from("shipment_lines")
-      .select("po_line_id, shipped_qty")
-      .eq("po_header_id", poHeaderId)
-      .in("po_line_id", lineIds)
-      .eq("is_deleted", false);
-
-    if (shErr) return bad("Failed to load shipment_lines", 500, { detail: shErr.message });
-
-    const shippedMap = new Map<string, number>();
-    for (const r of shippedRows ?? []) {
-      const id = String((r as any).po_line_id ?? "");
-      const q = Number((r as any).shipped_qty ?? 0) || 0;
-      shippedMap.set(id, (shippedMap.get(id) ?? 0) + q);
-    }
+    if (poLines.filter((r: any) => desiredCancelMap.has(r.id)).length !== desiredCancelMap.size) return bad("One or more lines do not belong to this PO", 400);
+    const shippedMap = await allocatedByPoLine(poLines.map((r: any) => r.id));
 
     // 5) validate & update lines
     const updates: { id: string; qty_cancelled: number }[] = [];
@@ -109,13 +96,8 @@ export async function PUT(
       const ordered = Number(r.qty ?? 0) || 0;
       const shipped = shippedMap.get(id) ?? 0;
 
-      // server-side safety: if shipped exists, do not allow CANCELLED workflow via this endpoint
-      if (shipped > 0) {
-        return bad("Cannot cancel lines that have shipped_qty > 0", 409, { po_line_id: id, shipped_qty: shipped });
-      }
-
       const desired = desiredCancelMap.get(id) ?? (Number(r.qty_cancelled ?? 0) || 0);
-      const maxCancelable = Math.max(0, ordered - shipped);
+      const maxCancelable = cancellableQuantity(ordered, shipped);
 
       if (!Number.isFinite(desired) || Math.trunc(desired) !== desired || desired < 0) {
         return bad("qty_cancelled must be a non-negative integer", 400, { po_line_id: id });
@@ -130,7 +112,7 @@ export async function PUT(
         });
       }
 
-      updates.push({ id, qty_cancelled: desired });
+      if (desiredCancelMap.has(id)) updates.push({ id, qty_cancelled: desired });
     }
 
     // apply updates
@@ -142,17 +124,19 @@ export async function PUT(
       if (error) return bad("Failed to update po_lines", 500, { detail: error.message, po_line_id: u.id });
     }
 
-    // 6) recompute status using po_lines + shipped(=0 here)
+    // Evaluate every PO line, including lines omitted from a partial request.
     let allRemainingZero = true;
     for (const r of poLines as any[]) {
       const ordered = Number(r.qty ?? 0) || 0;
       const cancelled = updates.find((u) => u.id === String(r.id))?.qty_cancelled ?? (Number(r.qty_cancelled ?? 0) || 0);
-      const remaining = ordered - cancelled; // shipped is 0 here
+      const remaining = ordered - cancelled;
       if (remaining !== 0) allRemainingZero = false;
     }
 
     let newStatus: string | null = null;
-    if (allRemainingZero) newStatus = "CANCELLED";
+    const hasShipped = [...shippedMap.values()].some((q) => q > 0);
+    if (allRemainingZero && !hasShipped) newStatus = "CANCELLED";
+    else if (String(header.status).toUpperCase() === "CANCELLED") newStatus = "CONFIRMED";
 
     if (newStatus && newStatus !== String((header as any).status ?? "")) {
       const patch: any = { status: newStatus, updated_at: new Date().toISOString() };

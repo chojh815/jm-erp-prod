@@ -1,3 +1,4 @@
+import { assertShipmentCapacity } from "@/lib/shippingQuantityGuard";
 // src/app/api/shipments/create-from-po/route.ts
 //
 // A-Plan: Create shipments grouped by line-level ship_mode (SEA/AIR/COURIER).
@@ -112,40 +113,7 @@ export async function POST(req: NextRequest) {
     const poLineById = new Map<string, any>();
     for (const pl of poLines) poLineById.set(pl.id, pl);
 
-    // Validate shipped_qty <= order_qty per po_line, considering already shipped in other shipments.
-    // Sum already shipped_qty across shipment_lines for these po_line_ids (excluding deleted).
-    const { data: shippedAgg, error: shippedAggErr } = await supabaseAdmin
-      .from("shipment_lines")
-      .select("po_line_id, shipped_qty, is_deleted")
-      .in("po_line_id", poLineIds)
-      .eq("is_deleted", false);
-
-    if (shippedAggErr) return bad(`Failed to validate shipped qty: ${shippedAggErr.message}`, 500);
-
-    const alreadyShipped = new Map<string, number>();
-    for (const r of shippedAgg ?? []) {
-      const id = r.po_line_id;
-      const qty = num(r.shipped_qty, 0);
-      alreadyShipped.set(id, (alreadyShipped.get(id) ?? 0) + qty);
-    }
-
-    const wantShipped = new Map<string, number>();
-    for (const l of normalized) {
-      wantShipped.set(l.po_line_id, (wantShipped.get(l.po_line_id) ?? 0) + l.shipped_qty);
-    }
-
-    const violations: any[] = [];
-    for (const [poLineId, want] of wantShipped.entries()) {
-      const pl = poLineById.get(poLineId);
-      const orderQty = num(pl?.qty, 0);
-      const already = alreadyShipped.get(poLineId) ?? 0;
-      if (want + already > orderQty + 1e-9) {
-        violations.push({ po_line_id: poLineId, order_qty: orderQty, already_shipped: already, requested_now: want });
-      }
-    }
-    if (violations.length) {
-      return bad("Shipped quantity exceeds remaining order quantity for one or more lines.", 409, { violations });
-    }
+    await assertShipmentCapacity(normalized, po_ids);
 
     // Group by ship_mode
     const groups = new Map<ShipMode, typeof normalized>();
@@ -274,6 +242,6 @@ tracking_no: ls.find((x: any) => x?.tracking_no)?.tracking_no ?? null,
 
     return ok({ shipments: createdShipments });
   } catch (e: any) {
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }

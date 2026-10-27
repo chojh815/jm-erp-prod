@@ -1,3 +1,4 @@
+import { validateInvoiceSave } from "@/lib/shippingQuantityGuard";
 // src/app/api/invoices/[id]/confirm/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -23,13 +24,15 @@ export async function POST(
 
     const { data: cur, error: curErr } = await supabaseAdmin
       .from("invoice_headers")
-      .select("id,status,is_deleted")
+      .select("*")
       .eq("id", id)
       .maybeSingle();
 
     if (curErr) return bad(curErr.message, 500);
     if (!cur) return bad("Invoice not found", 404);
     if (cur.is_deleted) return bad("Invoice is deleted", 404);
+
+    await validateInvoiceSave(cur);
 
     if ((cur.status ?? "").toUpperCase() === "CONFIRMED") {
       return ok({ id, already_confirmed: true });
@@ -51,6 +54,6 @@ export async function POST(
     return ok({ id });
   } catch (e: any) {
     console.error("[POST /api/invoices/[id]/confirm]", e);
-    return bad(e?.message ?? "Server error", 500);
+    return bad(e?.message ?? "Server error", e?.status ?? 500);
   }
 }

@@ -1,3 +1,4 @@
+import { validateShipmentSource } from "@/lib/shippingQuantityGuard";
 // src/app/api/invoices/create-from-shipment/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -204,6 +205,7 @@ export async function POST(req: Request) {
     const body = await req.json();
     const shipmentId = body?.shipmentId;
     if (!shipmentId || !isUuid(shipmentId)) {
+    await validateShipmentSource(shipmentId);
       return bad("Valid shipmentId is required.", 400);
     }
 
@@ -459,6 +461,6 @@ export async function POST(req: Request) {
     return ok({ invoice_id: invoiceId, invoice_no: invoiceNo });
   } catch (e: any) {
     console.error("create-from-shipment error:", e);
-    return bad(e.message ?? "Internal Server Error", 500);
+    return bad(e.message ?? "Internal Server Error", e?.status ?? 500);
   }
 }

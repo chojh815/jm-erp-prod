@@ -1,3 +1,4 @@
+import { validatePackingSave } from "@/lib/shippingQuantityGuard";
 // src/app/api/packing-lists/[id]/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -255,7 +256,7 @@ function enrichFromShipment(lines: any[], shipmentLines: any[]) {
       style_no: (pickBuyerStyleNo(l) ?? pickBuyerStyleNo(sl) ?? lStyleKey) ?? null,
       shipped_qty: l.shipped_qty ?? sl.shipped_qty ?? null,
       order_qty: l.order_qty ?? sl.order_qty ?? null,
-      qty: pickIfEmpty(l.qty, sl.shipped_qty ?? sl.order_qty ?? l.qty),
+      qty: l.qty ?? l.shipped_qty ?? sl.shipped_qty ?? 0,
 
       nw_per_carton: pickIfEmpty(l.nw_per_carton, nwPer),
       gw_per_carton: pickIfEmpty(l.gw_per_carton, gwPer),
@@ -555,7 +556,7 @@ export async function GET(
       resolved: { input_id: id, packing_list_id: plId, resolved_by: resolved.resolved_by },
     });
   } catch (e: any) {
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }
 
@@ -578,6 +579,7 @@ export async function PUT(
     const body = await req.json().catch(() => ({}));
     const headerIn = body?.header || {};
     const linesIn: any[] = Array.isArray(body?.lines) ? body.lines : [];
+    await validatePackingSave(header, linesIn);
 
     // header update
     const { error: upErr } = await supabaseAdmin
@@ -694,7 +696,7 @@ export async function PUT(
       resolved: { input_id: id, packing_list_id: plId, resolved_by: resolved.resolved_by },
     });
   } catch (e: any) {
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }
 
@@ -733,6 +735,6 @@ export async function DELETE(
 
     return ok({ id: plId });
   } catch (e: any) {
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }

@@ -1,3 +1,4 @@
+import { validateInvoiceSave } from "@/lib/shippingQuantityGuard";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { randomUUID } from "crypto";
@@ -150,7 +151,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
       },
     });
   } catch (e: any) {
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }
 
@@ -174,6 +175,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const body = await req.json().catch(() => ({}));
     const headerIn = body?.header ?? {};
     const linesIn: any[] = Array.isArray(body?.lines) ? body.lines : [];
+    const validatedLines = await validateInvoiceSave(existing, linesIn);
 
     const headerPatch: any = {
       invoice_no:
@@ -258,7 +260,8 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (linesIn.length > 0) {
       const toUpsert = linesIn
         .filter((x) => x)
-        .map((x) => {
+        .map((input) => {
+          const x = { ...validatedLines.get(input.id), ...input };
           const qty = x.qty === "" || x.qty == null ? null : n(x.qty, 0);
           const unit_price =
             x.unit_price === "" || x.unit_price == null ? null : n(x.unit_price, 0);
@@ -270,9 +273,12 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
           return {
             id: x.id ?? randomUUID(),
-            invoice_id: x.invoice_id ?? id,
+            invoice_id: id,
             invoice_header_id: x.invoice_header_id ?? null,
-            shipment_id: x.shipment_id ?? null,
+            shipment_id: validatedLines.get(x.id)?.shipment_id ?? existing.shipment_id ?? null,
+            shipment_line_id: validatedLines.get(x.id)?.shipment_line_id ?? null,
+            po_header_id: validatedLines.get(x.id)?.po_header_id ?? null,
+            po_line_id: validatedLines.get(x.id)?.po_line_id ?? null,
             po_no: x.po_no ?? null,
             line_no: x.line_no ?? null,
             style_no: x.style_no && x.style_no !== "-" ? x.style_no : null,
@@ -324,6 +330,6 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       meta: { locked: false, lock_reason: null },
     });
   } catch (e: any) {
-    return bad(e?.message || "Server error", 500);
+    return bad(e?.message || "Server error", e?.status ?? 500);
   }
 }

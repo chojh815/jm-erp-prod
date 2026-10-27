@@ -1,3 +1,4 @@
+import { assertShipmentCapacity, allocatedByPoLine } from "@/lib/shippingQuantityGuard";
 // src/app/api/shipments/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -269,12 +270,12 @@ export async function POST(req: Request) {
 
         if (plErr) throw new Error(plErr.message);
 
+        const allocated = await allocatedByPoLine((poLines || []).map((r: any) => r.id));
         shipmentLines = (poLines || []).map((l: any, idx: number) => {
           const orderQty = l.order_qty ?? l.qty ?? l.quantity ?? l.pcs ?? null;
-          const shippedQty = l.shipped_qty ?? l.ship_qty ?? orderQty ?? null;
+          const shippedQty = Math.max(0, num(orderQty) - num(l.qty_cancelled) - (allocated.get(l.id) ?? 0));
           const unitPrice = l.unit_price ?? l.price ?? null;
           const amount =
-            l.amount ??
             (unitPrice != null && shippedQty != null ? num(unitPrice) * num(shippedQty) : null);
 
           return {
@@ -297,7 +298,7 @@ export async function POST(req: Request) {
             gw: null,
             nw: null,
           };
-        });
+        }).filter((l: any) => l.shipped_qty > 0);
       }
     } else {
       // ===== A안: 다중 PO 모드 =====
@@ -397,13 +398,13 @@ export async function POST(req: Request) {
         const poNoById = new Map<string, string>();
         for (const p of poRows) poNoById.set(String(p.id), String(p.po_no ?? ""));
 
+        const allocated = await allocatedByPoLine((poLines || []).map((r: any) => r.id));
         shipmentLines = (poLines || []).map((l: any, idx: number) => {
           const poId = String(l.po_header_id);
           const orderQty = l.order_qty ?? l.qty ?? l.quantity ?? l.pcs ?? null;
-          const shippedQty = l.shipped_qty ?? l.ship_qty ?? orderQty ?? null;
+          const shippedQty = Math.max(0, num(orderQty) - num(l.qty_cancelled) - (allocated.get(l.id) ?? 0));
           const unitPrice = l.unit_price ?? l.price ?? null;
           const amount =
-            l.amount ??
             (unitPrice != null && shippedQty != null ? num(unitPrice) * num(shippedQty) : null);
 
           return {
@@ -426,9 +427,11 @@ export async function POST(req: Request) {
             gw: null,
             nw: null,
           };
-        });
+        }).filter((l: any) => l.shipped_qty > 0);
       }
     }
+
+    await assertShipmentCapacity(shipmentLines, snapshot.po_header_ids);
 
     // 2) ship_mode 결정 (대표 origin 기준)
     const ship_mode = await resolveShipMode(
@@ -639,6 +642,6 @@ export async function POST(req: Request) {
     });
   } catch (e: any) {
     console.error(e);
-    return bad(e?.message || "Failed to create shipment", 500);
+    return bad(e?.message || "Failed to create shipment", e?.status ?? 500);
   }
 }

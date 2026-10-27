@@ -208,12 +208,13 @@ export default function ShipmentsCreateFromPoPage() {
 
         setSelectedHeaders(hs);
 
-        const { data: lines, error: lErr } = await supabase
-          .from("po_lines")
-          .select("*")
-          .in("po_header_id", selectedPoIds);
-
-        if (lErr) throw lErr;
+        const poResults = await Promise.all(selectedPoIds.map(async (id) => {
+          const response = await fetch(`/api/orders/${encodeURIComponent(id)}`, { cache: "no-store" });
+          const result = await response.json();
+          if (!response.ok || !result.success) throw new Error(result.error || "Failed to load PO quantities.");
+          return result.lines ?? [];
+        }));
+        const lines: PoLine[] = poResults.flat();
 
         const headerMode = normalizeMode(pickFirst(hs[0], ["ship_mode", "shipMode", "shipmode"]));
 
@@ -229,8 +230,9 @@ export default function ShipmentsCreateFromPoPage() {
             const mode = normalizeMode(pickFirst(ln, ["ship_mode", "shipMode"]) || pickFirst(header, ["ship_mode", "shipMode"]) || headerMode);
 
             const orderQty = num(pickFirst(ln, ["qty", "order_qty", "orderQty"]), 0);
+            const remainingQty = num(ln.remaining_qty, 0);
             const unitPrice = num(pickFirst(ln, ["unit_price", "unitPrice"]), 0);
-            const amt = num(pickFirst(ln, ["amount"]), orderQty * unitPrice);
+            const amt = remainingQty * unitPrice;
 
             const style = pickFirst(ln, ["buyer_style_no", "buyer_style_code", "style_no", "jm_style_no", "jm_style_code"]);
 
@@ -245,7 +247,7 @@ export default function ShipmentsCreateFromPoPage() {
               color: safe(pickFirst(ln, ["color"])),
               size: safe(pickFirst(ln, ["size"])),
               order_qty: orderQty,
-              shipped_qty: orderQty,
+              shipped_qty: remainingQty,
               unit_price: unitPrice,
               amount: amt,
               cartons: 0,
@@ -256,7 +258,7 @@ export default function ShipmentsCreateFromPoPage() {
               carrier: "",
               tracking_no: "",
             };
-          });
+          }).filter((r) => r.shipped_qty > 0);
 
         // sort stable: PO -> line_no
         rows.sort((a, b) => {

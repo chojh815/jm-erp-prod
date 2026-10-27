@@ -98,7 +98,7 @@ function clamp(n: number, min: number, max: number) {
   return Math.min(Math.max(n, min), max);
 }
 
-const CANCELLED_SHIPMENT_STATUSES = new Set(["CANCELLED", "DELETED"]);
+const CANCELLED_SHIPMENT_STATUSES = new Set(["CANCELLED", "CANCELED", "DELETED", "VOID"]);
 const SHIPMENT_CREATE_DRAFT_KEY = "jm.shipments.createFromPo.draft.v1";
 const SHIPMENT_CREATE_DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -305,7 +305,7 @@ export default function ShipmentsCreateFromPoPage() {
 
       for (const row of shipmentLines) {
         const shipmentId = safe((row as any)?.shipment_id);
-        if (allowedShipmentIdSet.size && !allowedShipmentIdSet.has(shipmentId)) continue;
+        if (!allowedShipmentIdSet.has(shipmentId)) continue;
         const lineId = safe((row as any)?.po_line_id);
         if (!lineId) continue;
         const shipped = num((row as any)?.shipped_qty, 0);
@@ -415,7 +415,7 @@ export default function ShipmentsCreateFromPoPage() {
             0
           );
           const shippedQty = num(shippedAgg.get(lineId), 0);
-          const remainingQty = Math.max(0, orderQty - shippedQty);
+          const remainingQty = Math.max(0, orderQty - shippedQty - num(ln.qty_cancelled, 0));
 
           remainingByPo.set(poId, num(remainingByPo.get(poId), 0) + remainingQty);
         }
@@ -470,7 +470,7 @@ export default function ShipmentsCreateFromPoPage() {
         .map((ln: PoLine) => {
           const orderQty = num(pickFirst(ln, ["qty", "order_qty", "orderQty"]), 0);
           const prevShipped = num(shippedAgg.get(safe(ln?.id)), 0);
-          const remainingQty = Math.max(0, orderQty - prevShipped);
+          const remainingQty = Math.max(0, orderQty - prevShipped - num(ln.qty_cancelled, 0));
           const unitPrice = num(pickFirst(ln, ["unit_price", "unitPrice"]), 0);
           const style = pickFirst(ln, [
             "buyer_style_no",

@@ -1,3 +1,4 @@
+import { validateShipmentSource } from "@/lib/shippingQuantityGuard";
 // src/app/api/shipments/[id]/packing-list/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -287,7 +288,7 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     return ok({ packing_list: pl });
   } catch (e: any) {
     console.error(e);
-    return bad(e?.message || "Failed to load packing list link", 500);
+    return bad(e?.message || "Failed to load packing list link", e?.status ?? 500);
   }
 }
 
@@ -295,6 +296,7 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
   try {
     const shipmentId = ctx?.params?.id;
     if (!isUuid(shipmentId)) return bad("Invalid shipment id", 400);
+    await validateShipmentSource(shipmentId);
 
     const shipment = await getShipmentOr404(shipmentId);
     if (!shipment) return bad("Shipment not found", 404);
@@ -543,6 +545,6 @@ export async function POST(_req: Request, ctx: { params: { id: string } }) {
     });
   } catch (e: any) {
     console.error(e);
-    return bad(e?.message || "Failed to create packing list", 500);
+    return bad(e?.message || "Failed to create packing list", e?.status ?? 500);
   }
 }

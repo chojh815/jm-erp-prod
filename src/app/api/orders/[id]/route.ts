@@ -1,3 +1,5 @@
+import { allocatedByPoLine } from "@/lib/shippingQuantityGuard";
+import { quantity, QuantityConflict } from "@/lib/shippingQuantityRules";
 // src/app/api/orders/[id]/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -379,24 +381,7 @@ export async function GET(
       .map((r) => String(r?.id || ""))
       .filter((v) => isUuid(v));
 
-    const shippedMap = new Map<string, number>();
-    if (lineIds.length > 0) {
-      const { data: shipRows, error: shipErr } = await supabaseAdmin
-        .from("shipment_lines")
-        .select("po_line_id, shipped_qty")
-        .in("po_line_id", lineIds);
-
-      if (shipErr) {
-        console.error("Load shipment_lines error:", shipErr);
-      } else {
-        for (const r of shipRows ?? []) {
-          const id = String((r as any).po_line_id || "");
-          const q = Number((r as any).shipped_qty ?? 0);
-          if (!id) continue;
-          shippedMap.set(id, (shippedMap.get(id) ?? 0) + (Number.isFinite(q) ? q : 0));
-        }
-      }
-    }
+    const shippedMap = await allocatedByPoLine(lineIds);
 
     const enrichedLines = baseLines.map((r) => {
       const ordered = Number((r as any).qty ?? 0) || 0;
@@ -418,7 +403,7 @@ export async function GET(
     console.error("Get PO Fatal:", err);
     return NextResponse.json(
       { success: false, error: err?.message || "Unknown error" },
-      { status: 500 }
+      { status: err?.status ?? 500 }
     );
   }
 }
@@ -636,6 +621,36 @@ export async function PUT(
     if (totalsIn?.subtotal !== undefined) {
       const subtotal = num(totalsIn.subtotal, null);
       if (subtotal !== null) patch.subtotal = subtotal;
+    }
+
+    // Validate before any header or line writes.
+    const { data: capacityLines, error: capacityErr } = await supabaseAdmin
+      .from("po_lines").select("*").eq("po_header_id", poHeaderId).eq("is_deleted", false);
+    if (capacityErr) throw new Error(capacityErr.message);
+    const capacityRows = capacityLines ?? [];
+    const allocation = await allocatedByPoLine(capacityRows.map((r: any) => r.id));
+    const checkNos = linesIn.map((ln: any, i: number) => intNum(ln?.line_no ?? ln?.lineNo, i + 1));
+    const normalizedNos = new Set(checkNos).size === checkNos.length ? checkNos : linesIn.map((_: any, i: number) => i + 1);
+    const capacityMatches = matchIncomingLinesToExisting(capacityRows, linesIn, normalizedNos);
+    for (let i = 0; i < linesIn.length; i++) {
+      const ln = linesIn[i];
+      const prior = capacityMatches.matches[i];
+      const ordered = quantity(ln.qty ?? 0);
+      const cancelled = quantity(ln.qty_cancelled ?? ln.cancel_qty ?? prior?.qty_cancelled ?? 0);
+      if (cancelled + (allocation.get(prior?.id ?? "") ?? 0) > ordered)
+        throw new QuantityConflict("Order Qty must cover shipped/reserved quantity plus Cancel Qty.");
+    }
+    for (const prior of capacityRows) {
+      if (!capacityMatches.usedIds.has(prior.id) && (allocation.get(prior.id) ?? 0) > 0)
+        throw new QuantityConflict("Cannot remove a PO line with active Shipment quantities.");
+    }
+    if (String(patch.status ?? existing.status).toUpperCase() === "CANCELLED" && [...allocation.values()].some((q) => q > 0))
+      throw new QuantityConflict("Use Cancel Qty to cancel only the remaining quantity after shipping.");
+
+    if (linesIn.length > 0 && linesIn.every((ln: any, i: number) => quantity(ln.qty ?? 0) === quantity(ln.qty_cancelled ?? ln.cancel_qty ?? capacityMatches.matches[i]?.qty_cancelled ?? 0)) && ![...allocation.values()].some((q) => q > 0)) {
+      patch.status = "CANCELLED";
+    } else if (String(existing.status).toUpperCase() === "CANCELLED" && String(patch.status).toUpperCase() === "CANCELLED") {
+      patch.status = "CONFIRMED";
     }
 
     const { data: updatedHeader, error: upErr } = await supabaseAdmin
@@ -903,7 +918,7 @@ export async function PUT(
     console.error("Update PO Fatal:", err);
     return NextResponse.json(
       { success: false, error: err?.message || "Unknown error" },
-      { status: 500 }
+      { status: err?.status ?? 500 }
     );
   }
 }
@@ -990,7 +1005,7 @@ export async function DELETE(
     console.error("Delete PO Fatal:", err);
     return NextResponse.json(
       { success: false, error: err?.message || "Unknown error" },
-      { status: 500 }
+      { status: err?.status ?? 500 }
     );
   }
 }

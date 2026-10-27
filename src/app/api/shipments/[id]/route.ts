@@ -1,3 +1,5 @@
+import { quantity, QuantityConflict } from "@/lib/shippingQuantityRules";
+import { assertShipmentEditable } from "@/lib/shippingQuantityGuard";
 // src/app/api/shipments/[id]/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -281,7 +283,7 @@ export async function GET(
       _debug: lineErrMsg ? { shipment_lines_join_error: lineErrMsg } : undefined,
     });
   } catch (e: any) {
-    return bad(e?.message || "Unknown error", 500);
+    return bad(e?.message || "Unknown error", e?.status ?? 500);
   }
 }
 
@@ -293,6 +295,7 @@ export async function PUT(
     const id = s(params?.id);
     if (!id) return bad("Missing shipment id", 400);
 
+    await assertShipmentEditable(id);
     const body = await req.json().catch(() => ({}));
     const shipmentIn = body?.shipment && typeof body.shipment === "object" ? body.shipment : {};
     const linesIn: any[] = Array.isArray(body?.lines) ? body.lines : [];
@@ -376,6 +379,23 @@ export async function PUT(
       if (!sourceId || !existingById.has(sourceId)) continue;
       if (!sourceRowsById.has(sourceId)) sourceRowsById.set(sourceId, []);
       sourceRowsById.get(sourceId)!.push(row);
+    }
+
+    // Validate all edits before writing. Every split must include its original row,
+    // otherwise the untouched source plus new rows would exceed the reservation.
+    const seenIds = new Set<string>();
+    for (const row of linesIn) {
+      const rawId = s(row?.id);
+      const sourceId = isTempSplitId(rawId) ? sourceIdFromTempSplit(rawId) : rawId;
+      if (!existingById.has(sourceId) || seenIds.has(rawId)) throw new QuantityConflict("Invalid or duplicate shipment line ID.");
+      seenIds.add(rawId);
+      quantity(row.qty ?? row.shipped_qty);
+    }
+    for (const [sourceId, rows] of sourceRowsById) {
+      if (!rows.some((r) => s(r.id) === sourceId)) throw new QuantityConflict("A split must include the original shipment line.");
+      const total = rows.reduce((sum, r) => sum + (r.is_deleted ? 0 : quantity(r.qty ?? r.shipped_qty)), 0);
+      const source = existingById.get(sourceId);
+      if (total > quantity(source.shipped_qty ?? source.qty)) throw new QuantityConflict("Edited shipment qty cannot exceed the original shipment qty.");
     }
 
     const now = new Date().toISOString();
@@ -480,6 +500,6 @@ export async function PUT(
 
     return ok({ shipment: updatedShipment });
   } catch (e: any) {
-    return bad(e?.message || "Unknown error", 500);
+    return bad(e?.message || "Unknown error", e?.status ?? 500);
   }
 }

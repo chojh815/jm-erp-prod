@@ -1,3 +1,5 @@
+import { PUT as updateOrder } from "./[id]/route";
+import { quantity } from "@/lib/shippingQuantityRules";
 // src/app/api/orders/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -383,6 +385,13 @@ if (headerId) {
   }
 }
 
+if (headerId) return updateOrder(new Request(req.url, {
+  method: "PUT", headers: req.headers, body: JSON.stringify(body),
+}), { params: { id: headerId } });
+for (const ln of linesIn) {
+  const ordered = quantity(ln.qty ?? 0);
+  if (quantity(ln.qty_cancelled ?? ln.cancel_qty ?? 0) > ordered) return bad("Cancel Qty exceeds Order Qty.", 409);
+}
 const effectiveHeaderId = headerId ?? undefined;
 
 
@@ -560,6 +569,7 @@ const useSequentialLineNo = hasDupLineNo;
         remark: str(ln.remark),
 
         qty,
+        qty_cancelled: quantity(ln.qty_cancelled ?? ln.cancel_qty ?? 0),
         unit_price: unitPrice,
         unit_price_precise: unitPrice,
         amount,
@@ -668,6 +678,6 @@ const useSequentialLineNo = hasDupLineNo;
     if (msg.toLowerCase().includes("duplicate") && msg.toLowerCase().includes("po_no")) {
       return bad("Duplicate PO NO", 409, { details: msg });
     }
-    return bad(msg, 500);
+    return bad(msg, e?.status ?? 500);
   }
 }
