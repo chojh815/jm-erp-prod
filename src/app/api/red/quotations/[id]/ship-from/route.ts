@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient } from "../../../../_supabase";
+import { redActor, redFailure } from "@/lib/redQuoteServer";
 
 export const dynamic = "force-dynamic";
 
 // GET: current ship_from_code + options
 export async function GET(_: Request, { params }: { params: { id: string } }) {
   try {
+    await redActor();
     const supabase = createSupabaseServerClient();
     const quotationId = params.id;
 
@@ -36,10 +38,10 @@ export async function GET(_: Request, { params }: { params: { id: string } }) {
             s.siteName ??
             "") + "";
         const city = (s.city ?? "").trim();
-return {
-  code: code.trim(),
-  name: s.country ?? "",
-};
+        return {
+          code: code.trim(),
+          name: s.country ?? "",
+        };
       })
       .filter((o: any) => !!o.code);
 
@@ -49,13 +51,17 @@ return {
   } catch (e: any) {
     return NextResponse.json(
       { error: e?.message || "GET ship-from failed" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
 
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
+export async function PUT(
+  req: Request,
+  { params }: { params: { id: string } },
+) {
   try {
+    await redActor("edit");
     const supabase = createSupabaseServerClient();
     const quotationId = params.id;
     const body = await req.json().catch(() => ({}));
@@ -64,15 +70,13 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
     const { error } = await supabase
       .from("red_quotations")
       .update({ ship_from_code })
-      .eq("id", quotationId);
+      .eq("id", quotationId)
+      .is("archived_at", null);
 
     if (error) throw error;
 
     return NextResponse.json({ ok: true });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "PUT ship-from failed" },
-      { status: 500 }
-    );
+    return redFailure(e);
   }
 }

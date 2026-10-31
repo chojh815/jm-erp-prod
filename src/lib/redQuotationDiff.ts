@@ -1,7 +1,7 @@
 export const RED_MOQS = [1000, 3000, 5000] as const;
 export const RED_PCS_PRESET = [3, 4, 6, 10, 12, 14] as const;
 
-export type Moq = typeof RED_MOQS[number];
+export type Moq = (typeof RED_MOQS)[number];
 
 export function clampInt(v: number, min: number, max: number) {
   if (!Number.isFinite(v)) return min;
@@ -18,6 +18,8 @@ export type MatrixCell = {
   pcs_per_pkg: number;
   moq_packages: number;
   price_fob_per_pkg: number | null;
+  override_price_fob_per_pkg?: number | null;
+  offer_usd?: number | null;
 };
 
 export type DiffCell =
@@ -33,7 +35,8 @@ export function keyOf(packageCode: string, pcs: number, moq: number) {
 
 export function buildIndex(cells: MatrixCell[]) {
   const m = new Map<string, MatrixCell>();
-  for (const c of cells) m.set(keyOf(c.package_code, c.pcs_per_pkg, c.moq_packages), c);
+  for (const c of cells)
+    m.set(keyOf(c.package_code, c.pcs_per_pkg, c.moq_packages), c);
   return m;
 }
 
@@ -44,13 +47,25 @@ export function unionPCS(base: MatrixCell[], target: MatrixCell[]) {
   return Array.from(s.values()).sort((a, b) => a - b);
 }
 
-export function diffCell(base: MatrixCell | undefined, target: MatrixCell | undefined): DiffCell {
-  const b = base?.price_fob_per_pkg ?? null;
-  const t = target?.price_fob_per_pkg ?? null;
+export function diffCell(
+  base: MatrixCell | undefined,
+  target: MatrixCell | undefined,
+): DiffCell {
+  // Canonical rows carry an explicit final USD offer (including null when not ready).
+  // Old callers without that field compare effective cost, including Override.
+  const value = (c: MatrixCell | undefined) =>
+    c && "offer_usd" in c
+      ? (c.offer_usd ?? null)
+      : (c?.override_price_fob_per_pkg ?? c?.price_fob_per_pkg ?? null);
+  const b = value(base);
+  const t = value(target);
 
-  if (base && !target) return { state: "REMOVED", base: b, target: null, delta: null };
-  if (!base && target) return { state: "NEW", base: null, target: t, delta: null };
-  if (b === null && t === null) return { state: "SAME", base: null, target: null, delta: 0 };
+  if (base && !target)
+    return { state: "REMOVED", base: b, target: null, delta: null };
+  if (!base && target)
+    return { state: "NEW", base: null, target: t, delta: null };
+  if (b === null && t === null)
+    return { state: "SAME", base: null, target: null, delta: 0 };
 
   if (typeof b === "number" && typeof t === "number") {
     const d = +(t - b).toFixed(4);
@@ -60,8 +75,10 @@ export function diffCell(base: MatrixCell | undefined, target: MatrixCell | unde
   }
 
   // one side null, other number => treat as change
-  if (b === null && typeof t === "number") return { state: "NEW", base: null, target: t, delta: null };
-  if (typeof b === "number" && t === null) return { state: "REMOVED", base: b, target: null, delta: null };
+  if (b === null && typeof t === "number")
+    return { state: "NEW", base: null, target: t, delta: null };
+  if (typeof b === "number" && t === null)
+    return { state: "REMOVED", base: b, target: null, delta: null };
 
   return { state: "SAME", base: b, target: t, delta: 0 };
 }

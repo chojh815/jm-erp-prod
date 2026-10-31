@@ -1,111 +1,77 @@
 import React from "react";
-import { headers } from "next/headers";
 import PrintButton from "./PrintButton";
-
+import { redActor, readRedDocument } from "@/lib/redQuoteServer";
+import { commercialRedData } from "@/lib/redQuoteExport";
 export const dynamic = "force-dynamic";
-
-function getBaseUrl() {
-  // Server Components: fetch() needs an absolute URL when called in Node runtime.
-  // Prefer explicit env, otherwise derive from request headers (works on Vercel + local).
-  const envBase =
-    process.env.NEXT_PUBLIC_BASE_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
-  if (envBase) return envBase.replace(/\/$/, "");
-
-  const h = headers();
-  const proto = h.get("x-forwarded-proto") || "http";
-  const host = h.get("x-forwarded-host") || h.get("host") || "localhost:3000";
-  return `${proto}://${host}`;
-}
-
-async function getJson(url: string) {
-  const r = await fetch(url, { cache: "no-store" });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((j as any)?.error || `Failed (${r.status})`);
-  return j;
-}
-
 export default async function RedQuotationVersionPdfPage({
   params,
   searchParams,
-}: any) {
-  const versionId = params.versionId as string;
-  const pkg = String(searchParams?.package || "A").toUpperCase();
-
-  const base = getBaseUrl();
-
-  // Matrix
-  const url = `${base}/api/red/quotation-versions/${versionId}/matrix?package=${encodeURIComponent(
-    pkg
-  )}`;
-  const m = await getJson(url);
-  const rows = (m?.data || []) as any[];
-
-  return (
-    <div
-      style={{
-        padding: 24,
-        fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "baseline",
-        }}
-      >
-        <h1 style={{ margin: 0, fontSize: 18 }}>RED Quotation Matrix</h1>
-        <div style={{ fontSize: 12, color: "#555" }}>
-          Version: {versionId} · Package: {pkg}
+}: {
+  params: { versionId: string };
+  searchParams: { package?: string };
+}) {
+  try {
+    await redActor();
+    const s = await readRedDocument(params.versionId),
+      d = commercialRedData(
+        s.document,
+        s.version,
+        String(searchParams.package || "A").toUpperCase(),
+      );
+    return (
+      <main className="mx-auto max-w-4xl space-y-4 p-8 text-sm">
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-xl font-semibold">QUOTATION</h1>
+            <p>
+              {d.quotationNo} · v{d.versionNo} · {d.status}
+            </p>
+          </div>
+          <div className="print:hidden">
+            <PrintButton />
+          </div>
         </div>
-      </div>
-
-      <div style={{ marginTop: 12, marginBottom: 12 }}>
-        <PrintButton />
-      </div>
-
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-        <thead>
-          <tr>
-            <th style={{ border: "1px solid #ddd", padding: 6, textAlign: "left" }}>
-              PCS/PKG
-            </th>
-            <th style={{ border: "1px solid #ddd", padding: 6, textAlign: "left" }}>
-              MOQ PKG
-            </th>
-            <th style={{ border: "1px solid #ddd", padding: 6, textAlign: "right" }}>
-              Price
-            </th>
-            <th style={{ border: "1px solid #ddd", padding: 6, textAlign: "right" }}>
-              Override
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i}>
-              <td style={{ border: "1px solid #eee", padding: 6 }}>
-                {r.pcs_per_pkg}
-              </td>
-              <td style={{ border: "1px solid #eee", padding: 6 }}>
-                {r.moq_packages}
-              </td>
-              <td style={{ border: "1px solid #eee", padding: 6, textAlign: "right" }}>
-                {r.price_fob_per_pkg ?? ""}
-              </td>
-              <td style={{ border: "1px solid #eee", padding: 6, textAlign: "right" }}>
-                {r.override_price_fob_per_pkg ?? ""}
-              </td>
+        <dl className="grid grid-cols-2 gap-2">
+          <div>Buyer: {d.buyer}</div>
+          <div>Date: {d.date}</div>
+          <div>Title: {d.title}</div>
+          <div>Style: {d.style}</div>
+          <div>Ship From: {d.shipFrom}</div>
+          <div>Terms: {d.incoterm} · USD / pkg</div>
+        </dl>
+        <table className="w-full border-collapse">
+          <thead>
+            <tr>
+              {["Package", "PCS / PKG", "MOQ (PKG)", "Offer (USD / PKG)"].map(
+                (h) => (
+                  <th key={h} className="border p-2 text-left">
+                    {h}
+                  </th>
+                ),
+              )}
             </tr>
-          ))}
-        </tbody>
-      </table>
-
-      <div style={{ marginTop: 10, fontSize: 11, color: "#666" }}>
-        * This page is a simple print-PDF export. If you want a formatted commercial PDF,
-        we can switch to your React-PDF template.
-      </div>
-    </div>
-  );
+          </thead>
+          <tbody>
+            {d.rows.map((r) => (
+              <tr key={r.pcs + ":" + r.moq}>
+                <td className="border p-2">{d.packageCode}</td>
+                <td className="border p-2">{r.pcs}</td>
+                <td className="border p-2">{r.moq.toLocaleString()}</td>
+                <td className="border p-2 text-right">
+                  {r.offerUsd.toFixed(2)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </main>
+    );
+  } catch (e: any) {
+    return (
+      <main className="p-8">
+        <h1 className="text-lg font-semibold">견적을 출력할 수 없습니다.</h1>
+        <p className="mt-2 text-sm">{e.message}</p>
+      </main>
+    );
+  }
 }

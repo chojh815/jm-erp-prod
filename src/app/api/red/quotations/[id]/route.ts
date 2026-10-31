@@ -1,57 +1,85 @@
-import { NextResponse } from "next/server";
-import { createSupabaseServerClient } from "../../../_supabase";
-
+import {
+  redActor,
+  redFailure,
+  redJson,
+  db,
+  RedError,
+} from "@/lib/redQuoteServer";
 export const dynamic = "force-dynamic";
-
-/**
- * PUT /api/red/quotations/[id]
- * PATCH fields on red_quotations
- */
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
+export async function PUT(
+  req: Request,
+  { params }: { params: { id: string } },
+) {
   try {
-    const supabase = createSupabaseServerClient();
-    const id = params?.id;
-    const body = await req.json().catch(() => ({}));
-
-    const patch: any = {};
-    for (const k of ["buyer_name", "style_no", "ship_from_code", "title", "thumbnail_url", "thumbnail_path"]) {
-      if (k in body) patch[k] = body[k] === "" ? null : body[k];
-    }
-
-    const { data, error } = await supabase
+    await redActor("edit");
+    const body = await req.json(),
+      patch: any = { updated_at: new Date().toISOString() };
+    for (const k of ["buyer_name", "style_no", "ship_from_code", "title"])
+      if (k in body) {
+        patch[k] = String(body[k] || "").trim() || null;
+        if (patch[k]?.length > 300)
+          throw new RedError("입력은 300자 이내로 작성해 주세요.");
+      }
+    const r = await db
       .from("red_quotations")
       .update(patch)
-      .eq("id", id)
+      .eq("id", params.id)
+      .is("archived_at", null)
       .select("*")
-      .single();
-
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ data });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Update failed" }, { status: 500 });
+      .maybeSingle();
+    if (r.error) throw r.error;
+    if (!r.data) throw new RedError("견적이 없거나 보관되어 있습니다.", 409);
+    return redJson({ data: r.data });
+  } catch (e) {
+    return redFailure(e);
   }
 }
-
-/**
- * DELETE /api/red/quotations/[id]
- *
- * IMPORTANT:
- * - Your DB currently does NOT have is_deleted / deleted_at columns on red_quotations
- *   (you saw: "Could not find the 'is_deleted' column ...").
- * - So this endpoint performs a HARD DELETE (row delete) to avoid schema errors.
- *
- * If later you want SOFT DELETE, add columns first, then switch this back to update().
- */
-export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
+export async function DELETE(
+  _: Request,
+  { params }: { params: { id: string } },
+) {
   try {
-    const supabase = createSupabaseServerClient();
-    const id = params?.id;
-
-    const { error } = await supabase.from("red_quotations").delete().eq("id", id);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-    return NextResponse.json({ success: true });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Delete failed" }, { status: 500 });
+    const actor = await redActor("delete");
+    const r = await db
+      .from("red_quotations")
+      .update({
+        archived_at: new Date().toISOString(),
+        archived_by: actor.user.id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", params.id)
+      .select("id")
+      .maybeSingle();
+    if (r.error) throw r.error;
+    if (!r.data) throw new RedError("견적이 없습니다.", 404);
+    return redJson({ success: true, archived: true });
+  } catch (e) {
+    return redFailure(e);
+  }
+}
+export async function PATCH(
+  req: Request,
+  { params }: { params: { id: string } },
+) {
+  try {
+    await redActor("delete");
+    const body = await req.json();
+    if (body.action !== "restore")
+      throw new RedError("유효하지 않은 작업입니다.");
+    const r = await db
+      .from("red_quotations")
+      .update({
+        archived_at: null,
+        archived_by: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", params.id)
+      .select("id")
+      .maybeSingle();
+    if (r.error) throw r.error;
+    if (!r.data) throw new RedError("견적이 없습니다.", 404);
+    return redJson({ success: true });
+  } catch (e) {
+    return redFailure(e);
   }
 }

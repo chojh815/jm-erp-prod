@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 import React from "react";
 import { useRouter } from "next/navigation";
@@ -11,6 +11,7 @@ type Row = {
   style_no: string | null;
   status: string;
   updated_at: string;
+  archived_at?: string | null;
 };
 
 function fmtDate(s: string) {
@@ -21,6 +22,9 @@ function fmtDate(s: string) {
 export default function RedQuotationsListPage() {
   const router = useRouter();
 
+  const [archived, setArchived] = React.useState(false);
+  const [canCreate, setCanCreate] = React.useState(false);
+  const [canArchive, setCanArchive] = React.useState(false);
   const [rows, setRows] = React.useState<Row[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
@@ -33,10 +37,15 @@ export default function RedQuotationsListPage() {
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetch("/api/red/quotations", { cache: "no-store" });
+      const r = await fetch(
+        "/api/red/quotations?archived=" + (archived ? "1" : "0"),
+        { cache: "no-store" },
+      );
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((j as any)?.error || "Failed");
       setRows((j as any).data || []);
+      setCanCreate(j.canCreate === true);
+      setCanArchive(j.canArchive === true);
     } catch (e: any) {
       setErr(e?.message || "Failed");
     } finally {
@@ -47,7 +56,7 @@ export default function RedQuotationsListPage() {
   React.useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [archived]);
 
   async function create() {
     setLoading(true);
@@ -74,16 +83,27 @@ export default function RedQuotationsListPage() {
   }
 
   async function deleteOne(id: string) {
-    if (!confirm("Delete this RED Quotation?")) return;
+    if (
+      !confirm(
+        archived
+          ? "이 견적을 복원하시겠습니까?"
+          : "이 견적을 보관하시겠습니까? 자료와 이력은 유지됩니다.",
+      )
+    )
+      return;
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetch(`/api/red/quotations/${id}`, { method: "DELETE" });
+      const r = await fetch(`/api/red/quotations/${id}`, {
+        method: archived ? "PATCH" : "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: archived ? JSON.stringify({ action: "restore" }) : undefined,
+      });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error((j as any)?.error || "Delete failed");
+      if (!r.ok) throw new Error((j as any)?.error || "보관/복원 처리 실패");
       await load();
     } catch (e: any) {
-      setErr(e?.message || "Delete failed");
+      setErr(e?.message || "보관/복원 처리 실패");
     } finally {
       setLoading(false);
     }
@@ -95,11 +115,19 @@ export default function RedQuotationsListPage() {
         <div>
           <h1 className="text-2xl font-semibold">RED Quotations</h1>
           <p className="text-sm text-muted-foreground">
-            C-Option module: PCS×MOQ Matrix + Version/Diff.
+            버전별 오퍼 · 네고 이력 · 최종 USD 가격
           </p>
         </div>
 
         <div className="flex gap-2 flex-wrap items-end">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={archived}
+              onChange={(e) => setArchived(e.target.checked)}
+            />{" "}
+            보관함
+          </label>
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">Buyer</div>
             <input
@@ -135,7 +163,7 @@ export default function RedQuotationsListPage() {
 
           <button
             onClick={create}
-            disabled={loading}
+            disabled={loading || !canCreate || archived}
             className="border rounded px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
           >
             + New RED Quotation
@@ -165,7 +193,9 @@ export default function RedQuotationsListPage() {
                 className="border-t hover:bg-muted/50 cursor-pointer"
                 onClick={() => router.push(`/red/quotations/${r.id}`)}
               >
-                <td className="p-2 font-medium">{r.red_quotation_no || r.id.slice(0, 8)}</td>
+                <td className="p-2 font-medium">
+                  {r.red_quotation_no || r.id.slice(0, 8)}
+                </td>
                 <td className="p-2">{r.buyer_name || "-"}</td>
                 <td className="p-2">{r.style_no || "-"}</td>
                 <td className="p-2">{r.title || "-"}</td>
@@ -174,15 +204,15 @@ export default function RedQuotationsListPage() {
                 <td className="p-2 text-right">
                   <button
                     className="px-2 py-1 text-xs border rounded hover:bg-gray-50 disabled:opacity-50"
-                    disabled={loading}
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
                       deleteOne(r.id);
                     }}
-                    title="Soft delete (is_deleted=true)"
+                    title={archived ? "견적 복원" : "견적과 이력 보관"}
+                    disabled={!canArchive || loading}
                   >
-                    Delete
+                    {archived ? "Restore" : "Archive"}
                   </button>
                 </td>
               </tr>
@@ -190,7 +220,10 @@ export default function RedQuotationsListPage() {
 
             {rows.length === 0 && !loading ? (
               <tr>
-                <td colSpan={7} className="p-6 text-center text-muted-foreground">
+                <td
+                  colSpan={7}
+                  className="p-6 text-center text-muted-foreground"
+                >
                   No RED quotations yet.
                 </td>
               </tr>

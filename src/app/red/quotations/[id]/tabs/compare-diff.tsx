@@ -1,359 +1,284 @@
-'use client';
-
+"use client";
 import * as React from "react";
-import { RED_MOQS, RED_PCS_PRESET, buildIndex, diffCell, isChanged, unionPCS, keyOf, type MatrixCell } from "@/lib/redQuotationDiff";
-
-type VersionRow = {
-  id: string;
-  version_no: number;
-  status: string;
-};
-
-type Props = {
+import { sortedVersions } from "@/lib/redQuoteDocument";
+import {
+  buildIndex,
+  keyOf,
+  diffCell,
+  type MatrixCell,
+} from "@/lib/redQuotationDiff";
+type Version = { id: string; version_no: number; status: string };
+export default function CompareDiffTab({
+  versions,
+  onChanged,
+  canCreate = true,
+}: {
   quotationId: string;
-  versions: VersionRow[];
-  onChanged: () => void;
-};
-
-export default function CompareDiffTab({ versions, onChanged }: Props) {
-  const [baseId, setBaseId] = React.useState("");
-  const [targetId, setTargetId] = React.useState("");
-  const [baseCells, setBaseCells] = React.useState<MatrixCell[]>([]);
-  const [targetCells, setTargetCells] = React.useState<MatrixCell[]>([]);
-  const [fobBase, setFobBase] = React.useState<Record<number, number | null>>({});
-  const [fobTarget, setFobTarget] = React.useState<Record<number, number | null>>({});
-  const [loading, setLoading] = React.useState(false);
-  const [msg, setMsg] = React.useState<string | null>(null);
-
-  const [changedOnly, setChangedOnly] = React.useState(true);
-  const [showPct, setShowPct] = React.useState(false);
-  const [customPcs, setCustomPcs] = React.useState("");
-
-  const [pcsFilter, setPcsFilter] = React.useState<number[] | null>(null); // null => all
-  const preset = (RED_PCS_PRESET as unknown as number[]);
-
-  // default selection: base=latest SENT/CONFIRMED else latest, target=latest DRAFT else latest
+  versions: Version[];
+  onChanged: () => void | Promise<void>;
+  canCreate?: boolean;
+}) {
+  const [base, setBase] = React.useState(""),
+    [target, setTarget] = React.useState(""),
+    [b, setB] = React.useState<MatrixCell[]>([]),
+    [t, setT] = React.useState<MatrixCell[]>([]),
+    [msg, setMsg] = React.useState(""),
+    [busy, setBusy] = React.useState(false),
+    [changed, setChanged] = React.useState(true),
+    [pkg, setPkg] = React.useState("A"),
+    [packages, setPackages] = React.useState<string[]>(["A"]),
+    [loaded, setLoaded] = React.useState(false);
   React.useEffect(() => {
-    if (versions.length === 0) return;
-
-    const latest = versions[versions.length - 1];
-    const target = [...versions].reverse().find((v) => v.status === "DRAFT") || latest;
-    const base =
-      [...versions].reverse().find((v) => v.status === "SENT" || v.status === "CONFIRMED") ||
-      (versions.length >= 2 ? versions[versions.length - 2] : latest);
-
-    setBaseId(base.id);
-    setTargetId(target.id);
+    const s = sortedVersions(versions);
+    if (!s.length) return;
+    setTarget((p) =>
+      s.some((v) => v.id === p)
+        ? p
+        : s.find((v) => v.status === "DRAFT")?.id || s[0].id,
+    );
+    setBase((p) =>
+      s.some((v) => v.id === p)
+        ? p
+        : s.find((v) => v.status === "SENT" || v.status === "CONFIRMED")?.id ||
+          s[1]?.id ||
+          s[0].id,
+    );
   }, [versions]);
-
-  async function loadMatrix(versionId: string) {
-    const r = await fetch(`/api/red/quotation-versions/${versionId}/matrix?package=A`, { cache: "no-store" });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j?.error || "Failed");
-    return (j.data || []) as MatrixCell[];
-  }
-
-  async function loadBoth() {
-    if (!baseId || !targetId) return;
-    setLoading(true);
-    setMsg(null);
+  const seq = React.useRef(0);
+  async function load() {
+    if (!base || !target) return;
+    const token = ++seq.current;
+    setBusy(true);
+    setLoaded(false);
+    setMsg("");
     try {
-      const [b, t] = await Promise.all([loadMatrix(baseId), loadMatrix(targetId)]);
-      setBaseCells(b);
-      setTargetCells(t);
+      const read = async (id: string) => {
+        const r = await fetch(
+            "/api/red/quotation-versions/" + id + "/document",
+            { cache: "no-store" },
+          ),
+          j = await r.json();
+        if (!r.ok) throw new Error(j.error);
+        return j;
+      };
+      const [a, z] = await Promise.all([read(base), read(target)]);
+      if (token !== seq.current) return;
+      setB(
+        Object.values(a.document.packages).flatMap(
+          (p: any) => p.cells,
+        ) as MatrixCell[],
+      );
+      setT(
+        Object.values(z.document.packages).flatMap(
+          (p: any) => p.cells,
+        ) as MatrixCell[],
+      );
+      const codes = [
+        ...new Set([
+          ...Object.keys(a.document.packages),
+          ...Object.keys(z.document.packages),
+        ]),
+      ];
+      setPackages(codes);
+      setPkg((p) => (codes.includes(p) ? p : codes[0]));
+      setLoaded(true);
+      if (a.legacy || z.legacy)
+        setMsg(
+          "기존 버전에는 환율·마진이 보존되지 않았습니다. 최종 USD 가격을 복원할 수 없는 항목은 확인 필요로 표시합니다.",
+        );
     } catch (e: any) {
-      setMsg(e?.message || "Failed");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  React.useEffect(() => { loadBoth(); /* eslint-disable-next-line */ }, [baseId, targetId]);
-
-  const baseIdx = React.useMemo(() => buildIndex(baseCells), [baseCells]);
-  const targetIdx = React.useMemo(() => buildIndex(targetCells), [targetCells]);
-
-  const allPCS = React.useMemo(() => {
-    const u = unionPCS(baseCells, targetCells);
-    // ensure preset always visible even if empty
-    const set = new Set<number>(u);
-    for (const p of preset) set.add(p);
-    const list = Array.from(set).sort((a, b) => a - b);
-    return list;
-  }, [baseCells, targetCells]);
-
-  const rowsPCS = React.useMemo(() => {
-    const list = pcsFilter && pcsFilter.length > 0 ? allPCS.filter((p) => pcsFilter.includes(p)) : allPCS;
-    return list;
-  }, [allPCS, pcsFilter]);
-
-  const changedList = React.useMemo(() => {
-    const items: { pcs: number; moq: number; base: number | null; target: number | null; state: string; delta: number | null; pct: number | null }[] = [];
-    for (const pcs of allPCS) {
-      for (const moq of RED_MOQS) {
-        const k = keyOf("A", pcs, moq);
-        const d = diffCell(baseIdx.get(k), targetIdx.get(k));
-        if (!isChanged(d)) continue;
-
-        const pct =
-          d.state === "UP" || d.state === "DOWN"
-            ? d.base !== 0
-              ? ((d.target - d.base) / d.base) * 100
-              : null
-            : null;
-
-        items.push({ pcs, moq, base: (d as any).base ?? null, target: (d as any).target ?? null, state: d.state, delta: (d as any).delta ?? null, pct });
+      if (token === seq.current) {
+        setB([]);
+        setT([]);
+        setMsg(e.message);
       }
-    }
-    return items.sort((a, b) => a.pcs - b.pcs || a.moq - b.moq);
-  }, [allPCS, baseIdx, targetIdx]);
-
-  const hasRemoved = changedList.some((x) => x.state === "REMOVED");
-
-  async function createRevisionFromTarget() {
-    if (!targetId) return;
-    setLoading(true);
-    setMsg(null);
-    try {
-      const r = await fetch(`/api/red/quotation-versions/${targetId}/revision`, { method: "POST" });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "Failed");
-      // refresh versions on parent and auto-select new target
-      await onChanged();
-      // we cannot know new list yet; optimistic set after reload by fetching versions again is handled by parent refresh.
-      setMsg(`Created v${j.data.version_no}. Select it as Target.`);
-    } catch (e: any) {
-      setMsg(e?.message || "Failed");
     } finally {
-      setLoading(false);
+      if (token === seq.current) setBusy(false);
     }
   }
-
-  function togglePreset(p: number) {
-    setPcsFilter((prev) => {
-      const cur = prev ? [...prev] : [];
-      if (cur.includes(p)) return cur.filter((x) => x !== p);
-      cur.push(p);
-      return cur;
-    });
+  React.useEffect(() => {
+    void load();
+    return () => {
+      seq.current++;
+    };
+  }, [base, target]);
+  const bi = buildIndex(b),
+    ti = buildIndex(t),
+    keys = [
+      ...new Set(
+        [...b, ...t]
+          .filter((c) => c.package_code === pkg)
+          .map((c) => keyOf(c.package_code, c.pcs_per_pkg, c.moq_packages)),
+      ),
+    ];
+  const rows = keys
+    .map((k) => {
+      const a = bi.get(k),
+        z = ti.get(k),
+        c = z || a!;
+      const d = diffCell(a, z);
+      const costChanged =
+        (a?.price_fob_per_pkg ?? null) !== (z?.price_fob_per_pkg ?? null) ||
+        (a?.override_price_fob_per_pkg ?? null) !== (z?.override_price_fob_per_pkg ?? null);
+      const missing =
+        (!!a &&
+          (a.override_price_fob_per_pkg ?? a.price_fob_per_pkg) != null &&
+          a.offer_usd == null) ||
+        (!!z &&
+          (z.override_price_fob_per_pkg ?? z.price_fob_per_pkg) != null &&
+          z.offer_usd == null);
+      return { k, c, d, costChanged, missing };
+    })
+    .sort(
+      (a, z) =>
+        a.c.pcs_per_pkg - z.c.pcs_per_pkg ||
+        a.c.moq_packages - z.c.moq_packages,
+    );
+  const visible = rows.filter(
+    (r) => !changed || r.d.state !== "SAME" || r.costChanged || r.missing,
+  );
+  async function copy() {
+    const reason = window.prompt("수정 이유 / 네고 내용 (선택)", "");
+    if (reason === null) return;
+    setBusy(true);
+    try {
+      const r = await fetch(
+          "/api/red/quotation-versions/" + target + "/revision",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ change_summary: reason }),
+          },
+        ),
+        j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      await onChanged();
+      setTarget(j.data.id);
+      setMsg(
+        "수정본을 만들었습니다. Matrix 탭에서 새 버전을 선택해 편집할 수 있습니다.",
+      );
+    } catch (e: any) {
+      setMsg(e.message);
+    } finally {
+      setBusy(false);
+    }
   }
-
-  function addCustomFilter() {
-    const n = Number(customPcs);
-    if (!Number.isFinite(n)) return;
-    const pcs = Math.max(1, Math.min(20, Math.trunc(n)));
-    setPcsFilter((prev) => {
-      const cur = prev ? [...prev] : [];
-      if (!cur.includes(pcs)) cur.push(pcs);
-      return cur.sort((a, b) => a - b);
-    });
-    setCustomPcs("");
-  }
-
+  const fmt = (n: number | null) => (n == null ? "—" : n.toFixed(2));
   return (
     <div className="space-y-4">
-      <div className="flex items-end gap-3 flex-wrap">
-        <div className="space-y-1">
-          <div className="text-xs text-muted-foreground">Base</div>
-          <select className="border rounded px-2 py-1 text-sm" value={baseId} onChange={(e) => setBaseId(e.target.value)}>
-            {versions.map((v) => (
-              <option key={v.id} value={v.id}>v{v.version_no} ({v.status})</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="space-y-1">
-          <div className="text-xs text-muted-foreground">Target</div>
-          <select className="border rounded px-2 py-1 text-sm" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
-            {versions.map((v) => (
-              <option key={v.id} value={v.id}>v{v.version_no} ({v.status})</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="space-y-1">
-          <div className="text-xs text-muted-foreground">PCS filter</div>
-          <div className="flex gap-1 flex-wrap">
-            {preset.map((p) => {
-              const active = pcsFilter ? pcsFilter.includes(p) : false;
-              return (
-                <button key={p} className={`border rounded px-2 py-1 text-xs ${active ? "bg-muted" : "hover:bg-muted/50"}`} onClick={() => togglePreset(p)}>
-                  {p}
-                </button>
-              );
-            })}
-            <div className="flex gap-1 items-center ml-2">
-              <input className="border rounded px-2 py-1 text-xs w-16" value={customPcs} onChange={(e) => setCustomPcs(e.target.value)} placeholder="5" />
-              <button className="border rounded px-2 py-1 text-xs hover:bg-muted/50" onClick={addCustomFilter}>
-                Add
-              </button>
-              <button className="border rounded px-2 py-1 text-xs hover:bg-muted/50" onClick={() => setPcsFilter(null)}>
-                All
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="ml-auto flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={changedOnly} onChange={(e) => setChangedOnly(e.target.checked)} />
-            Changed only
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={showPct} onChange={(e) => setShowPct(e.target.checked)} />
-            % change
-          </label>
-
-          <button className="border rounded px-3 py-1.5 text-sm hover:bg-muted" onClick={loadBoth} disabled={loading}>
-            Reload
-          </button>
-          <button className="border rounded px-3 py-1.5 text-sm hover:bg-muted" onClick={createRevisionFromTarget} disabled={loading}>
-            Create Revision from Target
-          </button>
-        </div>
-      </div>
-
-      {hasRemoved ? (
-        <div className="text-sm text-amber-700 border border-amber-300 bg-amber-50 rounded p-3">
-          REMOVED cells exist in Target. Buyer confusion risk. (Prefer creating a new revision instead of removing.)
-        </div>
-      ) : null}
-
-      {msg ? <div className="text-sm">{msg}</div> : null}
-
-      {/* Diff grid */}
-      {!changedOnly ? (
-        <div className="border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-muted">
-              <tr>
-                <th className="text-left p-2 w-24">PCS</th>
-                {RED_MOQS.map((m) => (
-                  <th key={m} className="text-left p-2">{m.toLocaleString()} pkg</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rowsPCS.map((pcs) => (
-                <tr key={pcs} className="border-t">
-                  <td className="p-2 font-medium">{pcs} pcs</td>
-                  {RED_MOQS.map((moq) => {
-                    const k = keyOf("A", pcs, moq);
-                    const d = diffCell(baseIdx.get(k), targetIdx.get(k));
-
-                    const base = (d as any).base ?? null;
-                    const target = (d as any).target ?? null;
-
-                    let note = "(–)";
-                    if (d.state === "UP") note = `▲ ${(d as any).delta.toFixed(2)}`;
-                    if (d.state === "DOWN") note = `▼ ${Math.abs((d as any).delta).toFixed(2)}`;
-                    if (d.state === "NEW") note = "NEW";
-                    if (d.state === "REMOVED") note = "REMOVED";
-
-                    const pct =
-                      showPct && (d.state === "UP" || d.state === "DOWN") && base
-                        ? ` (${(((target - base) / base) * 100).toFixed(1)}%)`
-                        : "";
-
-                    return (
-                      <td key={moq} className="p-2">
-                        <div className="flex flex-col leading-tight">
-                          <div>
-                            <span className="tabular-nums">{base === null ? "–" : base.toFixed(2)}</span>
-                            {" "}→{" "}
-                            <span className="tabular-nums">{target === null ? "–" : target.toFixed(2)}</span>
-                          </div>
-                          <div className="text-xs text-muted-foreground">{note}{pct}</div>
-                        </div>
-                      </td>
-                    );
-                  })}
-                </tr>
+      <div className="flex flex-wrap items-end gap-3">
+        {[
+          ["Base", base, setBase],
+          ["Target", target, setTarget],
+        ].map(([label, value, setter]) => (
+          <label key={label as string} className="text-sm">
+            {label as string}
+            <select
+              className="block rounded border bg-background px-2 py-2"
+              value={value as string}
+              disabled={busy}
+              onChange={(e) => (setter as (v: string) => void)(e.target.value)}
+            >
+              {sortedVersions(versions).map((v) => (
+                <option key={v.id} value={v.id}>
+                  v{v.version_no} ({v.status})
+                </option>
               ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-
-      {/* Changed-only list (always includes NEW/REMOVED) */}
-      <div className="border rounded-lg overflow-hidden">
-        
-        <div className="mt-4 border rounded-lg p-4">
-          <div className="text-sm font-medium">FOB per pkg changes (MOQ only)</div>
-          <div className="text-xs text-muted-foreground">
-            PCS와 무관한 MOQ별 기본 패키지 FOB(/pkg) 변경만 따로 표시합니다.
-          </div>
-
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full text-sm border">
-              <thead>
-                <tr className="bg-muted/40">
-                  <th className="text-left p-2 border">MOQ</th>
-                  <th className="text-left p-2 border">Base</th>
-                  <th className="text-left p-2 border">Target</th>
-                  <th className="text-left p-2 border">Δ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[1000, 3000, 5000].map((moq) => {
-                  const b = fobBase?.[moq] ?? null;
-                  const t = fobTarget?.[moq] ?? null;
-                  const changed = (b ?? "") !== (t ?? "");
-                  if (changedOnly && !changed) return null;
-                  const delta = b == null || t == null ? null : t - b;
-                  return (
-                    <tr key={moq}>
-                      <td className="p-2 border">{moq.toLocaleString()} pkg</td>
-                      <td className="p-2 border">{b == null ? "" : b.toFixed(4)}</td>
-                      <td className="p-2 border">{t == null ? "" : t.toFixed(4)}</td>
-                      <td className="p-2 border">{delta == null ? "" : delta.toFixed(4)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-<div className="p-2 bg-muted text-sm font-medium">Changed Cells</div>
+            </select>
+          </label>
+        ))}
+        <label className="text-sm">
+          패키지
+          <select
+            className="block rounded border bg-background px-2 py-2"
+            value={pkg}
+            onChange={(e) => setPkg(e.target.value)}
+          >
+            {packages.map((p) => (
+              <option key={p}>{p}</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <input
+            type="checkbox"
+            checked={changed}
+            onChange={(e) => setChanged(e.target.checked)}
+          />{" "}
+          변경/확인 필요 항목만
+        </label>
+        <button
+          className="rounded border px-3 py-2 text-sm"
+          disabled={busy}
+          onClick={() => void load()}
+        >
+          Reload
+        </button>
+        <button
+          className="rounded border px-3 py-2 text-sm"
+          disabled={busy || !target || !canCreate}
+          onClick={() => void copy()}
+        >
+          Target으로 수정 견적 만들기
+        </button>
+      </div>
+      {msg && (
+        <p role="status" className="rounded border p-3 text-sm">
+          {msg}
+        </p>
+      )}
+      <p className="text-xs text-muted-foreground">
+        비교 기준: 저장된 최종 USD 오퍼 / pkg. 원가 보정만 바뀐 경우도
+        표시합니다.
+      </p>
+      <div className="overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-muted/60">
-            <tr>
-              <th className="text-left p-2 w-20">PCS</th>
-              <th className="text-left p-2 w-24">MOQ</th>
-              <th className="text-left p-2">Base</th>
-              <th className="text-left p-2">Target</th>
-              <th className="text-left p-2 w-28">Δ</th>
+          <thead>
+            <tr className="bg-muted">
+              <th className="p-2 text-left">PCS/PKG</th>
+              <th className="p-2 text-left">MOQ PKG</th>
+              <th className="p-2 text-left">Base USD</th>
+              <th className="p-2 text-left">Target USD</th>
+              <th className="p-2 text-left">변경</th>
             </tr>
           </thead>
           <tbody>
-            {changedList
-              .filter((x) => (pcsFilter && pcsFilter.length > 0 ? pcsFilter.includes(x.pcs) : true))
-              .map((x, idx) => (
-                <tr key={`${x.pcs}-${x.moq}-${idx}`} className="border-t">
-                  <td className="p-2 font-medium">{x.pcs}</td>
-                  <td className="p-2">{x.moq.toLocaleString()}</td>
-                  <td className="p-2 tabular-nums">{x.base === null ? "–" : x.base.toFixed(2)}</td>
-                  <td className="p-2 tabular-nums">{x.target === null ? "–" : x.target.toFixed(2)}</td>
-                  <td className="p-2">
-                    {x.state === "NEW" ? (
-                      <span className="text-emerald-700 font-medium">NEW</span>
-                    ) : x.state === "REMOVED" ? (
-                      <span className="text-amber-700 font-medium">REMOVED</span>
-                    ) : x.delta !== null ? (
-                      <span className={`font-medium ${x.delta < 0 ? "text-amber-700" : "text-emerald-700"}`}>
-                        {x.delta < 0 ? "▼" : "▲"} {Math.abs(x.delta).toFixed(2)}
-                        {showPct && x.pct !== null ? <span className="text-xs text-muted-foreground"> ({x.pct.toFixed(1)}%)</span> : null}
-                      </span>
-                    ) : (
-                      "–"
-                    )}
-                  </td>
-                </tr>
-              ))}
-            {changedList.length === 0 ? (
-              <tr><td colSpan={5} className="p-6 text-center text-muted-foreground">No changes.</td></tr>
-            ) : null}
+            {visible.map(({ k, c, d, costChanged, missing }) => (
+              <tr key={k} className="border-t">
+                <td className="p-2">{c.pcs_per_pkg}</td>
+                <td className="p-2">{c.moq_packages.toLocaleString()}</td>
+                <td className="p-2">{fmt(d.base)}</td>
+                <td className="p-2">{fmt(d.target)}</td>
+                <td className="p-2">
+                  {missing
+                    ? "환율·마진 / 최종 오퍼 확인 필요"
+                    : d.state === "SAME"
+                      ? costChanged
+                        ? "원가/보정 변경 · 오퍼 동일"
+                        : "동일"
+                      : d.delta == null
+                        ? d.state
+                        : (d.delta > 0 ? "+" : "") + d.delta.toFixed(2)}
+                  {costChanged && d.state !== "SAME" && !missing
+                    ? " · 원가/보정 변경"
+                    : ""}
+                </td>
+              </tr>
+            ))}
+            {!visible.length && (
+              <tr>
+                <td
+                  colSpan={5}
+                  className="p-6 text-center text-muted-foreground"
+                >
+                  {busy
+                    ? "불러오는 중…"
+                    : loaded
+                      ? "비교할 변경 항목이 없습니다."
+                      : "버전을 불러와 주세요."}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
