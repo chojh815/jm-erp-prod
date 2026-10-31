@@ -1,3 +1,4 @@
+import { sampleActor, requireSampleManagement } from "@/lib/sampleRequestAccess";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -24,6 +25,8 @@ async function ensureBucket() {
 
 export async function POST(req: NextRequest) {
   try {
+
+    const actor = await sampleActor(); requireSampleManagement(actor);
     const form = await req.formData();
     const file = form.get("file");
     const kindRaw = String(form.get("kind") || "attachments").trim();
@@ -51,6 +54,6 @@ export async function POST(req: NextRequest) {
     const pub = supabaseAdmin.storage.from(BUCKET).getPublicUrl(path);
     return NextResponse.json({ ok: true, file: { name: file.name, path, url: pub.data.publicUrl, size: file.size, type: file.type || null, kind } }, { headers: { "Cache-Control": "no-store" } });
   } catch (e: any) {
-    return bad(e?.message || "Upload failed", 500);
+    return bad(e?.message || "Upload failed", e?.status ?? 500);
   }
 }

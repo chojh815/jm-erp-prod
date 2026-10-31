@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import SampleRequestHistory from "@/components/dev/SampleRequestHistory";
 import useSWR from "swr";
 import AppShell from "@/components/layout/AppShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +30,7 @@ type RequestForm = {
   id?: string;
   request_no: string;
   request_title: string;
+  request_kind: string;
   buyer_id: string;
   buyer_code: string;
   buyer_name: string;
@@ -96,6 +98,7 @@ function makeEmptyForm(): RequestForm {
   return {
     request_no: "",
     request_title: "",
+    request_kind: "SAMPLE",
     buyer_id: "",
     buyer_code: "",
     buyer_name: "",
@@ -175,7 +178,8 @@ function normalizeProgressStatus(v: string, resultStatus?: string) {
   const s = (v || "").toUpperCase();
   const result = normalizeResultStatus(resultStatus || "");
   if (result === "CONVERTED_TO_ORDER" || result === "CLOSED_NO_ORDER") return "COMPLETED";
-  if (["REQUESTED", "IN_PROGRESS", "READY_TO_SEND"].includes(s)) return "DEVELOPING";
+  if (s === "REQUESTED") return "REQUESTED";
+  if (["DEVELOPING", "IN_PROGRESS", "READY_TO_SEND"].includes(s)) return "DEVELOPING";
   if (s === "SENT") return "SENT";
   if (["WAITING_FEEDBACK", "FEEDBACK_RECEIVED", "REVISE_REQUIRED", "APPROVED", "REJECTED", "FEEDBACK"].includes(s)) return "FEEDBACK";
   if (s === "COMPLETED") return "COMPLETED";
@@ -251,6 +255,7 @@ export default function SampleRequestsPage() {
   const [quickFilter, setQuickFilter] = React.useState<QuickFilter>("ALL");
   const [selectedId, setSelectedId] = React.useState("");
   const [form, setForm] = React.useState<RequestForm>(makeEmptyForm());
+  const [activeTab, setActiveTab] = React.useState<"info" | "history">("info");
   const [isSaving, setIsSaving] = React.useState(false);
 
   const listQs = new URLSearchParams();
@@ -271,6 +276,9 @@ export default function SampleRequestsPage() {
   const buyers: Buyer[] = optData?.buyers || [];
   const buyersLoadError = !buyersLoading && optData?.ok === false ? (optData?.error || "Failed to load buyers") : "";
   const items = data?.items || [];
+  const canManage = data?.canManage === true;
+  const canCreate = data?.canCreate === true;
+  const canDelete = data?.canDelete === true;
   const buyerKpis = data?.buyer_kpis || [];
   const summary = React.useMemo(() => computeSummary(items), [items]);
 
@@ -302,14 +310,15 @@ export default function SampleRequestsPage() {
     setTargetShipDateTo("");
     setQuickFilter("ALL");
   }
-  function onNew() { setSelectedId(""); setForm(makeEmptyForm()); }
+  function onNew() { setSelectedId(""); setForm(makeEmptyForm()); setActiveTab("info"); }
   function load(item: any) {
     setSelectedId(item.id || "");
     const merged = normalizeForm({ ...makeEmptyForm(), ...item, attachments: item.attachments || [], reference_images: item.reference_images || [], shipment_proof_files: item.shipment_proof_files || [] });
     setForm(merged);
+    setActiveTab("history");
   }
   async function save() {
-    if (isSaving) return;
+    if (isSaving || (form.id ? !canManage : !canCreate)) return;
     setIsSaving(true);
     try {
       let payload = normalizeForm(form);
@@ -358,8 +367,9 @@ export default function SampleRequestsPage() {
   const listTitle = quickFilter === "ALL" ? "List" : `List · ${quickFilter.replace(/_/g, " ")}`;
 
   return (
-    <AppShell title="Sample Requests">
+    <AppShell title="Development & Sample Requests">
       <div className="space-y-6">
+        {data?.ok === false && <div role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">{data.error || "요청 목록을 불러오지 못했습니다."}</div>}
         <div className="grid gap-4 md:grid-cols-6">
           {[
             ["Total Requests", summary.total_requests, ""],
@@ -482,7 +492,7 @@ export default function SampleRequestsPage() {
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <Button type="button" onClick={onNew}>New Request</Button>
+                  {canCreate && <Button type="button" onClick={onNew}>New Request</Button>}
                   <Button type="button" variant="outline" onClick={resetFilters}>Clear Filters</Button>
                   <Button type="button" variant="outline" onClick={() => window.open("/dashboards/samples", "_blank")}>Open Dashboard</Button>
                 </div>
@@ -505,14 +515,14 @@ export default function SampleRequestsPage() {
                             <span className={`inline-flex rounded-full px-2 py-1 ${resultBadgeClass(r.result_status)}`}>{normalizeResultStatus(r.result_status)}</span>
                           </div>
                         </button>
-                        <Button type="button" variant="destructive" size="sm" onClick={async () => {
+                        {canDelete && <Button type="button" variant="destructive" size="sm" onClick={async () => {
                           if (!confirm("Delete this request?")) return;
                           const res = await fetch(`/api/sample-requests/${r.id}`, { method: "DELETE" });
                           const json = await res.json();
                           if (!json?.ok) { alert(json?.error || "Delete failed"); return; }
                           if (selectedId === r.id) onNew();
                           await mutate();
-                        }}>Delete</Button>
+                        }}>Delete</Button>}
                       </div>
                     </div>
                   ))}
@@ -523,8 +533,15 @@ export default function SampleRequestsPage() {
 
           <div className="lg:col-span-7">
             <Card>
-              <CardHeader><CardTitle className="text-base">{form.id ? "Edit Request" : "New Request"}</CardTitle></CardHeader>
+              <CardHeader>
+                <CardTitle className="text-base">{form.id ? form.request_title : "New Request"}</CardTitle>
+                {form.id && <div className="flex gap-2 pt-2"><Button size="sm" variant={activeTab === "history" ? "default" : "outline"} onClick={() => setActiveTab("history")}>자료·협의 이력</Button><Button size="sm" variant={activeTab === "info" ? "default" : "outline"} onClick={() => setActiveTab("info")}>요청 정보</Button></div>}
+              </CardHeader>
               <CardContent className="space-y-6">
+                {form.id && activeTab === "history" ? <SampleRequestHistory key={form.id} requestId={form.id}/> : <>
+                {!canManage && form.id && <p className="text-sm text-muted-foreground">요청 정보는 조회 전용입니다. 자료·협의 이력에서 진행 내용과 파일을 등록할 수 있습니다.</p>}
+                {!form.id && !canCreate && <p className="text-sm text-muted-foreground">왼쪽에서 배정된 개발건을 선택해 자료를 등록해 주세요.</p>}
+                <fieldset disabled={form.id ? !canManage : !canCreate} className="min-w-0 space-y-6">
                 {buyersLoading ? null : buyersLoadError ? (
                   <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Buyer list load issue: {buyersLoadError}</div>
                 ) : buyers.length === 0 ? (
@@ -533,8 +550,12 @@ export default function SampleRequestsPage() {
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="md:col-span-2">
-                    <Label>Request Title</Label>
-                    <Input value={form.request_title} onChange={(e) => setField("request_title", e.target.value)} placeholder="e.g. Cubic earring sample request" />
+                    <Label>Title / 개발건 제목</Label>
+                    <Input value={form.request_title} onChange={(e) => setField("request_title", e.target.value)} placeholder="예: PET COLLAR 개발건" />
+                  </div>
+                  <div>
+                    <Label>요청 유형</Label>
+                    <select className="mt-1 h-10 w-full rounded border border-input bg-background px-3 text-sm" value={form.request_kind} onChange={(e)=>setField("request_kind",e.target.value)}><option value="PRICE">가격조사</option><option value="SAMPLE">샘플개발</option><option value="BOTH">가격조사 + 샘플개발</option></select>
                   </div>
                   <div>
                     <Label>Buyer</Label>
@@ -570,7 +591,11 @@ export default function SampleRequestsPage() {
                     <Input type="date" value={form.request_date} onChange={(e) => setField("request_date", e.target.value)} />
                   </div>
                   <div>
-                    <Label>Target Ship Date</Label>
+                    <Label>가격조사 / 개발 회신 목표일</Label>
+                    <Input type="date" value={form.due_date} onChange={(e)=>setField("due_date",e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Target Ship Date / 샘플 발송 목표일</Label>
                     <Input type="date" value={form.target_ship_date} onChange={(e) => setField("target_ship_date", e.target.value)} />
                   </div>
                   <div>
@@ -626,10 +651,12 @@ export default function SampleRequestsPage() {
                 </div>
 
                 <div className="flex gap-2">
-                  <Button type="button" onClick={save} disabled={isSaving}>{isSaving ? "Saving..." : "Save"}</Button>
-                  {form.id ? <Button type="button" variant="destructive" onClick={removeCurrent}>Delete</Button> : null}
+                  <Button type="button" onClick={save} disabled={isSaving || (form.id ? !canManage : !canCreate)}>{isSaving ? "Saving..." : "Save"}</Button>
+                  {form.id && canDelete ? <Button type="button" variant="destructive" onClick={removeCurrent}>Delete</Button> : null}
                   <Button type="button" variant="outline" onClick={onNew}>Reset</Button>
                 </div>
+                </fieldset>
+                </>}
               </CardContent>
             </Card>
           </div>

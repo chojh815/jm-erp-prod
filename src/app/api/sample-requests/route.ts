@@ -1,3 +1,5 @@
+import { sampleActor, requireSampleManagement } from "@/lib/sampleRequestAccess";
+import { isSampleManager } from "@/lib/sampleHistoryRules";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -137,13 +139,13 @@ function computeAlertStatus(row: any) {
   const today = new Date().toISOString().slice(0, 10);
   const resultStatus = normalizeResultStatus(row?.result_status);
   const status = normalizeProgressStatus(row?.status, resultStatus);
-  const targetShipDate = asDate(row?.target_ship_date);
+  const targetShipDate = asDate(row?.due_date) || asDate(row?.target_ship_date);
   const sentDate = asDate(row?.sent_date);
   const feedbackDate = asDate(row?.feedback_date);
   const nextFollowUpDate = asDate(row?.next_follow_up_date);
   const converted = asBool(row?.is_converted_to_order, false);
 
-  if (converted || resultStatus === "CONVERTED_TO_ORDER") return "DONE";
+  if (converted || resultStatus === "CONVERTED_TO_ORDER" || status === "COMPLETED") return "DONE";
   if (resultStatus === "CLOSED_NO_ORDER") return "DONE";
 
   if (status === "REQUESTED" || status === "DEVELOPING") {
@@ -200,6 +202,7 @@ function buildPayload(body: any) {
 
   return {
     request_title: asText(body.request_title) || null,
+    request_kind: ["SAMPLE","PRICE","BOTH"].includes(body.request_kind) ? body.request_kind : "SAMPLE",
     buyer_style_no: asText(body.buyer_style_no) || null,
     sample_type: asText(body.sample_type) || "New Sample",
     priority: asText(body.priority) || "Normal",
@@ -269,16 +272,17 @@ function buildPayload(body: any) {
 
 export async function GET(req: NextRequest) {
   try {
+    const actor = await sampleActor();
     const { searchParams } = new URL(req.url);
     const q = asText(searchParams.get("q")).toLowerCase();
     const buyerId = asText(searchParams.get("buyer_id"));
-    const rawProgressFilter = asText(searchParams.get("progress_status"));
+    const rawProgressFilter = asText(searchParams.get("progress_status") || searchParams.get("status"));
     const progressFilter = rawProgressFilter ? normalizeProgressStatus(rawProgressFilter) : "";
     const rawResultFilter = asText(searchParams.get("result_status"));
     const resultFilter = rawResultFilter ? normalizeResultStatus(rawResultFilter) : "";
     const alertFilter = asText(searchParams.get("alert_status")).toUpperCase();
-    const dateFrom = asDate(searchParams.get("date_from"));
-    const dateTo = asDate(searchParams.get("date_to"));
+    const dateFrom = asDate(searchParams.get("date_from") || searchParams.get("request_date_from"));
+    const dateTo = asDate(searchParams.get("date_to") || searchParams.get("request_date_to"));
 
     let query = supabaseAdmin
       .from("sample_requests")
@@ -287,9 +291,25 @@ export async function GET(req: NextRequest) {
       .order("request_date", { ascending: false })
       .order("created_at", { ascending: false });
 
+    if (!isSampleManager(actor.role)) {
+      const membership = await supabaseAdmin.from("sample_request_members").select("request_id").eq("user_id",actor.user.id);
+      if (membership.error) throw new Error(membership.error.message);
+      const clauses = [`owner_id.eq.${actor.user.id}`];
+      if (actor.user.email) {
+        const escapedEmail = actor.user.email.replace(/[%_\\]/g,(character: string) => "\\" + character);
+        clauses.push(`owner_email.ilike.${JSON.stringify(escapedEmail)}`);
+      }
+      const ids = (membership.data ?? []).map((r) => r.request_id);
+      if (ids.length) clauses.push(`id.in.(${ids.join(",")})`);
+      query = query.or(clauses.join(","));
+    }
     if (buyerId) query = query.eq("buyer_id", buyerId);
     if (dateFrom) query = query.gte("request_date", dateFrom);
     if (dateTo) query = query.lte("request_date", dateTo);
+    const shipFrom = asDate(searchParams.get("target_ship_date_from"));
+    const shipTo = asDate(searchParams.get("target_ship_date_to"));
+    if (shipFrom) query = query.gte("target_ship_date",shipFrom);
+    if (shipTo) query = query.lte("target_ship_date",shipTo);
 
     const { data, error, count } = await query.limit(500);
     if (error) return bad(error.message || "Failed to load sample requests", 500);
@@ -321,6 +341,11 @@ export async function GET(req: NextRequest) {
     if (alertFilter) {
       items = items.filter((r: any) => asText(r.alert_status).toUpperCase() === alertFilter);
     }
+    const quick = asText(searchParams.get("quick"));
+    if (quick === "OVERDUE") items = items.filter((r) => r.alert_status === "OVERDUE");
+    if (quick === "WAITING_FEEDBACK") items = items.filter((r) => ["WAITING_FEEDBACK","FOLLOW_UP_DUE"].includes(r.alert_status));
+    if (quick === "IN_PROGRESS") items = items.filter((r) => r.progress_status !== "COMPLETED");
+    if (quick === "COMPLETED") items = items.filter((r) => r.progress_status === "COMPLETED");
 
     const summary = {
       total_requests: items.length,
@@ -358,6 +383,9 @@ export async function GET(req: NextRequest) {
       .sort((a, b) => a.buyer_name.localeCompare(b.buyer_name));
 
     return ok({
+      canManage: isSampleManager(actor.role) && actor.permissions.includes("dev.sample_requests.edit"),
+      canCreate: isSampleManager(actor.role) && actor.permissions.includes("dev.sample_requests.create"),
+      canDelete: isSampleManager(actor.role) && actor.permissions.includes("dev.sample_requests.delete"),
       items,
       total: count ?? items.length,
       summary,
@@ -372,12 +400,13 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (e: any) {
-    return bad(e?.message || "Unknown error", 500);
+    return bad(e?.message || "Unknown error", e?.status ?? 500);
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const actor = await sampleActor(); requireSampleManagement(actor,"create");
     const body = await req.json();
     const payload = buildPayload(body);
 
@@ -423,6 +452,6 @@ export async function POST(req: NextRequest) {
       reason: "request_no_conflict",
     });
   } catch (e: any) {
-    return bad(e?.message || "Unknown error", 500);
+    return bad(e?.message || "Unknown error", e?.status ?? 500);
   }
 }

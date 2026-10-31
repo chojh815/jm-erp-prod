@@ -1,3 +1,4 @@
+import { sampleActor, sampleRequestAccess, requireSampleManagement } from "@/lib/sampleRequestAccess";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -69,6 +70,7 @@ function buildPayload(body: any) {
   if (result_status === "CONVERTED_TO_ORDER" || result_status === "CLOSED_NO_ORDER") status = "COMPLETED";
   return {
     request_title: asText(body.request_title) || null,
+    request_kind: ["SAMPLE","PRICE","BOTH"].includes(body.request_kind) ? body.request_kind : "SAMPLE",
     buyer_style_no: asText(body.buyer_style_no) || null,
     buyer_id: asText(body.buyer_id) || null,
     buyer_code: normalizeBuyerCode(body.buyer_code || body.buyer_name),
@@ -121,18 +123,20 @@ function buildPayload(body: any) {
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
-    const { data, error } = await supabaseAdmin.from("sample_requests").select("*").eq("id", id).eq("is_deleted", false).maybeSingle();
-    if (error) return bad(error.message || "Failed to load sample request", 500);
-    if (!data) return bad("Sample request not found", 404);
-    return ok({ item: normalizeRow(data) });
+    const actor = await sampleActor();
+    const item = await sampleRequestAccess(id,actor);
+    return ok({ item: normalizeRow(item) });
+
   } catch (e: any) {
-    return bad(e?.message || "Unknown error", 500);
+    return bad(e?.message || "Unknown error", e?.status ?? 500);
   }
 }
 
 export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
+    const actor = await sampleActor(); requireSampleManagement(actor);
+    await sampleRequestAccess(id,actor);
     const body = await req.json();
     const payload = buildPayload(body);
     const { data, error } = await supabaseAdmin
@@ -151,18 +155,20 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (!data) return bad("Sample request not found", 404);
     return ok({ item: normalizeRow(data) });
   } catch (e: any) {
-    return bad(e?.message || "Unknown error", 500);
+    return bad(e?.message || "Unknown error", e?.status ?? 500);
   }
 }
 
 export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
+    const actor = await sampleActor(); requireSampleManagement(actor,"delete");
+    await sampleRequestAccess(id,actor);
     const { data, error } = await supabaseAdmin.from("sample_requests").update({ is_deleted: true }).eq("id", id).eq("is_deleted", false).select("id").maybeSingle();
     if (error) return bad(error.message || "Failed to delete sample request", 500);
     if (!data) return bad("Sample request not found", 404);
     return ok({ id });
   } catch (e: any) {
-    return bad(e?.message || "Unknown error", 500);
+    return bad(e?.message || "Unknown error", e?.status ?? 500);
   }
 }

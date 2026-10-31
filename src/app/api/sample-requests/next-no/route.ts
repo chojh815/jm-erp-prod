@@ -1,3 +1,4 @@
+import { sampleActor } from "@/lib/sampleRequestAccess";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -27,6 +28,8 @@ async function generateNo(field: "request_no" | "temp_style_no", prefix: string)
 
 export async function GET(req: NextRequest) {
   try {
+
+    await sampleActor();
     const { searchParams } = new URL(req.url);
     const buyerCode = normalizeBuyerCode(searchParams.get("buyerCode"));
     const dateCode = yymmdd(searchParams.get("requestDate"));
@@ -51,7 +54,7 @@ export async function GET(req: NextRequest) {
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: e?.message || "Unknown error" },
-      { status: 500, headers: { "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0" } }
+      { status: e?.status ?? 500, headers: { "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0" } }
     );
   }
 }

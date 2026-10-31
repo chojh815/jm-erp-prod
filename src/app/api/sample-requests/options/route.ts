@@ -1,3 +1,4 @@
+import { sampleActor } from "@/lib/sampleRequestAccess";
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -83,6 +84,8 @@ function dedupe(rows: any[]) {
 
 export async function GET() {
   try {
+
+    await sampleActor();
     const attempts = [
       async () => supabaseAdmin.from("companies").select("*").eq("is_deleted", false).order("company_name", { ascending: true }).limit(1000),
       async () => supabaseAdmin.from("companies").select("*").order("company_name", { ascending: true }).limit(1000),
@@ -120,7 +123,7 @@ export async function GET() {
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, buyers: [], error: e?.message || String(e) },
-      { status: 500, headers: { "Cache-Control": "no-store, max-age=0" } }
+      { status: e?.status ?? 500, headers: { "Cache-Control": "no-store, max-age=0" } }
     );
   }
 }

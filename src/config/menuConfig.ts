@@ -78,7 +78,7 @@ export const MENU_SECTIONS: MenuSection[] = [
         perm: "dev.costings.view",
       },
       {
-       label: "Sample Requests",
+       label: "Development & Samples",
        href: "/sample-requests",
        perm: "dev.sample_requests.view",
       },
