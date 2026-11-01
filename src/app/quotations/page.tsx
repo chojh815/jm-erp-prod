@@ -1,5 +1,6 @@
 "use client";
 import React from "react";
+import QuotationPurgeDialog from "@/components/quotation/QuotationPurgeDialog";
 import { useRouter } from "next/navigation";
 export default function Quotations() {
   const router = useRouter(),
@@ -46,6 +47,21 @@ export default function Quotations() {
           method: archive ? "PATCH" : "DELETE",
           headers: { "Content-Type": "application/json" },
           body: archive ? JSON.stringify({ action: "restore" }) : undefined,
+        }),
+        j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function retryCleanup(id: string) {
+    setBusy(true);
+    try {
+      const r = await fetch("/api/quotations/" + id + "/purge-cleanup", {
+          method: "POST",
         }),
         j = await r.json();
       if (!r.ok) throw new Error(j.error);
@@ -109,6 +125,26 @@ export default function Quotations() {
           {error}
         </p>
       )}
+      {rights.purgeCleanupPending?.length > 0 && (
+        <div className="space-y-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+          <p>완전 삭제된 견적의 첨부파일 원본 정리가 남아 있습니다.</p>
+          {rights.purgeCleanupPending.map((item: any) => (
+            <div key={item.id} className="flex flex-wrap items-center gap-3">
+              <span>
+                {item.quotation_no} · 정리 대기 {item.pending}개
+              </span>
+              <button
+                type="button"
+                className="rounded border bg-white px-2 py-1"
+                disabled={busy}
+                onClick={() => void retryCleanup(item.id)}
+              >
+                첨부파일 정리 재시도
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -152,13 +188,21 @@ export default function Quotations() {
                 </td>
                 <td className="p-3">
                   {rights.canArchive && (
-                    <button
-                      className="rounded border px-2 py-1"
-                      disabled={busy}
-                      onClick={() => void toggle(r.id)}
-                    >
-                      {archive ? "Restore" : "Archive"}
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        className="rounded border px-2 py-1"
+                        disabled={busy}
+                        onClick={() => void toggle(r.id)}
+                      >
+                        {archive ? "Restore" : "Archive"}
+                      </button>
+                      <QuotationPurgeDialog
+                        id={r.id}
+                        quotationNo={r.quotation_no}
+                        disabled={busy}
+                        onDeleted={load}
+                      />
+                    </div>
                   )}
                 </td>
               </tr>

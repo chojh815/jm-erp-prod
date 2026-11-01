@@ -12,6 +12,7 @@ import {
   today,
   copyCosting,
 } from "@/lib/generalQuoteServer";
+import { pendingPurgeCleanups } from "@/lib/quotationPurge";
 
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
@@ -48,6 +49,9 @@ export async function GET(req: Request) {
       rows,
       canCreate: a.permissions.includes("dev.costings.create"),
       canArchive: a.permissions.includes("dev.costings.delete"),
+      purgeCleanupPending: a.permissions.includes("dev.costings.delete")
+        ? await pendingPurgeCleanups(a.user.id)
+        : [],
     });
   } catch (e) {
     return quoteFailure(e);

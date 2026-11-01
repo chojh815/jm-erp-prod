@@ -1,5 +1,6 @@
 "use client";
 import React from "react";
+import QuotationPurgeDialog from "./QuotationPurgeDialog";
 import { useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabaseClient";
 import {
@@ -347,7 +348,15 @@ export default function GeneralQuoteEditor({ id }: { id?: string }) {
               : "바이어용 오퍼 · 버전별 가격 보존"}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          {id && data?.canPurge && (
+            <QuotationPurgeDialog
+              id={id}
+              quotationNo={data.quotation.quotation_no}
+              disabled={busy || dirty}
+              onDeleted={() => router.push("/quotations")}
+            />
+          )}
           <button
             className="rounded border px-3 py-2"
             onClick={() => {

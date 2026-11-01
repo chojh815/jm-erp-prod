@@ -34,6 +34,7 @@ export async function GET(
       items: s.document.lines,
       canEdit: actor.permissions.includes("dev.costings.edit"),
       canCreate: actor.permissions.includes("dev.costings.create"),
+      canPurge: actor.permissions.includes("dev.costings.delete"),
     });
   } catch (e) {
     return quoteFailure(e);
