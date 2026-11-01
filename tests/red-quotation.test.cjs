@@ -22,6 +22,10 @@ class Query {
     this.filters.push((r) => r[k] === v);
     return this;
   }
+  in(k, values) {
+    this.filters.push((r) => values.includes(r[k]));
+    return this;
+  }
   is(k, v) {
     return this.eq(k, v);
   }

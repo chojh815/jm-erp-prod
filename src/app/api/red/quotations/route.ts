@@ -7,6 +7,7 @@ import {
   RedError,
 } from "@/lib/redQuoteServer";
 import { normalizeRedDocument } from "@/lib/redQuoteDocument";
+import { pendingPurgeCleanups } from "@/lib/redQuotationPurge";
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   try {
@@ -24,6 +25,9 @@ export async function GET(req: Request) {
     if (result.error) throw result.error;
     return redJson({
       data: result.data || [],
+      purgeCleanupPending: actor.permissions.includes("dev.costings.delete")
+        ? await pendingPurgeCleanups(actor.user.id)
+        : [],
       canCreate: actor.permissions.includes("dev.costings.create"),
       canArchive: actor.permissions.includes("dev.costings.delete"),
     });

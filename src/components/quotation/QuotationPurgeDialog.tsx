@@ -11,12 +11,14 @@ type Props = {
   quotationNo: string;
   disabled?: boolean;
   onDeleted: () => void | Promise<void>;
+  apiBase?: string;
 };
 export default function QuotationPurgeDialog({
   id,
   quotationNo,
   disabled,
   onDeleted,
+  apiBase = "/api/quotations",
 }: Props) {
   const [open, setOpen] = React.useState(false),
     [preview, setPreview] = React.useState<any>(null),
@@ -43,7 +45,7 @@ export default function QuotationPurgeDialog({
     setChecked(false);
     setError("");
     try {
-      const p = await request("/api/quotations/" + id + "/purge");
+      const p = await request(apiBase + "/" + id + "/purge");
       if (sequence !== previewSequence.current) return;
       setPreview(p);
     } catch (e: any) {
@@ -64,7 +66,7 @@ export default function QuotationPurgeDialog({
     setBusy(true);
     setError("");
     try {
-      const r = await request("/api/quotations/" + id + "/purge", {
+      const r = await request(apiBase + "/" + id + "/purge", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -76,7 +78,7 @@ export default function QuotationPurgeDialog({
       setResult(r);
       if (r.cleanup?.pending > 0) {
         try {
-          const c = await request("/api/quotations/" + id + "/purge-cleanup", {
+          const c = await request(apiBase + "/" + id + "/purge-cleanup", {
             method: "POST",
           });
           setResult({ ...r, cleanup: c.cleanup });
@@ -101,7 +103,7 @@ export default function QuotationPurgeDialog({
     submitting.current = true;
     setBusy(true);
     try {
-      const r = await request("/api/quotations/" + id + "/purge-cleanup", {
+      const r = await request(apiBase + "/" + id + "/purge-cleanup", {
         method: "POST",
       });
       setResult((previous: any) => ({ ...previous, cleanup: r.cleanup }));

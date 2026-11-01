@@ -1,6 +1,7 @@
 "use client";
 import * as React from "react";
 import { useParams, useRouter } from "next/navigation";
+import QuotationPurgeDialog from "@/components/quotation/QuotationPurgeDialog";
 import MatrixTab from "./tabs/matrix";
 import CompareDiffTab from "./tabs/compare-diff";
 export default function RedQuotationDetailPage() {
@@ -16,6 +17,7 @@ export default function RedQuotationDetailPage() {
     [style, setStyle] = React.useState(""),
     [title, setTitle] = React.useState(""),
     [tab, setTab] = React.useState<"matrix" | "compare">("matrix"),
+    [canPurge, setCanPurge] = React.useState(false),
     [canEdit, setCanEdit] = React.useState(false),
     [canCreate, setCanCreate] = React.useState(false);
   async function load() {
@@ -33,6 +35,7 @@ export default function RedQuotationDetailPage() {
       setStyle(j.data.quotation.style_no || "");
       setTitle(j.data.quotation.title || "");
       setCanEdit(j.data.canEdit);
+      setCanPurge(j.data.canPurge);
       setCanCreate(j.data.canCreate);
     } catch (e: any) {
       setErr(e.message);
@@ -133,6 +136,21 @@ export default function RedQuotationDetailPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          {q && canPurge && (
+            <QuotationPurgeDialog
+              apiBase="/api/red/quotations"
+              id={id}
+              quotationNo={q.red_quotation_no || id}
+              disabled={
+                busy ||
+                matrixDirty ||
+                style !== (q.style_no || "") ||
+                title !== (q.title || "") ||
+                shipFrom !== (q.ship_from_code || "")
+              }
+              onDeleted={() => router.push("/red/quotations")}
+            />
+          )}
           <button
             className="rounded border px-3 py-2 text-sm"
             onClick={() => {

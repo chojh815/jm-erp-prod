@@ -208,3 +208,49 @@ test("user may cancel a read-only eligibility check without deleting anything", 
   assert.equal(r.root.findAllByType("section").length, 0);
   r.unmount();
 });
+test("RED dialog uses RED preview and delete endpoints", async () => {
+  const urls = [];
+  global.fetch = async (url, init) => {
+    urls.push(url);
+    return response(
+      !init?.method
+        ? { ...eligible, quotation_no: "REDQ-2611-0001" }
+        : {
+            deleted: true,
+            quotation_no: "REDQ-2611-0001",
+            cleanup: { pending: 0 },
+          },
+    );
+  };
+  let r;
+  await act(async () => {
+    r = Renderer.create(
+      React.createElement(Component, {
+        id: Q,
+        quotationNo: "REDQ-2611-0001",
+        apiBase: "/api/red/quotations",
+        onDeleted: () => {},
+      }),
+    );
+  });
+  await act(async () => button(r, "테스트 견적 완전 삭제").props.onClick());
+  await act(async () =>
+    r.root
+      .findAllByType("input")
+      .find((i) => i.props.type !== "checkbox")
+      .props.onChange({ target: { value: "REDQ-2611-0001" } }),
+  );
+  await act(async () =>
+    r.root
+      .findAllByType("input")
+      .find((i) => i.props.type === "checkbox")
+      .props.onChange({ target: { checked: true } }),
+  );
+  await act(async () => button(r, "복구 불가 · 완전 삭제").props.onClick());
+  assert.deepEqual(urls, [
+    `/api/red/quotations/${Q}/purge`,
+    `/api/red/quotations/${Q}/purge`,
+  ]);
+  assert.ok(JSON.stringify(r.toJSON()).includes("견적 삭제 완료"));
+  r.unmount();
+});

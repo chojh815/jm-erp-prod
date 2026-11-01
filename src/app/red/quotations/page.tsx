@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import QuotationPurgeDialog from "@/components/quotation/QuotationPurgeDialog";
 import { useRouter } from "next/navigation";
 
 type Row = {
@@ -24,6 +25,7 @@ export default function RedQuotationsListPage() {
 
   const [archived, setArchived] = React.useState(false);
   const [canCreate, setCanCreate] = React.useState(false);
+  const [cleanupPending, setCleanupPending] = React.useState<any[]>([]);
   const [canArchive, setCanArchive] = React.useState(false);
   const [rows, setRows] = React.useState<Row[]>([]);
   const [loading, setLoading] = React.useState(false);
@@ -46,6 +48,7 @@ export default function RedQuotationsListPage() {
       setRows((j as any).data || []);
       setCanCreate(j.canCreate === true);
       setCanArchive(j.canArchive === true);
+      setCleanupPending(j.purgeCleanupPending || []);
     } catch (e: any) {
       setErr(e?.message || "Failed");
     } finally {
@@ -58,6 +61,22 @@ export default function RedQuotationsListPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [archived]);
 
+  async function retryCleanup(id: string) {
+    setLoading(true);
+    setErr(null);
+    try {
+      const r = await fetch("/api/red/quotations/" + id + "/purge-cleanup", {
+          method: "POST",
+        }),
+        j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      await load();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
   async function create() {
     setLoading(true);
     setErr(null);
@@ -173,6 +192,25 @@ export default function RedQuotationsListPage() {
 
       {err ? <div className="text-sm text-red-600">{err}</div> : null}
 
+      {cleanupPending.length > 0 && (
+        <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+          <p>삭제된 RED 견적의 이미지 원본 정리가 남아 있습니다.</p>
+          {cleanupPending.map((item) => (
+            <div key={item.id} className="mt-2 flex gap-3 items-center">
+              <span>
+                {item.quotation_no} · 정리 대기 {item.pending}개
+              </span>
+              <button
+                className="rounded border bg-white px-2 py-1"
+                disabled={loading}
+                onClick={() => void retryCleanup(item.id)}
+              >
+                이미지 정리 재시도
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="border rounded-lg overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-muted">
@@ -201,19 +239,33 @@ export default function RedQuotationsListPage() {
                 <td className="p-2">{r.title || "-"}</td>
                 <td className="p-2">{r.status}</td>
                 <td className="p-2">{fmtDate(r.updated_at)}</td>
-                <td className="p-2 text-right">
-                  <button
-                    className="px-2 py-1 text-xs border rounded hover:bg-gray-50 disabled:opacity-50"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      deleteOne(r.id);
-                    }}
-                    title={archived ? "견적 복원" : "견적과 이력 보관"}
-                    disabled={!canArchive || loading}
-                  >
-                    {archived ? "Restore" : "Archive"}
-                  </button>
+                <td
+                  className="p-2 text-right"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex justify-end flex-wrap gap-2">
+                    <button
+                      className="px-2 py-1 text-xs border rounded hover:bg-gray-50 disabled:opacity-50"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        deleteOne(r.id);
+                      }}
+                      title={archived ? "견적 복원" : "견적과 이력 보관"}
+                      disabled={!canArchive || loading}
+                    >
+                      {archived ? "Restore" : "Archive"}
+                    </button>
+                    {canArchive && (
+                      <QuotationPurgeDialog
+                        apiBase="/api/red/quotations"
+                        id={r.id}
+                        quotationNo={r.red_quotation_no || r.id}
+                        disabled={loading}
+                        onDeleted={load}
+                      />
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}

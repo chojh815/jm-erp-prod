@@ -28,6 +28,7 @@ export async function GET(_: Request, { params }: { params: { id: string } }) {
           ...r,
           version_key: "v" + r.version_no,
         })),
+        canPurge: actor.permissions.includes("dev.costings.delete"),
         canEdit: actor.permissions.includes("dev.costings.edit"),
         canCreate: actor.permissions.includes("dev.costings.create"),
       },
