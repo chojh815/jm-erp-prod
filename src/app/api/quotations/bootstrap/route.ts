@@ -1,3 +1,4 @@
+import { quoteActor, quoteFailure } from "@/lib/generalQuoteServer";
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -23,6 +24,7 @@ function upper(v: any) {
  */
 export async function GET() {
   try {
+    const actor = await quoteActor();
     const sb = supabaseAdmin;
 
     const { data, error } = await sb
@@ -32,45 +34,59 @@ export async function GET() {
 
     if (error) throw new Error(error.message);
 
-    const buyers =
-      (data ?? [])
-        .filter((r: any) => {
-          const t =
-            upper(r.company_type) ||
-            upper(r.type) ||
-            upper(r.company_category) ||
-            upper(r.category) ||
-            upper(r.role);
+    const buyers = (data ?? [])
+      .filter((r: any) => {
+        const t =
+          upper(r.company_type) ||
+          upper(r.type) ||
+          upper(r.company_category) ||
+          upper(r.category) ||
+          upper(r.role);
 
-          const isExplicitBuyer = t.includes("BUYER") || t.includes("CUSTOMER") || t.includes("CLIENT");
-          const isExplicitNonBuyer = t.includes("VENDOR") || t.includes("FACTORY") || t.includes("SUPPLIER");
+        const isExplicitBuyer =
+          t.includes("BUYER") || t.includes("CUSTOMER") || t.includes("CLIENT");
+        const isExplicitNonBuyer =
+          t.includes("VENDOR") ||
+          t.includes("FACTORY") ||
+          t.includes("SUPPLIER");
 
-          const hasBuyerHints = !!(r.buyer_brand || r.buyer_dept);
+        const hasBuyerHints = !!(r.buyer_brand || r.buyer_dept);
 
-          const code = (r.code ?? "").toString().trim();
-          const isInternal = upper(code).startsWith("JMI");
+        const code = (r.code ?? "").toString().trim();
+        const isInternal = upper(code).startsWith("JMI");
 
-          // If explicit non-buyer => exclude
-          if (isExplicitNonBuyer) return false;
+        // If explicit non-buyer => exclude
+        if (isExplicitNonBuyer) return false;
 
-          // If explicit buyer => include (unless internal)
-          if (isExplicitBuyer) return !isInternal;
+        // If explicit buyer => include (unless internal)
+        if (isExplicitBuyer) return !isInternal;
 
-          // Otherwise fallback: include only rows that look like buyers
-          if (hasBuyerHints) return !isInternal;
+        // Otherwise fallback: include only rows that look like buyers
+        if (hasBuyerHints) return !isInternal;
 
-          return false;
-        })
-        .map((r: any) => ({
-          id: r.id,
-          code: (r.code ?? "").toString(),
-          name: (r.company_name ?? r.name ?? r.company_name_en ?? r.company_name_kr ?? "").toString(),
-          buyer_brand: (r.buyer_brand ?? null) as string | null,
-        }))
-        .filter((b: any) => b.id && b.code && b.name);
+        return false;
+      })
+      .map((r: any) => ({
+        id: r.id,
+        code: (r.code ?? "").toString(),
+        name: (
+          r.company_name ??
+          r.name ??
+          r.company_name_en ??
+          r.company_name_kr ??
+          ""
+        ).toString(),
+        buyer_brand: (r.buyer_brand ?? null) as string | null,
+      }))
+      .filter((b: any) => b.id && b.code && b.name);
 
-    return NextResponse.json({ success: true, buyers });
+    return NextResponse.json({
+      success: true,
+      buyers,
+      canCreate: actor.permissions.includes("dev.costings.create"),
+      canEdit: actor.permissions.includes("dev.costings.edit"),
+    });
   } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+    return quoteFailure(e);
   }
 }

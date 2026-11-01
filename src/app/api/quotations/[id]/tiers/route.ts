@@ -1,42 +1,25 @@
-import { NextResponse } from "next/server";
-import { createSupabaseServerClient } from "../../_supabase";
-
-/**
- * PUT /api/quotations/[id]/tiers
- * Body: { updates: Array<{ tier_id: string, unit_price: number }> }
- *
- * ✅ IMPORTANT:
- * - quotation_item_tiers has only unit_price (no unit_price_usd in your DB).
- * - So we update ONLY unit_price.
- */
-
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
-  const supabase = createSupabaseServerClient();
-  const body = await req.json().catch(() => ({}));
-  const updates = Array.isArray(body?.updates) ? body.updates : [];
-
-  if (!updates.length) {
-    return NextResponse.json({ success: false, error: "updates is required" }, { status: 400 });
+import {
+  quoteActor,
+  quoteJson,
+  quoteFailure,
+  readQuote,
+  prepareQuote,
+  resolveBuyer,
+  writeQuote,
+  db,
+  checkDb,
+  QuoteError,
+  today,
+  copyCosting,
+} from "@/lib/generalQuoteServer";
+export async function PUT() {
+  try {
+    await quoteActor("edit");
+    throw new QuoteError(
+      "새로고침 후 견적 전체와 MOQ를 함께 저장해 주세요. 기존 자료는 변경하지 않았습니다.",
+      409,
+    );
+  } catch (e) {
+    return quoteFailure(e);
   }
-
-  const payload = updates
-    .map((u: any) => ({ id: u?.tier_id, unit_price: Number(u?.unit_price) }))
-    .filter((x: any) => x.id && Number.isFinite(x.unit_price));
-
-  if (!payload.length) {
-    return NextResponse.json({ success: false, error: "No valid updates" }, { status: 400 });
-  }
-
-  for (const p of payload) {
-    const { error } = await supabase
-      .from("quotation_item_tiers")
-      .update({ unit_price: p.unit_price })
-      .eq("id", p.id);
-
-    if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
-    }
-  }
-
-  return NextResponse.json({ success: true });
 }

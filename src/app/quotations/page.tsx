@@ -1,345 +1,181 @@
-'use client';
-
-import * as React from "react";
+"use client";
+import React from "react";
 import { useRouter } from "next/navigation";
-
-type Row = {
-  id: string;
-  updated_at: string | null;
-  status: string | null;
-  quotation_no: string | null;
-  buyer: string | null;
-  brand: string | null;
-  style_no: string | null;
-  lines: number | null;
-  sent: any;
-};
-
-function fmtDate(s: string | null) {
-  if (!s) return "";
-  try {
-    const d = new Date(s);
-    return d.toISOString().slice(0, 10);
-  } catch {
-    return "";
-  }
-}
-
-async function safeJson(res: Response): Promise<any> {
-  const text = await res.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
-  }
-}
-
-export default function QuotationsListPage() {
-  const router = useRouter();
-
-  const [q, setQ] = React.useState("");
-  const [styleNo, setStyleNo] = React.useState("");
-  const [loading, setLoading] = React.useState(false);
-  const [creating, setCreating] = React.useState(false);
-  const [deletingId, setDeletingId] = React.useState<string | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const [rows, setRows] = React.useState<Row[]>([]);
-
+export default function Quotations() {
+  const router = useRouter(),
+    [rows, setRows] = React.useState<any[]>([]),
+    [q, setQ] = React.useState(""),
+    [archive, setArchive] = React.useState(false),
+    [busy, setBusy] = React.useState(false),
+    [error, setError] = React.useState(""),
+    [rights, setRights] = React.useState<any>({});
   async function load() {
-    setLoading(true);
-    setError(null);
+    setBusy(true);
     try {
-      const res = await fetch(`/api/quotations/list?q=${encodeURIComponent(q)}`, { cache: "no-store" });
-      const j = await safeJson(res);
-      const ok = !!(j?.ok ?? j?.success);
-      if (!res.ok || !ok) throw new Error(j?.error || j?.message || `Failed (${res.status})`);
-      setRows(j.rows ?? []);
+      const r = await fetch(
+          "/api/quotations/list?" +
+            new URLSearchParams({ q, archived: archive ? "1" : "0" }),
+          { cache: "no-store" },
+        ),
+        j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      setRows(j.rows);
+      setRights(j);
+      setError("");
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      setError(e.message);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
-
   React.useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function createFromCosting() {
-    setCreating(true);
-    setError(null);
+    void load();
+  }, [archive]);
+  async function toggle(id: string) {
+    if (
+      !window.confirm(
+        archive
+          ? "이 견적을 복원하시겠습니까?"
+          : "이 견적과 이력을 보관하시겠습니까?",
+      )
+    )
+      return;
+    setBusy(true);
     try {
-      const input = styleNo.trim();
-      if (!input) {
-        setError("Enter Style No (recommended) or Costing ID.");
-        return;
-      }
-
-      const isUuid =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input);
-
-      const payload = isUuid ? { costing_id: input } : { style_no: input };
-
-      const res = await fetch("/api/quotations/create-from-costing", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const j = await safeJson(res);
-      const ok = !!(j?.ok ?? j?.success);
-      if (!res.ok || !ok) throw new Error(j?.error || j?.message || `Failed (${res.status})`);
-      const id = (j?.quotation_id || j?.id || j?.quotationId) as string;
-      if (id) router.push(`/quotations/${id}`);
-      else await load();
+      const r = await fetch("/api/quotations/" + id, {
+          method: archive ? "PATCH" : "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: archive ? JSON.stringify({ action: "restore" }) : undefined,
+        }),
+        j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      await load();
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      setError(e.message);
     } finally {
-      setCreating(false);
+      setBusy(false);
     }
   }
-
-  async function deleteQuotation(id: string) {
-    const confirmed = window.confirm("Delete this quotation? (soft delete)");
-    if (!confirmed) return;
-
-    setDeletingId(id);
-    setError(null);
-    try {
-      const res = await fetch("/api/quotations/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      });
-      const j = await safeJson(res);
-      const ok = !!(j?.ok ?? j?.success);
-      if (!res.ok || !ok) throw new Error(j?.error || j?.message || `Failed (${res.status})`);
-
-      setRows((prev) => (prev ?? []).filter((r) => r.id !== id));
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
-    } finally {
-      setDeletingId(null);
-    }
-  }
-
   return (
-    <div style={{ padding: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 12 }}>
+    <main className="space-y-4 p-6">
+      <div className="flex justify-between">
         <div>
-          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: -0.2 }}>Quotations</div>
-          <div style={{ color: "#6b7280", fontSize: 13 }}>List</div>
+          <h1 className="text-2xl font-semibold">Quotations</h1>
+          <p className="text-sm text-muted-foreground">
+            바이어별 오퍼 · 수정본 · 발송 이력
+          </p>
         </div>
-        <button
-          onClick={() => load()}
-          style={{
-            padding: "8px 12px",
-            borderRadius: 10,
-            background: "#2563eb",
-            color: "white",
-            border: "none",
-            fontWeight: 700,
-            fontSize: 13,
+        {rights.canCreate && (
+          <button
+            className="rounded bg-blue-600 px-4 py-2 text-sm text-white"
+            disabled={archive}
+            onClick={() => router.push("/quotations/new")}
+          >
+            New Quotation
+          </button>
+        )}
+      </div>
+      <div className="flex gap-3">
+        <input
+          className="rounded border bg-background px-3 py-2 text-sm"
+          placeholder="견적번호 · 바이어 · 제목 · 스타일"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void load();
           }}
-          disabled={loading}
+        />
+        <button
+          className="rounded border px-3 py-2 text-sm"
+          disabled={busy}
+          onClick={() => void load()}
         >
-          Refresh
+          Search / Refresh
         </button>
-      </div>
-
-      <div
-        style={{
-          background: "white",
-          border: "1px solid #e5e7eb",
-          borderRadius: 14,
-          padding: 14,
-          marginBottom: 14,
-        }}
-      >
-        <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>Search</div>
-
-        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <label className="flex items-center gap-2 text-sm">
           <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search quotation / buyer / brand / subject / status..."
-            style={{
-              flex: 1,
-              minWidth: 260,
-              height: 36,
-              borderRadius: 10,
-              border: "1px solid #e5e7eb",
-              padding: "0 12px",
-              fontSize: 13,
-              outline: "none",
-            }}
-          />
-          <button
-            onClick={() => load()}
-            style={{
-              height: 36,
-              padding: "0 14px",
-              borderRadius: 10,
-              background: "#2563eb",
-              color: "white",
-              border: "none",
-              fontWeight: 800,
-              fontSize: 13,
-            }}
-            disabled={loading}
-          >
-            Apply
-          </button>
-        </div>
-
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <input
-            value={styleNo}
-            onChange={(e) => setStyleNo(e.target.value)}
-            placeholder="Style No (recommended) or Costing ID"
-            style={{
-              flex: 1,
-              minWidth: 260,
-              height: 36,
-              borderRadius: 10,
-              border: "1px solid #e5e7eb",
-              padding: "0 12px",
-              fontSize: 13,
-              outline: "none",
-            }}
-          />
-          <button
-            onClick={() => createFromCosting()}
-            style={{
-              height: 36,
-              padding: "0 14px",
-              borderRadius: 10,
-              background: "#2563eb",
-              color: "white",
-              border: "none",
-              fontWeight: 800,
-              minWidth: 170,
-              fontSize: 13,
-              opacity: creating ? 0.75 : 1,
-            }}
-            disabled={creating}
-            title="Create & Open"
-          >
-            + New (from Costing)
-          </button>
-        </div>
-
-        {error ? (
-          <div
-            style={{
-              marginTop: 10,
-              background: "#fee2e2",
-              border: "1px solid #fecaca",
-              color: "#b91c1c",
-              padding: 10,
-              borderRadius: 10,
-              fontWeight: 700,
-              fontSize: 13,
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {error}
-          </div>
-        ) : null}
-
-        <div style={{ marginTop: 10, color: "#6b7280", fontSize: 12 }}>
-          Tip: Quotations should be "snapshots". Costing can change, but a SENT quotation stays stable unless you explicitly update from a newer costing version.
-        </div>
+            type="checkbox"
+            checked={archive}
+            onChange={(e) => setArchive(e.target.checked)}
+          />{" "}
+          보관함
+        </label>
       </div>
-
-      <div style={{ background: "white", border: "1px solid #e5e7eb", borderRadius: 14, overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+      {error && (
+        <p
+          role="alert"
+          className="rounded border border-red-200 p-3 text-sm text-red-700"
+        >
+          {error}
+        </p>
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
           <thead>
-            <tr style={{ background: "#f9fafb", color: "#6b7280", fontSize: 12 }}>
-              <th style={{ textAlign: "left", padding: 10, width: 110 }}>Updated</th>
-              <th style={{ textAlign: "left", padding: 10, width: 90 }}>Status</th>
-              <th style={{ textAlign: "left", padding: 10 }}>Quotation No</th>
-              <th style={{ textAlign: "left", padding: 10 }}>Buyer</th>
-              <th style={{ textAlign: "left", padding: 10 }}>Brand</th>
-              <th style={{ textAlign: "center", padding: 10, width: 70 }}>Lines</th>
-              <th style={{ textAlign: "center", padding: 10, width: 60 }}>Sent</th>
-              <th style={{ textAlign: "right", padding: 10, width: 190 }}>Actions</th>
+            <tr className="bg-muted">
+              {[
+                "No",
+                "Buyer",
+                "Subject",
+                "Style",
+                "Status",
+                "Updated",
+                "Action",
+              ].map((h) => (
+                <th className="p-3 text-left" key={h}>
+                  {h}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {(rows ?? []).map((r) => {
-              const sent = r.sent === true || r.sent === "Y" || r.sent === "y" || r.sent === 1;
-              return (
-                <tr key={r.id} style={{ borderTop: "1px solid #eef2f7" }}>
-                  <td style={{ padding: 10 }}>{fmtDate(r.updated_at)}</td>
-                  <td style={{ padding: 10 }}>
-                    <span
-                      style={{
-                        padding: "3px 9px",
-                        borderRadius: 999,
-                        background: "#eef2ff",
-                        color: "#111827",
-                        fontSize: 11,
-                        fontWeight: 800,
-                      }}
+            {rows.map((r) => (
+              <tr key={r.id} className="border-t">
+                <td className="p-3">
+                  <button
+                    className="text-blue-700 underline"
+                    onClick={() => router.push("/quotations/" + r.id)}
+                  >
+                    {r.quotation_no}
+                  </button>
+                </td>
+                <td className="p-3">{r.buyer_name || "—"}</td>
+                <td className="p-3">{r.subject || "—"}</td>
+                <td className="p-3">{r.style_no || "—"}</td>
+                <td className="p-3">{r.status}</td>
+                <td className="p-3">
+                  {r.updated_at
+                    ? new Date(r.updated_at).toLocaleString("ko-KR", {
+                        timeZone: "Asia/Seoul",
+                      })
+                    : "—"}
+                </td>
+                <td className="p-3">
+                  {rights.canArchive && (
+                    <button
+                      className="rounded border px-2 py-1"
+                      disabled={busy}
+                      onClick={() => void toggle(r.id)}
                     >
-                      {r.status ?? "DRAFT"}
-                    </span>
-                  </td>
-                  <td style={{ padding: 10, fontWeight: 800 }}>{r.quotation_no ?? "-"}</td>
-                  <td style={{ padding: 10 }}>{r.buyer ?? "-"}</td>
-                  <td style={{ padding: 10 }}>{r.brand ?? "-"}</td>
-                  <td style={{ padding: 10, textAlign: "center" }}>{r.lines ?? 0}</td>
-                  <td style={{ padding: 10, textAlign: "center" }}>{sent ? "Y" : ""}</td>
-                  <td style={{ padding: 10, textAlign: "right" }}>
-                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                      <button
-                        onClick={() => router.push(`/quotations/${r.id}`)}
-                        style={{
-                          padding: "7px 12px",
-                          borderRadius: 10,
-                          background: "#2563eb",
-                          color: "white",
-                          border: "none",
-                          fontWeight: 800,
-                          fontSize: 13,
-                        }}
-                      >
-                        Open
-                      </button>
-                      <button
-                        onClick={() => deleteQuotation(r.id)}
-                        style={{
-                          padding: "7px 12px",
-                          borderRadius: 10,
-                          background: "#fee2e2",
-                          color: "#b91c1c",
-                          border: "1px solid #fecaca",
-                          fontWeight: 900,
-                          fontSize: 13,
-                          opacity: deletingId === r.id ? 0.6 : 1,
-                        }}
-                        disabled={deletingId === r.id}
-                        title="Soft delete"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {!loading && (!rows || rows.length === 0) ? (
-              <tr>
-                <td colSpan={8} style={{ padding: 14, color: "#6b7280", fontSize: 13 }}>
-                  No quotations.
+                      {archive ? "Restore" : "Archive"}
+                    </button>
+                  )}
                 </td>
               </tr>
-            ) : null}
+            ))}
+            {!rows.length && (
+              <tr>
+                <td
+                  colSpan={7}
+                  className="p-6 text-center text-muted-foreground"
+                >
+                  {busy ? "불러오는 중…" : "견적이 없습니다."}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
-    </div>
+    </main>
   );
 }

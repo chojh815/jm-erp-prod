@@ -1,65 +1,34 @@
-// src/app/api/quotations/brands/route.ts
-import { NextResponse } from "next/server";
-import { createSupabaseServerClient } from "../../_supabase";
-
-export const dynamic = "force-dynamic";
-
-function uniqSortedStrings(arr: any[]): string[] {
-  const set = new Set<string>();
-  for (const v of arr || []) {
-    const s = (v ?? "").toString().trim();
-    if (s) set.add(s);
-  }
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
-}
-
-/**
- * GET /api/quotations/brands
- * Optional query:
- * - buyer_id: filter by buyer
- * - q: keyword filter (contains)
- *
- * Returns: string[] (brand names)
- */
+import {
+  quoteActor,
+  quoteJson,
+  quoteFailure,
+  db,
+  checkDb,
+} from "@/lib/generalQuoteServer";
 export async function GET(req: Request) {
   try {
-    const supabase = createSupabaseServerClient();
-
-    const url = new URL(req.url);
-    const buyerId = (url.searchParams.get("buyer_id") || "").trim();
-    const q = (url.searchParams.get("q") || "").trim().toLowerCase();
-
-    // We try to read brand from quotation_headers first.
-    // Many schemas store it as buyer_brand_name or brand_name etc.
-    let query = supabase
+    await quoteActor();
+    const p = new URL(req.url).searchParams;
+    let q = db
       .from("quotation_headers")
-      .select("buyer_brand_name, brand_name, brand, buyer_brand")
+      .select("buyer_brand_name,buyer_brand,brand")
+      .is("archived_at", null)
       .limit(5000);
-
-    if (buyerId) query = query.eq("buyer_id", buyerId);
-
-    const { data, error } = await query;
-    if (error) throw error;
-
-    const candidates: string[] = [];
-    for (const row of data || []) {
-      candidates.push(
-        (row as any)?.buyer_brand_name,
-        (row as any)?.brand_name,
-        (row as any)?.brand,
-        (row as any)?.buyer_brand
-      );
-    }
-
-    let brands = uniqSortedStrings(candidates);
-
-    if (q) {
-      brands = brands.filter((b) => b.toLowerCase().includes(q));
-    }
-
-    return NextResponse.json({ ok: true, brands });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+    if (p.get("buyer_id")) q = q.eq("buyer_id", p.get("buyer_id"));
+    const rows = checkDb(await q) || [],
+      term = (p.get("q") || "").toLowerCase();
+    const brands = [
+      ...new Set<string>(
+        rows
+          .flatMap((r: any) => [r.buyer_brand_name, r.buyer_brand, r.brand])
+          .filter(Boolean)
+          .map((x: any) => String(x).trim()),
+      ),
+    ]
+      .filter((x) => x.toLowerCase().includes(term))
+      .sort();
+    return quoteJson({ brands });
+  } catch (e) {
+    return quoteFailure(e);
   }
 }
-
