@@ -10,9 +10,8 @@ function okResponse(data: any = {}, status = 200) {
   return NextResponse.json({ success: true, ...data }, { status });
 }
 
-function cleanSitePayload(savedCompanyId: string, site: any, nowIso: string) {
+function cleanSitePayload(site: any, nowIso: string) {
   return {
-    company_id: savedCompanyId,
     site_name: site.siteName,
     origin_code: site.originCode,
     country: site.country,
@@ -225,7 +224,6 @@ export async function POST(req: NextRequest) {
     if (!savedCompanyId) {
       return errorResponse("Failed to get company id after save.", 500);
     }
-    const companyIdForSites = savedCompanyId;
 
     // ==============
     // company_sites 처리 (our_company 인 경우만)
@@ -236,42 +234,19 @@ export async function POST(req: NextRequest) {
         .filter((s) => (s.siteName ?? "").trim().length > 0)
         .map((s) => ({
           id: typeof s.id === "string" && s.id.trim() && !s.id.startsWith("temp-") ? s.id.trim() : null,
-          ...cleanSitePayload(companyIdForSites, s, nowIso),
+          ...cleanSitePayload(s, nowIso),
         }));
 
-      for (const site of cleanSites) {
-        if (site.id) {
-          const { id: siteId, ...patch } = site;
-          const { data: updated, error: upErr } = await supabaseAdmin
-            .from("company_sites")
-            .update(patch)
-            .eq("id", siteId)
-            .eq("company_id", companyIdForSites)
-            .select("id")
-            .maybeSingle();
-
-          if (upErr) {
-            console.error("UPDATE company_sites error:", upErr);
-            return errorResponse(`Failed to update company site: ${upErr.message}`, 500);
-          }
-          if (!updated?.id) {
-            return errorResponse("Company site not found.", 404);
-          }
-        } else {
-          const { id: _id, ...insertRow } = site;
-          const { data: inserted, error: insErr } = await supabaseAdmin
-            .from("company_sites")
-            .insert({ ...insertRow, created_at: nowIso })
-            .select("id")
-            .maybeSingle();
-
-          if (insErr) {
-            console.error("INSERT company_sites error:", insErr);
-            return errorResponse(`Failed to insert company site: ${insErr.message}`, 500);
-          }
-          if (!inserted?.id) {
-            return errorResponse("Failed to insert company site.", 500);
-          }
+      if (cleanSites.length > 0) {
+        const { error } = await supabaseAdmin.rpc("save_company_sites", {
+          p_company_id: savedCompanyId,
+          p_sites: cleanSites,
+        });
+        if (error) {
+          console.error("Save company sites error:", error);
+          if (error.code === "P0002") return errorResponse(error.message, 404);
+          if (error.code === "22023") return errorResponse(error.message, 400);
+          return errorResponse("Failed to save company sites.", 500);
         }
       }
     }
