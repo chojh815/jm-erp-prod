@@ -102,6 +102,28 @@ class Query {
     this.filters.push((r) => r[k] === v);
     return this;
   }
+  in(k, values) {
+    this.filters.push((r) => values.includes(r[k]));
+    return this;
+  }
+  or() {
+    this.filters.push((r) => !r.is_deleted);
+    return this;
+  }
+  range(from, to) {
+    this.from = from;
+    this.to = to;
+    return this;
+  }
+  ilike(k, pattern) {
+    const term = pattern.slice(1, -1).replace(/\\/g, "").toLowerCase();
+    this.filters.push((r) =>
+      String(r[k] || "")
+        .toLowerCase()
+        .includes(term),
+    );
+    return this;
+  }
   gte(k, v) {
     this.filters.push((r) => r[k] >= v);
     return this;
@@ -141,9 +163,10 @@ class Query {
         resolve,
         reject,
       );
-    const rows = (tables[this.table] || []).filter((r) =>
+    let rows = (tables[this.table] || []).filter((r) =>
       this.filters.every((f) => f(r)),
     );
+    if (this.from !== undefined) rows = rows.slice(this.from, this.to + 1);
     if (this.patch) rows.forEach((r) => Object.assign(r, this.patch));
     if (this.action === "delete")
       tables[this.table] = (tables[this.table] || []).filter(
@@ -162,6 +185,9 @@ const db = {
     return rpcResult;
   },
 };
+const orders = load("src/lib/redBatchOrders.ts", {
+  "@/lib/supabaseAdmin": { supabaseAdmin: db },
+});
 const route = load("src/app/api/production-batches/route.ts", {
   "next/server": {
     NextResponse: {
@@ -181,6 +207,7 @@ const route = load("src/app/api/production-batches/route.ts", {
   },
   "@/lib/supabaseAdmin": { supabaseAdmin: db },
   "@/lib/redBatchCode": rules,
+  "@/lib/redBatchOrders": orders,
 });
 const payload = (overrides = {}) => ({
   sku_code: " abc-100 ",
@@ -198,6 +225,11 @@ function fixture() {
   missing = false;
   legacyError = null;
   tables = {
+    companies: [{ id: U, company_type: "buyer", code: "RBK" }],
+    po_headers: [{ id: Q, po_no: "PO-1", buyer_id: U, is_deleted: false }],
+    po_lines: [
+      { id: U, po_header_id: Q, buyer_style_no: "ABC-100", is_deleted: false },
+    ],
     production_batches: [
       {
         id: Q,
@@ -317,4 +349,159 @@ test("PostgREST composite RPC responses return the saved row to the screen", asy
   const r = await route.POST(req(payload()));
   assert.equal(r.status, 200);
   assert.equal(r.body.row.id, Q);
+});
+const options = load("src/app/api/production-batches/options/route.ts", {
+  "next/server": {
+    NextResponse: {
+      json: (body, options) => ({ body, status: options?.status || 200 }),
+    },
+  },
+  "@/lib/apiIdentity": {
+    getApiIdentity: async () => {
+      if (!identity)
+        throw Object.assign(new Error("Not authenticated"), { status: 401 });
+      return identity;
+    },
+  },
+  "@/lib/redBatchCode": rules,
+  "@/lib/redBatchOrders": orders,
+});
+test("PO options are restricted to active RED buyer orders, including code RBK", async () => {
+  fixture();
+  tables.po_headers.push(
+    { id: U, po_no: "OTHER-PO", buyer_id: Q, is_deleted: false },
+    { id: "deleted", po_no: "DELETED-PO", buyer_id: U, is_deleted: true },
+  );
+  const r = await options.GET(new Request("http://test"));
+  assert.equal(r.status, 200);
+  assert.deepEqual(
+    r.body.rows.map((row) => row.po_no),
+    ["PO-1"],
+  );
+  assert.equal(r.body.hasMore, false);
+});
+test("lookup rejects anonymous users, foreign buyer PO ids and invalid search ranges", async () => {
+  fixture();
+  identity = null;
+  assert.equal((await options.GET(new Request("http://test"))).status, 401);
+  identity = { user: { id: U }, permissions: [] };
+  assert.equal((await options.GET(new Request("http://test"))).status, 403);
+  fixture();
+  for (const suffix of ["?po_id=bad", "?offset=-1", "?offset=0.5"])
+    assert.equal(
+      (await options.GET(new Request("http://test" + suffix))).status,
+      400,
+    );
+  tables.po_headers[0].buyer_id = Q;
+  assert.equal(
+    (await options.GET(new Request("http://test?po_id=" + Q))).status,
+    404,
+  );
+});
+test("PO item selection includes color and UPC, and falls back to buyer style for old lines", async () => {
+  fixture();
+  tables.po_lines.push(
+    {
+      id: Q,
+      po_header_id: Q,
+      buyer_style_no: "COLOR-1",
+      upc: "649674154932",
+      color: "Black",
+      size: "Large",
+      description: "Clip",
+      is_deleted: null,
+    },
+    {
+      id: "deleted",
+      po_header_id: Q,
+      buyer_style_no: "REMOVED",
+      is_deleted: true,
+    },
+  );
+  const r = await options.GET(new Request("http://test?po_id=" + Q));
+  assert.equal(r.status, 200);
+  assert.equal(r.body.rows.length, 2);
+  assert.equal(r.body.rows[0].sku_code, "ABC-100");
+  assert.equal(r.body.rows[1].sku_code, "649674154932");
+  assert.equal(r.body.rows[1].color, "Black");
+});
+test("PO pagination provides later orders instead of silently limiting choices", async () => {
+  fixture();
+  tables.po_headers = Array.from({ length: 52 }, (_, i) => ({
+    id: String(i),
+    po_no: "PO-" + i,
+    buyer_id: U,
+    is_deleted: false,
+  }));
+  const first = await options.GET(new Request("http://test"));
+  assert.equal(first.body.rows.length, 50);
+  assert.equal(first.body.hasMore, true);
+  const second = await options.GET(new Request("http://test?offset=50"));
+  assert.equal(second.body.rows.length, 2);
+  assert.equal(second.body.hasMore, false);
+});
+test("selected PO and item are revalidated before saving a batch", async () => {
+  fixture();
+  const r = await route.POST(
+    req(payload({ po_no: "PO-1", po_id: Q, po_line_id: U })),
+  );
+  assert.equal(r.status, 200);
+  assert.equal(
+    calls.find((call) => call.name === "create_kiss_batch_v4").args.p_po,
+    "PO-1",
+  );
+});
+test("foreign, deleted, changed or mismatched PO selections never create a batch", async () => {
+  for (const kind of [
+    "buyer",
+    "deleted-po",
+    "deleted-line",
+    "foreign-line",
+    "changed-sku",
+    "changed-po",
+  ]) {
+    fixture();
+    if (kind === "buyer") tables.po_headers[0].buyer_id = Q;
+    if (kind === "deleted-po") tables.po_headers[0].is_deleted = true;
+    if (kind === "deleted-line") tables.po_lines[0].is_deleted = true;
+    if (kind === "foreign-line") tables.po_lines[0].po_header_id = U;
+    if (kind === "changed-sku") tables.po_lines[0].upc = "123456789012";
+    if (kind === "changed-po") tables.po_headers[0].po_no = "RENAMED";
+    const r = await route.POST(
+      req(payload({ po_no: "PO-1", po_id: Q, po_line_id: U })),
+    );
+    assert.ok([404, 409].includes(r.status), kind);
+    assert.equal(
+      calls.some((call) => call.name === "create_kiss_batch_v4"),
+      false,
+      kind,
+    );
+  }
+});
+test("incomplete or invalid selection ids cannot fall through to a manual batch", async () => {
+  fixture();
+  for (const extra of [
+    { po_id: Q },
+    { po_line_id: U },
+    { po_id: "bad", po_line_id: U },
+  ])
+    assert.equal((await route.POST(req(payload(extra)))).status, 400);
+  assert.equal(
+    calls.some((call) => call.name === "create_kiss_batch_v4"),
+    false,
+  );
+});
+test("changing a saved batch PO validates that the new order contains its SKU", async () => {
+  fixture();
+  tables.production_batches_v4 = [
+    { id: Q, buyer_code: "RED", sku_code: "DIFFERENT" },
+  ];
+  const r = await route.PUT(
+    req({ id: Q, guideline_version: "4.0", po_id: Q, po_no: "PO-1" }),
+  );
+  assert.equal(r.status, 400);
+  assert.equal(
+    calls.some((call) => call.action === "update"),
+    false,
+  );
 });

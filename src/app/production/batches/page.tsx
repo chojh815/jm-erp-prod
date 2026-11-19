@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import RedBatchPoPicker from "@/components/production/RedBatchPoPicker";
 import { redBatchDetails } from "@/lib/redBatchCode";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,6 +41,9 @@ export default function ProductionBatchesPage() {
   const [run, setRun] = React.useState(1);
   const [type, setType] = React.useState("");
   const [po, setPo] = React.useState("");
+  const [manual, setManual] = React.useState(false);
+  const [poId, setPoId] = React.useState<string | null>(null);
+  const [lineId, setLineId] = React.useState<string | null>(null);
   const [source, setSource] = React.useState<BatchRow | null>(null);
   const [rows, setRows] = React.useState<BatchRow[]>([]);
   const [setupRequired, setSetupRequired] = React.useState(false);
@@ -51,6 +55,8 @@ export default function ProductionBatchesPage() {
   const [copied, setCopied] = React.useState("");
   const [editing, setEditing] = React.useState<BatchRow | null>(null);
   const [editPo, setEditPo] = React.useState("");
+  const [editManual, setEditManual] = React.useState(false);
+  const [editPoId, setEditPoId] = React.useState<string | null>(null);
   const [filterSku, setFilterSku] = React.useState("");
   const [filterPo, setFilterPo] = React.useState("");
   const [filters, setFilters] = React.useState({ sku: "", po: "" });
@@ -96,6 +102,8 @@ export default function ProductionBatchesPage() {
 
   function revise(row: BatchRow) {
     setSource(row);
+    setPoId(null);
+    setLineId(null);
     setSku(row.sku_code || "");
     setDate(row.mfg_date);
     setVendor(row.vendor_initial || "J");
@@ -108,7 +116,13 @@ export default function ProductionBatchesPage() {
   }
   async function save(event: React.FormEvent) {
     event.preventDefault();
-    if (submitting.current || !preview || !sku.trim()) return;
+    if (
+      submitting.current ||
+      !preview ||
+      !sku.trim() ||
+      (!source && !manual && (!poId || !lineId))
+    )
+      return;
     submitting.current = true;
     setBusy(true);
     setError("");
@@ -125,6 +139,8 @@ export default function ProductionBatchesPage() {
           label_type: type,
           version,
           po_no: po,
+          po_id: !source && !manual ? poId : undefined,
+          po_line_id: !source && !manual ? lineId : undefined,
           source_id: source?.id || null,
         }),
       });
@@ -164,6 +180,7 @@ export default function ProductionBatchesPage() {
           guideline_version:
             editing.guideline_version === "4.0" ? "4.0" : undefined,
           po_no: editPo,
+          po_id: !editManual ? editPoId : undefined,
         }),
       });
       setEditing(null);
@@ -231,6 +248,12 @@ export default function ProductionBatchesPage() {
               disabled={busy}
               onClick={() => {
                 setSource(null);
+                setPoId(null);
+                setLineId(null);
+                if (!manual) {
+                  setSku("");
+                  setPo("");
+                }
                 setSaved(null);
                 setError("");
               }}
@@ -245,6 +268,40 @@ export default function ProductionBatchesPage() {
             {version > 9 && "(최대 버전 9에 도달했습니다)"}
           </p>
         )}
+        {!source && (
+          <>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                id="manual-entry"
+                type="checkbox"
+                checked={manual}
+                disabled={busy}
+                onChange={(e) => {
+                  setManual(e.target.checked);
+                  setPoId(null);
+                  setLineId(null);
+                  if (!e.target.checked) {
+                    setSku("");
+                    setPo("");
+                  }
+                }}
+              />
+              SKU·PO 직접 입력
+            </label>
+            {!manual && (
+              <RedBatchPoPicker
+                disabled={busy}
+                onChange={(selectedPo, line) => {
+                  setPo(selectedPo?.po_no || "");
+                  setPoId(selectedPo?.id || null);
+                  setSku(line?.sku_code || "");
+                  setLineId(line?.id || null);
+                  setSaved(null);
+                }}
+              />
+            )}
+          </>
+        )}
         <div className="grid gap-4 md:grid-cols-3">
           <div>
             <label htmlFor="sku" className="mb-1 block text-sm">
@@ -254,10 +311,15 @@ export default function ProductionBatchesPage() {
               id="sku"
               value={sku}
               maxLength={120}
+              readOnly={!manual || !!source}
               required
               disabled={busy || !!source}
               onChange={(e) => setSku(e.target.value)}
-              placeholder="ASSORT는 디스플레이 품목 번호"
+              placeholder={
+                manual
+                  ? "ASSORT는 디스플레이 품목 번호"
+                  : "PO 품목 선택 시 자동 입력"
+              }
             />
           </div>
           <div>
@@ -321,11 +383,12 @@ export default function ProductionBatchesPage() {
           </div>
           <div>
             <label htmlFor="po" className="mb-1 block text-sm">
-              PO 번호 (선택)
+              PO 번호
             </label>
             <Input
               id="po"
               value={po}
+              readOnly={!manual || !!source}
               maxLength={200}
               disabled={busy}
               onChange={(e) => setPo(e.target.value)}
@@ -362,7 +425,13 @@ export default function ProductionBatchesPage() {
         )}
         <Button
           type="submit"
-          disabled={busy || setupRequired || !sku.trim() || !preview}
+          disabled={
+            busy ||
+            setupRequired ||
+            !sku.trim() ||
+            !preview ||
+            (!source && !manual && (!poId || !lineId))
+          }
         >
           {busy
             ? "처리 중…"
@@ -461,11 +530,37 @@ export default function ProductionBatchesPage() {
               <Input
                 id="edit-po"
                 value={editPo}
+                readOnly={!editManual}
                 maxLength={200}
                 disabled={busy}
                 onChange={(e) => setEditPo(e.target.value)}
               />
             </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={editManual}
+                disabled={busy}
+                onChange={(e) => {
+                  setEditManual(e.target.checked);
+                  setEditPoId(null);
+                }}
+              />
+              직접 입력
+            </label>
+            {!editManual && (
+              <div className="w-full">
+                <RedBatchPoPicker
+                  key={editing.id}
+                  selectItem={false}
+                  disabled={busy}
+                  onChange={(selected) => {
+                    setEditPo(selected?.po_no || "");
+                    setEditPoId(selected?.id || null);
+                  }}
+                />
+              </div>
+            )}
             <Button type="submit" disabled={busy}>
               PO 저장
             </Button>
@@ -550,6 +645,8 @@ export default function ProductionBatchesPage() {
                         disabled={busy}
                         onClick={() => {
                           setEditing(row);
+                          setEditManual(false);
+                          setEditPoId(null);
                           setEditPo(row.po_no || "");
                         }}
                       >

@@ -40,7 +40,9 @@ function load(file) {
             ? { Input: (props) => React.createElement("input", props) }
             : s === "@/lib/redBatchCode"
               ? load("src/lib/redBatchCode.ts")
-              : require(s),
+              : s === "@/components/production/RedBatchPoPicker"
+                ? load("src/components/production/RedBatchPoPicker.tsx")
+                : require(s),
     m,
     m.exports,
   );
@@ -96,6 +98,9 @@ test("new batch form previews ISO week 53, run 2 and saves label version zero", 
   const posts = network();
   const r = await mount();
   assert.equal(input(r, "label-type").props.value, "");
+  await act(async () =>
+    input(r, "manual-entry").props.onChange({ target: { checked: true } }),
+  );
   await change(r, "sku", "ASSORT-1");
   await change(r, "start-date", "2027-01-01");
   await change(r, "label-type", "M");
@@ -106,7 +111,7 @@ test("new batch form previews ISO week 53, run 2 and saves label version zero", 
   assert.equal(posts[0].run_no, 2);
   assert.equal(posts[0].version, 0);
   assert.equal(posts[0].source_id, null);
-  r.unmount();
+  await act(async () => r.unmount());
 });
 test("revision action locks production identity and saves a source-linked label revision", async () => {
   const posts = network([row]);
@@ -137,4 +142,113 @@ test("label version nine prevents further revisions", async () => {
   const r = await mount();
   assert.ok(button(r, "라벨 수정").props.disabled);
   r.unmount();
+});
+const PO = "22222222-2222-4222-8222-222222222222",
+  LINE = "55555555-5555-4555-8555-555555555555";
+const findSelect = (r, suffix) =>
+  r.root
+    .findAllByType("select")
+    .find((node) => String(node.props.id).endsWith(suffix));
+const waitPicker = async () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+test("selecting a PO and item auto fills SKU and PO, and sends selection ids on save", async () => {
+  const posts = [];
+  global.fetch = async (url, init) => {
+    if (init?.method === "POST") {
+      posts.push(JSON.parse(init.body));
+      return response({ row: { ...row, id: Q, sku_code: posts[0].sku_code } });
+    }
+    if (url.includes("/options?")) {
+      const params = new URL(url, "http://test").searchParams;
+      return params.has("po_id")
+        ? response({
+            po: { id: PO, po_no: "4500162462" },
+            rows: [
+              {
+                id: LINE,
+                sku_code: "649674165419",
+                buyer_style_no: "HZ110",
+                upc: "649674165419",
+                color: "Assort",
+              },
+            ],
+          })
+        : response({
+            rows: [{ id: PO, po_no: "4500162462", status: "CONFIRMED" }],
+            hasMore: false,
+          });
+    }
+    return response({ rows: [] });
+  };
+  const r = await mount();
+  await waitPicker();
+  await act(async () =>
+    findSelect(r, "-po").props.onChange({ target: { value: PO } }),
+  );
+  assert.equal(input(r, "sku").props.value, "");
+  await act(async () =>
+    findSelect(r, "-line").props.onChange({ target: { value: LINE } }),
+  );
+  assert.equal(input(r, "sku").props.value, "649674165419");
+  assert.equal(input(r, "po").props.value, "4500162462");
+  assert.ok(input(r, "sku").props.readOnly);
+  await change(r, "start-date", "2026-11-19");
+  await change(r, "label-type", "M");
+  await act(async () => r.root.findAllByType("form")[0].props.onSubmit(event));
+  assert.equal(posts[0].po_id, PO);
+  assert.equal(posts[0].po_line_id, LINE);
+  assert.equal(posts[0].version, 0);
+  await act(async () => r.unmount());
+});
+test("changing PO clears the previous SKU and ignores an older in-flight item response", async () => {
+  const SECOND = "66666666-6666-4666-8666-666666666666";
+  let resolveOld;
+  global.fetch = async (url) => {
+    if (!url.includes("/options?")) return response({ rows: [] });
+    const selected = new URL(url, "http://test").searchParams.get("po_id");
+    if (selected === PO)
+      return new Promise(
+        (resolve) =>
+          (resolveOld = () =>
+            resolve(
+              response({
+                rows: [{ id: LINE, sku_code: "OLD", buyer_style_no: "OLD" }],
+              }),
+            )),
+      );
+    if (selected === SECOND)
+      return response({
+        rows: [{ id: SECOND, sku_code: "NEW", buyer_style_no: "NEW" }],
+      });
+    return response({
+      rows: [
+        { id: PO, po_no: "PO-1" },
+        { id: SECOND, po_no: "PO-2" },
+      ],
+      hasMore: false,
+    });
+  };
+  const r = await mount();
+  await waitPicker();
+  await act(async () =>
+    findSelect(r, "-po").props.onChange({ target: { value: PO } }),
+  );
+  await act(async () =>
+    findSelect(r, "-po").props.onChange({ target: { value: SECOND } }),
+  );
+  await act(async () => resolveOld());
+  const options = findSelect(r, "-line").findAllByType("option");
+  assert.equal(
+    options.some((option) => option.props.value === LINE),
+    false,
+  );
+  assert.equal(input(r, "sku").props.value, "");
+  await act(async () =>
+    findSelect(r, "-line").props.onChange({ target: { value: SECOND } }),
+  );
+  assert.equal(input(r, "sku").props.value, "NEW");
+  assert.equal(input(r, "po").props.value, "PO-2");
+  await act(async () => r.unmount());
 });

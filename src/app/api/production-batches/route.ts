@@ -5,6 +5,12 @@ import { getApiIdentity } from "@/lib/apiIdentity";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { makeRedBatchCode, RED_BATCH_UUID } from "@/lib/redBatchCode";
 
+import {
+  resolveRedBatchPoLine,
+  loadRedBatchPo,
+  listRedBatchPoLines,
+} from "@/lib/redBatchOrders";
+
 export const dynamic = "force-dynamic";
 class BatchError extends Error {
   constructor(
@@ -166,7 +172,25 @@ export async function POST(req: Request) {
     } catch (e: any) {
       throw new BatchError(e.message);
     }
-    const po = text(body.po_no, "PO 번호", 200);
+    let po = text(body.po_no, "PO 번호", 200);
+    const selectedPo = body.po_id ?? null,
+      selectedLine = body.po_line_id ?? null;
+    if (selectedPo !== null || selectedLine !== null) {
+      if (
+        typeof selectedPo !== "string" ||
+        !RED_BATCH_UUID.test(selectedPo) ||
+        typeof selectedLine !== "string" ||
+        !RED_BATCH_UUID.test(selectedLine)
+      )
+        throw new BatchError("PO와 해당 품목을 다시 선택해 주세요.");
+      const selection = await resolveRedBatchPoLine(selectedPo, selectedLine);
+      if (sku !== selection.line.sku_code || po !== selection.po.po_no)
+        throw new BatchError(
+          "PO 또는 품목 정보가 변경되었습니다. 다시 선택해 주세요.",
+          409,
+        );
+      po = selection.po.po_no;
+    }
     const result = check(
       await supabaseAdmin.rpc("create_kiss_batch_v4", {
         p_sku: sku,
@@ -194,8 +218,32 @@ export async function PUT(req: Request) {
     });
     if (!body || typeof body.id !== "string" || !RED_BATCH_UUID.test(body.id))
       throw new BatchError("배치 ID를 확인해 주세요.");
-    const po = text(body.po_no, "PO 번호", 200);
+    let po = text(body.po_no, "PO 번호", 200);
     const current = isV4(body);
+    if (body.po_id) {
+      if (typeof body.po_id !== "string" || !RED_BATCH_UUID.test(body.po_id))
+        throw new BatchError("PO를 다시 선택해 주세요.");
+      const selected = await loadRedBatchPo(body.po_id);
+      if (po !== selected.po_no)
+        throw new BatchError(
+          "PO 정보가 변경되었습니다. 다시 선택해 주세요.",
+          409,
+        );
+      if (current) {
+        const saved = check(
+          await supabaseAdmin
+            .from("production_batches_v4")
+            .select("sku_code")
+            .eq("id", body.id)
+            .maybeSingle(),
+        );
+        if (!saved) throw new BatchError("배치가 없습니다.", 404);
+        const lines = await listRedBatchPoLines(selected.id);
+        if (!lines.some((line) => line.sku_code === saved.sku_code))
+          throw new BatchError("선택한 PO에 이 배치의 SKU가 없습니다.");
+      }
+      po = selected.po_no;
+    }
     const client = current ? supabaseAdmin : legacyClient();
     const row = check(
       await client
