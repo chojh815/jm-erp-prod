@@ -1,219 +1,240 @@
-// src/app/api/production-batches/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+import { getApiIdentity } from "@/lib/apiIdentity";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { makeRedBatchCode, RED_BATCH_UUID } from "@/lib/redBatchCode";
 
-import { makeRedBatchCode } from "@/lib/redBatchCode";
-
-type CreateBody = {
-  mfg_date: string; // YYYY-MM-DD
-  po_no?: string | null;
-  vendor_initial?: string | null; // default J
-  label_type?: "M" | "V" | string | null; // default M
-  version?: number | null; // OPTIONAL; if omitted => auto next version
-};
-
-type UpdatePoBody = {
-  id: string;
-  po_no: string | null;
-};
-
-function jsonError(status: number, message: string, extra?: any) {
-  return NextResponse.json({ success: false, message, ...(extra ? { extra } : {}) }, { status });
-}
-
-function getSupabase() {
-  const cookieStore = cookies();
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anon) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY in env.");
+export const dynamic = "force-dynamic";
+class BatchError extends Error {
+  constructor(
+    message: string,
+    public status = 400,
+  ) {
+    super(message);
   }
-
-  return createServerClient(url, anon, {
-    cookies: {
-      get(name: string) {
-        return cookieStore.get(name)?.value;
-      },
-      set() {},
-      remove() {},
-    },
-  });
 }
-
+function jsonError(error: any) {
+  const setup = ["42P01", "PGRST202", "PGRST205"].includes(error?.code);
+  const message = setup
+    ? "BATCH 4.0 DB 설정을 먼저 적용해 주세요."
+    : error?.code === "23505"
+      ? "동일 SKU·생산 시작일·차수·라벨 버전이 이미 등록되어 있습니다. 기존 배치를 확인해 주세요."
+      : error?.message || "처리하지 못했습니다.";
+  const status = setup
+    ? 503
+    : error?.status ||
+      (["23505", "40001", "55000", "23503"].includes(error?.code)
+        ? 409
+        : error?.code === "P0002"
+          ? 404
+          : ["22023", "23514"].includes(error?.code)
+            ? 400
+            : 500);
+  return NextResponse.json(
+    { success: false, message },
+    { status, headers: { "Cache-Control": "no-store" } },
+  );
+}
+function json(data: any) {
+  return NextResponse.json(
+    { success: true, ...data },
+    { headers: { "Cache-Control": "no-store" } },
+  );
+}
+async function actor() {
+  const identity = await getApiIdentity();
+  if (!identity.permissions.includes("production_batches.view"))
+    throw new BatchError("Batches (RED) 접근 권한이 없습니다.", 403);
+  return identity;
+}
+function legacyClient() {
+  const store = cookies();
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: { getAll: () => store.getAll(), setAll: () => {} },
+    },
+  );
+}
+function text(value: unknown, label: string, max: number, required = false) {
+  if (value === undefined || value === null) {
+    if (required) throw new BatchError(label + "을 입력해 주세요.");
+    return "";
+  }
+  if (
+    typeof value !== "string" ||
+    value.trim().length > max ||
+    (required && !value.trim())
+  )
+    throw new BatchError(label + "을 확인해 주세요.");
+  return value.trim();
+}
+function check(result: any) {
+  if (result.error) throw result.error;
+  return result.data;
+}
+function isV4(body: any) {
+  if (body.guideline_version && body.guideline_version !== "4.0")
+    throw new BatchError("유효하지 않은 규칙입니다.");
+  return body.guideline_version === "4.0";
+}
 export async function GET(req: Request) {
   try {
-    const supabase = getSupabase();
-    const { searchParams } = new URL(req.url);
-
-    const poNo = searchParams.get("po_no");
-    const mfgDate = searchParams.get("mfg_date");
-    const dateFrom = searchParams.get("date_from");
-    const dateTo = searchParams.get("date_to");
-
-    let q = supabase.from("production_batches").select("*").eq("buyer_code", "RED");
-
-    if (poNo) q = q.eq("po_no", poNo);
-    if (mfgDate) q = q.eq("mfg_date", mfgDate);
-    if (dateFrom) q = q.gte("mfg_date", dateFrom);
-    if (dateTo) q = q.lte("mfg_date", dateTo);
-
-    q = q.order("mfg_date", { ascending: false }).order("version", { ascending: false });
-
-    const { data, error } = await q;
-    if (error) return jsonError(500, error.message, { code: error.code });
-
-    return NextResponse.json({ success: true, rows: data ?? [] });
-  } catch (e: any) {
-    console.error("[production-batches GET] FATAL:", e);
-    return jsonError(500, e?.message ?? String(e));
+    await actor();
+    const params = new URL(req.url).searchParams;
+    const sku = text(params.get("sku_code"), "SKU", 120).toUpperCase();
+    function filtered(client: any, table: string) {
+      let query = client.from(table).select("*").eq("buyer_code", "RED");
+      for (const key of ["po_no", "mfg_date"])
+        if (params.get(key)) query = query.eq(key, params.get(key));
+      if (params.get("date_from"))
+        query = query.gte("mfg_date", params.get("date_from"));
+      if (params.get("date_to"))
+        query = query.lte("mfg_date", params.get("date_to"));
+      if (table === "production_batches_v4" && sku)
+        query = query.eq("sku_code", sku);
+      return query
+        .order("mfg_date", { ascending: false })
+        .order("version", { ascending: false })
+        .limit(200);
+    }
+    const [current, legacy] = await Promise.all([
+      filtered(supabaseAdmin, "production_batches_v4"),
+      sku
+        ? Promise.resolve({ data: [], error: null })
+        : filtered(legacyClient(), "production_batches"),
+    ]);
+    const setupRequired =
+      current.error && ["42P01", "PGRST205"].includes(current.error.code);
+    if (current.error && !setupRequired) throw current.error;
+    const old = check(legacy) || [];
+    const rows = [
+      ...(current.data || []),
+      ...old.map((row: any) => ({ ...row, guideline_version: "legacy" })),
+    ].sort(
+      (a, b) =>
+        b.mfg_date.localeCompare(a.mfg_date) ||
+        b.created_at.localeCompare(a.created_at),
+    );
+    return json({ rows, setupRequired: !!setupRequired });
+  } catch (e) {
+    return jsonError(e);
   }
 }
-
-async function computeNextVersion(args: { mfg_date: string }) {
-  const supabase = getSupabase();
-  const { data, error } = await supabase
-    .from("production_batches")
-    .select("version")
-    .eq("buyer_code", "RED")
-    .eq("mfg_date", args.mfg_date)
-    .order("version", { ascending: false })
-    .limit(1);
-
-  if (error) throw new Error(error.message);
-  const maxV = data && data[0] ? Number(data[0].version) : -1;
-  return (Number.isFinite(maxV) ? maxV : -1) + 1;
-}
-
 export async function POST(req: Request) {
   try {
-    const supabase = getSupabase();
-
-    let body: CreateBody;
-    try {
-      body = (await req.json()) as CreateBody;
-    } catch {
-      return jsonError(400, "Invalid JSON body.");
-    }
-
-    const mfg_date = (body.mfg_date ?? "").trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(mfg_date)) {
-      return jsonError(400, "mfg_date must be YYYY-MM-DD.");
-    }
-
-    const vendorInitial = (body.vendor_initial ?? "J").trim().toUpperCase() || "J";
-    const labelType = ((body.label_type ?? "M") as string).trim().toUpperCase() || "M";
-
-    let version: number;
-    if (typeof body.version === "number" && Number.isFinite(body.version) && body.version >= 0) {
-      version = Math.floor(body.version);
-    } else {
-      version = await computeNextVersion({ mfg_date });
-    }
-
-    const batch_code = makeRedBatchCode({
-      vendorInitial,
-      mfgDate: mfg_date,
-      labelType,
-      version,
+    const identity = await actor();
+    const body = await req.json().catch(() => {
+      throw new BatchError("JSON 요청을 확인해 주세요.");
     });
-
-    const insertRow = {
-      buyer_code: "RED" as const,
-      mfg_date,
-      label_type: labelType,
-      version,
-      batch_code,
-      po_no: body.po_no ?? null,
-    };
-
-    const attemptInsert = async (row: any) => {
-      return await supabase.from("production_batches").insert(row).select("*").single();
-    };
-
-    let { data, error } = await attemptInsert(insertRow);
-
-    if (error && (error.code === "23505" || String(error.message).toLowerCase().includes("duplicate"))) {
-      const next = await computeNextVersion({ mfg_date });
-      const row2 = {
-        ...insertRow,
-        version: next,
-        batch_code: makeRedBatchCode({ vendorInitial, mfgDate: mfg_date, labelType, version: next }),
-      };
-      const retry = await attemptInsert(row2);
-      data = retry.data;
-      error = retry.error;
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      throw new BatchError("배치 정보를 확인해 주세요.");
+    const sku = text(
+      body.sku_code,
+      "SKU / 바이어 스타일 번호",
+      120,
+      true,
+    ).toUpperCase();
+    const date = text(body.mfg_date, "생산 시작일", 10, true);
+    const vendor = text(
+      body.vendor_initial ?? "J",
+      "업체코드",
+      1,
+      true,
+    ).toUpperCase();
+    const type = text(body.label_type, "V/M 유형", 1, true).toUpperCase();
+    const run = body.run_no ?? 1,
+      version = body.version ?? 0;
+    const source = body.source_id ?? null;
+    if (
+      source !== null &&
+      (typeof source !== "string" || !RED_BATCH_UUID.test(source))
+    )
+      throw new BatchError("원본 배치를 확인해 주세요.");
+    if (!source && version !== 0)
+      throw new BatchError("새 생산 배치는 라벨 버전 0으로 등록해 주세요.");
+    try {
+      makeRedBatchCode({
+        mfgDate: date,
+        vendorInitial: vendor,
+        labelType: type,
+        runNo: run,
+        version,
+      });
+    } catch (e: any) {
+      throw new BatchError(e.message);
     }
-
-    if (error) return jsonError(500, error.message, { code: error.code });
-
-    return NextResponse.json({ success: true, row: data });
-  } catch (e: any) {
-    console.error("[production-batches POST] FATAL:", e);
-    return jsonError(500, e?.message ?? String(e));
+    const po = text(body.po_no, "PO 번호", 200);
+    const result = check(
+      await supabaseAdmin.rpc("create_kiss_batch_v4", {
+        p_sku: sku,
+        p_date: date,
+        p_vendor: vendor,
+        p_run: run,
+        p_type: type,
+        p_version: version,
+        p_po: po || null,
+        p_source: source,
+        p_actor: identity.user.id,
+      }),
+    );
+    const row = Array.isArray(result) ? result[0] : result;
+    return json({ row });
+  } catch (e) {
+    return jsonError(e);
   }
 }
-
 export async function PUT(req: Request) {
   try {
-    const supabase = getSupabase();
-
-    let body: UpdatePoBody;
-    try {
-      body = (await req.json()) as UpdatePoBody;
-    } catch {
-      return jsonError(400, "Invalid JSON body.");
-    }
-
-    const id = (body.id ?? "").trim();
-    if (!id) return jsonError(400, "Missing id.");
-
-    const po_no = body.po_no ? String(body.po_no).trim() : null;
-
-    const { data, error } = await supabase
-      .from("production_batches")
-      .update({ po_no })
-      .eq("id", id)
-      .eq("buyer_code", "RED")
-      .select("*")
-      .single();
-
-    // If RLS blocks update, PostgREST can return 200 with empty data in some setups. Guard it.
-    if (error) return jsonError(500, error.message, { code: error.code });
-    if (!data) return jsonError(404, "Row not updated (not found or no permission).");
-
-    return NextResponse.json({ success: true, row: data });
-  } catch (e: any) {
-    console.error("[production-batches PUT] FATAL:", e);
-    return jsonError(500, e?.message ?? String(e));
+    await actor();
+    const body = await req.json().catch(() => {
+      throw new BatchError("JSON 요청을 확인해 주세요.");
+    });
+    if (!body || typeof body.id !== "string" || !RED_BATCH_UUID.test(body.id))
+      throw new BatchError("배치 ID를 확인해 주세요.");
+    const po = text(body.po_no, "PO 번호", 200);
+    const current = isV4(body);
+    const client = current ? supabaseAdmin : legacyClient();
+    const row = check(
+      await client
+        .from(current ? "production_batches_v4" : "production_batches")
+        .update({ po_no: po || null })
+        .eq("id", body.id)
+        .eq("buyer_code", "RED")
+        .select("*")
+        .maybeSingle(),
+    );
+    if (!row) throw new BatchError("배치가 없거나 수정 권한이 없습니다.", 404);
+    return json({ row });
+  } catch (e) {
+    return jsonError(e);
   }
 }
-
 export async function DELETE(req: Request) {
   try {
-    const supabase = getSupabase();
-    const { searchParams } = new URL(req.url);
-
-    const id = (searchParams.get("id") ?? "").trim();
-    if (!id) return jsonError(400, "Missing id.");
-
-    // IMPORTANT: verify affected rows.
-    const { data, error } = await supabase
-      .from("production_batches")
-      .delete()
-      .eq("id", id)
-      .eq("buyer_code", "RED")
-      .select("id");
-
-    if (error) return jsonError(500, error.message, { code: error.code });
-
-    if (!data || data.length === 0) {
-      return jsonError(404, "Row not deleted (not found or no permission).", { hint: "Check Supabase RLS for DELETE." });
-    }
-
-    return NextResponse.json({ success: true, deleted_ids: data.map((x) => x.id) });
-  } catch (e: any) {
-    console.error("[production-batches DELETE] FATAL:", e);
-    return jsonError(500, e?.message ?? String(e));
+    await actor();
+    const params = new URL(req.url).searchParams;
+    const id = params.get("id") || "";
+    if (!RED_BATCH_UUID.test(id))
+      throw new BatchError("배치 ID를 확인해 주세요.");
+    const current = isV4({
+      guideline_version: params.get("guideline_version"),
+    });
+    const client = current ? supabaseAdmin : legacyClient();
+    const rows = check(
+      await client
+        .from(current ? "production_batches_v4" : "production_batches")
+        .delete()
+        .eq("id", id)
+        .eq("buyer_code", "RED")
+        .select("id"),
+    );
+    if (!rows?.length)
+      throw new BatchError("배치가 없거나 삭제 권한이 없습니다.", 404);
+    return json({ deleted_ids: rows.map((row: any) => row.id) });
+  } catch (e) {
+    return jsonError(e);
   }
 }

@@ -1,77 +1,73 @@
-// src/lib/redBatchCode.ts
-// RED buyer only batch code: J + YEAR_CODE + WEEK(2) + DAY_CODE + LABEL_TYPE + VERSION
+// KISS Batch Management 4.0. Calendar calculations use date-only UTC values.
+const YEAR_CODES = "PQRSTUVWXYZABCDEFGHIJK"; // ISO week-years 2016–2037
+const DAY_CODES = ["ABCDEFG", "HJKLNPQ", "RSTUWXY"];
+export const RED_BATCH_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const YEAR_CODE: Record<number, string> = {
-  2016: "P",
-  2017: "Q",
-  2018: "R",
-  2019: "S",
-  2020: "T",
-  2021: "U",
-  2022: "V",
-  2023: "W",
-  2024: "X",
-  2025: "Y",
-  2026: "Z",
-  2027: "A",
-  2028: "B",
-  2029: "C",
-  2030: "D",
-  2031: "E",
-  2032: "F",
-  2033: "G",
-  2034: "H",
-  2035: "I",
-  2036: "J",
-  2037: "K",
+export type RedBatchInput = {
+  vendorInitial?: string;
+  mfgDate: string | Date;
+  labelType?: string;
+  runNo?: number;
+  version?: number;
 };
 
-function dayCode(d: Date): string {
-  const js = d.getDay(); // 0=Sun..6=Sat
-  const map: Record<number, string> = {
-    1: "A",
-    2: "B",
-    3: "C",
-    4: "D",
-    5: "E",
-    6: "F",
-    0: "G",
-  };
-  return map[js];
-}
+export function redBatchDetails(args: RedBatchInput) {
+  const dateText =
+    args.mfgDate instanceof Date
+      ? Number.isNaN(args.mfgDate.getTime())
+        ? ""
+        : args.mfgDate.toISOString().slice(0, 10)
+      : args.mfgDate;
+  if (typeof dateText !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateText))
+    throw new Error("생산 시작일을 YYYY-MM-DD 형식으로 입력해 주세요.");
+  const date = new Date(dateText + "T00:00:00Z");
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== dateText
+  )
+    throw new Error("유효한 생산 시작일을 입력해 주세요.");
 
-function weekOfYear52(date: Date): number {
-  const start = new Date(date.getFullYear(), 0, 1);
-  const diffDays = Math.floor((date.getTime() - start.getTime()) / 86400000) + 1; // 1-based
-  let week = Math.ceil(diffDays / 7);
-  if (week < 1) week = 1;
-  if (week > 52) week = 52;
-  return week;
-}
-
-export function makeRedBatchCode(args: {
-  vendorInitial?: string; // default "J"
-  mfgDate: string | Date; // YYYY-MM-DD recommended
-  labelType?: string; // default "M"
-  version?: number; // default 0
-}) {
   const vendor = (args.vendorInitial ?? "J").trim().toUpperCase();
-  if (!vendor || vendor.length !== 1) throw new Error("vendorInitial must be 1 letter.");
+  if (!/^[A-Z]$/.test(vendor))
+    throw new Error("KISS 업체코드는 영문 한 글자입니다.");
+  const labelType = (args.labelType ?? "").trim().toUpperCase();
+  if (!["V", "M"].includes(labelType))
+    throw new Error("제품 유형 V 또는 M을 선택해 주세요.");
+  const runNo = args.runNo ?? 1;
+  if (!Number.isInteger(runNo) || runNo < 1 || runNo > 3)
+    throw new Error("동일 SKU의 당일 생산 차수는 1~3차를 선택해 주세요.");
+  const version = args.version ?? 0;
+  if (!Number.isInteger(version) || version < 0 || version > 9)
+    throw new Error("라벨 수정 버전은 0~9입니다.");
 
-  const d = typeof args.mfgDate === "string" ? new Date(`${args.mfgDate}T00:00:00`) : args.mfgDate;
-  if (Number.isNaN(d.getTime())) throw new Error("Invalid mfgDate.");
+  const weekday = (date.getUTCDay() + 6) % 7; // Monday = 0
+  const thursday = new Date(date);
+  thursday.setUTCDate(date.getUTCDate() + 3 - weekday);
+  const isoYear = thursday.getUTCFullYear();
+  if (isoYear < 2016 || isoYear > 2037)
+    throw new Error("지원하는 ISO 연도는 2016~2037입니다.");
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const isoWeek = Math.ceil(
+    ((thursday.getTime() - yearStart.getTime()) / 86400000 + 1) / 7,
+  );
+  const yearCode = YEAR_CODES[isoYear - 2016];
+  const dayCode = DAY_CODES[runNo - 1][weekday];
+  const weekCode = String(isoWeek).padStart(2, "0");
+  return {
+    batchCode: `${vendor}${yearCode}${weekCode}${dayCode}${labelType}${version}`,
+    isoYear,
+    isoWeek,
+    yearCode,
+    dayCode,
+    vendor,
+    labelType,
+    runNo,
+    version,
+    weekday: ["월", "화", "수", "목", "금", "토", "일"][weekday],
+  };
+}
 
-  const year = d.getFullYear();
-  const y = YEAR_CODE[year];
-  if (!y) throw new Error(`No YEAR_CODE mapping for year ${year}. Extend YEAR_CODE.`);
-
-  const week2 = String(weekOfYear52(d)).padStart(2, "0");
-  const day = dayCode(d);
-
-  const labelType = (args.labelType ?? "M").trim().toUpperCase() || "M";
-
-  const v = typeof args.version === "number" && Number.isFinite(args.version) ? Math.floor(args.version) : 0;
-  if (v < 0) throw new Error("version must be >= 0.");
-
-  return `${vendor}${y}${week2}${day}${labelType}${v}`;
+export function makeRedBatchCode(args: RedBatchInput) {
+  return redBatchDetails(args).batchCode;
 }
