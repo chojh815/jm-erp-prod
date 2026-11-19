@@ -49,6 +49,7 @@ export default function ProductionBatchesPage() {
   const [type, setType] = React.useState("");
   const [po, setPo] = React.useState("");
   const [manual, setManual] = React.useState(false);
+  const [pickerRevision, setPickerRevision] = React.useState(0);
   const [poId, setPoId] = React.useState<string | null>(null);
   const [lineId, setLineId] = React.useState<string | null>(null);
   const [source, setSource] = React.useState<BatchRow | null>(null);
@@ -127,6 +128,17 @@ export default function ProductionBatchesPage() {
     setError("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
+  function refreshPoPicker() {
+    if (source || manual) return;
+    setPoId(null);
+    setLineId(null);
+    setSku("");
+    setPo("");
+    setManufacturingOrigin("");
+    setPoManufacturingOrigin("");
+    setVendor("");
+    setPickerRevision((value) => value + 1);
+  }
   async function save(event: React.FormEvent) {
     event.preventDefault();
     if (
@@ -159,6 +171,7 @@ export default function ProductionBatchesPage() {
         }),
       });
       setSaved(data.row);
+      refreshPoPicker();
       // Advance the revision form to the newly saved version.
       if (source) setSource(data.row);
       await load();
@@ -198,6 +211,7 @@ export default function ProductionBatchesPage() {
         }),
       });
       setEditing(null);
+      refreshPoPicker();
       await load();
     } catch (e: any) {
       setListError(e.message);
@@ -225,6 +239,7 @@ export default function ProductionBatchesPage() {
       if (source?.id === row.id) setSource(null);
       if (saved?.id === row.id) setSaved(null);
       if (editing?.id === row.id) setEditing(null);
+      refreshPoPicker();
       await load();
     } catch (e: any) {
       setListError(e.message);
@@ -239,7 +254,7 @@ export default function ProductionBatchesPage() {
       <div>
         <h1 className="text-2xl font-semibold">Batches (RED)</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          KISS Batch Management 4.0 · SKU별 생산 시작일 기준
+          KISS Batch Management 4.0 · RED 바이어 전용 · SKU별 생산 시작일 기준
         </p>
       </div>
       {setupRequired && (
@@ -311,6 +326,7 @@ export default function ProductionBatchesPage() {
             </label>
             {!manual && (
               <RedBatchPoPicker
+                refreshKey={pickerRevision}
                 disabled={busy}
                 onChange={(selectedPo, line) => {
                   const origin =

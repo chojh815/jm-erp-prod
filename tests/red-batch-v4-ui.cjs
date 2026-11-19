@@ -311,3 +311,47 @@ test("Vietnam PO automatically selects JM Vietnam and vendor J", async () => {
   assert.equal(input(r, "vendor").props.value, "J");
   await act(async () => r.unmount());
 });
+test("PO filters default to pending, reload with unbatched scope and clear the selected item", async () => {
+  const requests = [];
+  global.fetch = async (url) => {
+    if (!url.includes("/options?")) return response({ rows: [] });
+    const params = new URL(url, "http://test").searchParams;
+    requests.push(params);
+    return params.has("po_id")
+      ? response({
+          rows: [
+            { id: LINE, sku_code: "649674165419", buyer_style_no: "HZ110" },
+          ],
+        })
+      : response({
+          rows: [
+            {
+              id: PO,
+              po_no: "RED-PO",
+              manufacturing_origin: "CN",
+              pending_qty: 10,
+              unbatched_pending_line_count: 1,
+            },
+          ],
+          hasMore: false,
+        });
+  };
+  const r = await mount();
+  await waitPicker();
+  assert.equal(requests[0].get("scope"), "pending");
+  await act(async () =>
+    findSelect(r, "-po").props.onChange({ target: { value: PO } }),
+  );
+  await act(async () =>
+    findSelect(r, "-line").props.onChange({ target: { value: LINE } }),
+  );
+  assert.equal(input(r, "sku").props.value, "649674165419");
+  await act(async () =>
+    findSelect(r, "-scope").props.onChange({ target: { value: "unbatched" } }),
+  );
+  assert.equal(input(r, "sku").props.value, "");
+  assert.equal(input(r, "po").props.value, "");
+  await waitPicker();
+  assert.equal(requests.at(-1).get("scope"), "unbatched");
+  await act(async () => r.unmount());
+});

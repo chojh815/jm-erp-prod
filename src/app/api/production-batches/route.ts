@@ -9,6 +9,7 @@ import {
   resolveRedBatchPoLine,
   loadRedBatchPo,
   listRedBatchPoLines,
+  resolveManualRedBatchPo,
 } from "@/lib/redBatchOrders";
 
 import {
@@ -209,6 +210,13 @@ export async function POST(req: Request) {
       }
       po = selection.po.po_no;
     }
+    if (!source && selectedPo === null && po) {
+      const manualPo = await resolveManualRedBatchPo(po);
+      const expected = redBatchManufacturerFromPo(manualPo);
+      if (expected && expected.vendorInitial !== vendor)
+        throw new BatchError("RED PO 제조국과 벤더 기호를 확인해 주세요.", 409);
+      po = manualPo.po_no;
+    }
     const result = check(
       await supabaseAdmin.rpc("create_kiss_batch_v4", {
         p_sku: sku,
@@ -262,6 +270,7 @@ export async function PUT(req: Request) {
       }
       po = selected.po_no;
     }
+    if (!body.po_id && po) await resolveManualRedBatchPo(po);
     const client = current ? supabaseAdmin : legacyClient();
     const row = check(
       await client

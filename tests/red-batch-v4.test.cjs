@@ -125,6 +125,10 @@ class Query {
     );
     return this;
   }
+  gt(k, v) {
+    this.filters.push((r) => Number(r[k]) > v);
+    return this;
+  }
   gte(k, v) {
     this.filters.push((r) => r[k] >= v);
     return this;
@@ -164,9 +168,21 @@ class Query {
         resolve,
         reject,
       );
-    let rows = (tables[this.table] || []).filter((r) =>
+    const underlying =
+      this.table === "v_red_batch_po_options"
+        ? "po_headers"
+        : this.table === "v_red_batch_po_lines"
+          ? "po_lines"
+          : this.table;
+    let rows = (tables[underlying] || []).filter((r) =>
       this.filters.every((f) => f(r)),
     );
+    if (this.table.startsWith("v_red_batch_"))
+      rows = rows.filter(
+        (r) =>
+          !r.is_deleted &&
+          !["CANCELLED", "CANCELED", "DELETED", "VOID"].includes(r.status),
+      );
     if (this.from !== undefined) rows = rows.slice(this.from, this.to + 1);
     if (this.patch) rows.forEach((r) => Object.assign(r, this.patch));
     if (this.action === "delete")
@@ -230,9 +246,25 @@ function fixture() {
   legacyError = null;
   tables = {
     companies: [{ id: U, company_type: "buyer", code: "RBK" }],
-    po_headers: [{ id: Q, po_no: "PO-1", buyer_id: U, is_deleted: false }],
+    po_headers: [
+      {
+        id: Q,
+        po_no: "PO-1",
+        buyer_id: U,
+        is_deleted: false,
+        pending_qty: 10,
+        unbatched_pending_line_count: 1,
+      },
+    ],
     po_lines: [
-      { id: U, po_header_id: Q, buyer_style_no: "ABC-100", is_deleted: false },
+      {
+        id: U,
+        po_header_id: Q,
+        buyer_style_no: "ABC-100",
+        is_deleted: false,
+        pending_qty: 10,
+        has_batch: false,
+      },
     ],
     production_batches: [
       {
@@ -398,7 +430,8 @@ test("lookup rejects anonymous users, foreign buyer PO ids and invalid search ra
     );
   tables.po_headers[0].buyer_id = Q;
   assert.equal(
-    (await options.GET(new Request("http://test?po_id=" + Q))).status,
+    (await options.GET(new Request("http://test?po_id=" + Q + "&scope=all")))
+      .status,
     404,
   );
 });
@@ -422,7 +455,9 @@ test("PO item selection includes color and UPC, and falls back to buyer style fo
       is_deleted: true,
     },
   );
-  const r = await options.GET(new Request("http://test?po_id=" + Q));
+  const r = await options.GET(
+    new Request("http://test?po_id=" + Q + "&scope=all"),
+  );
   assert.equal(r.status, 200);
   assert.equal(r.body.rows.length, 2);
   assert.equal(r.body.rows[0].sku_code, "ABC-100");
@@ -437,10 +472,12 @@ test("PO pagination provides later orders instead of silently limiting choices",
     buyer_id: U,
     is_deleted: false,
   }));
-  const first = await options.GET(new Request("http://test"));
+  const first = await options.GET(new Request("http://test?scope=all"));
   assert.equal(first.body.rows.length, 50);
   assert.equal(first.body.hasMore, true);
-  const second = await options.GET(new Request("http://test?offset=50"));
+  const second = await options.GET(
+    new Request("http://test?offset=50&scope=all"),
+  );
   assert.equal(second.body.rows.length, 2);
   assert.equal(second.body.hasMore, false);
 });
@@ -578,6 +615,91 @@ test("confirmed China Q and Vietnam J assignments are applied to saved batches",
     assert.equal(
       calls.find((call) => call.name === "create_kiss_batch_v4").args.p_vendor,
       vendor,
+    );
+  }
+});
+test("default PO options hide fully shipped orders and unbatched mode checks remaining items", async () => {
+  fixture();
+  tables.po_headers.push(
+    {
+      id: "done",
+      po_no: "DONE",
+      buyer_id: U,
+      pending_qty: 0,
+      unbatched_pending_line_count: 0,
+    },
+    {
+      id: "registered",
+      po_no: "REGISTERED",
+      buyer_id: U,
+      pending_qty: 10,
+      unbatched_pending_line_count: 0,
+    },
+    {
+      id: "cancelled",
+      po_no: "CANCELLED",
+      buyer_id: U,
+      status: "CANCELLED",
+      pending_qty: 100,
+    },
+  );
+  const pending = await options.GET(new Request("http://test"));
+  assert.deepEqual(
+    pending.body.rows.map((row) => row.po_no),
+    ["PO-1", "REGISTERED"],
+  );
+  const missing = await options.GET(new Request("http://test?scope=unbatched"));
+  assert.deepEqual(
+    missing.body.rows.map((row) => row.po_no),
+    ["PO-1"],
+  );
+  const all = await options.GET(new Request("http://test?scope=all"));
+  assert.deepEqual(
+    all.body.rows.map((row) => row.po_no),
+    ["PO-1", "DONE", "REGISTERED"],
+  );
+});
+test("unbatched item options omit registered and fully fulfilled lines", async () => {
+  fixture();
+  tables.po_lines.push(
+    {
+      id: Q,
+      po_header_id: Q,
+      buyer_style_no: "REGISTERED",
+      pending_qty: 10,
+      has_batch: true,
+    },
+    {
+      id: "done",
+      po_header_id: Q,
+      buyer_style_no: "DONE",
+      pending_qty: 0,
+      has_batch: false,
+    },
+  );
+  const r = await options.GET(
+    new Request("http://test?po_id=" + Q + "&scope=unbatched"),
+  );
+  assert.deepEqual(
+    r.body.rows.map((row) => row.sku_code),
+    ["ABC-100"],
+  );
+  assert.equal(
+    (await options.GET(new Request("http://test?scope=unknown"))).status,
+    400,
+  );
+});
+test("manual input cannot associate RED batches with another buyer or a cancelled PO", async () => {
+  for (const bad of ["buyer", "cancelled", "unknown"]) {
+    fixture();
+    if (bad === "buyer") tables.po_headers[0].buyer_id = Q;
+    if (bad === "cancelled") tables.po_headers[0].status = "CANCELLED";
+    if (bad === "unknown") tables.po_headers = [];
+    const r = await route.POST(req(payload({ po_no: "PO-1" })));
+    assert.ok([400, 404].includes(r.status));
+    assert.equal(
+      calls.some((call) => call.name === "create_kiss_batch_v4"),
+      false,
     );
   }
 });

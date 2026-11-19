@@ -3,11 +3,16 @@ import * as React from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { redBatchManufacturer } from "@/lib/redBatchVendors";
-import type { RedBatchPo, RedBatchPoLine } from "@/lib/redBatchOrders";
+import type {
+  RedBatchPo,
+  RedBatchPoLine,
+  RedBatchPoScope,
+} from "@/lib/redBatchOrders";
 
 type Props = {
   disabled?: boolean;
   selectItem?: boolean;
+  refreshKey?: number;
   onChange: (po: RedBatchPo | null, line: RedBatchPoLine | null) => void;
 };
 async function getOptions(params: URLSearchParams, signal: AbortSignal) {
@@ -25,9 +30,13 @@ const control =
 export default function RedBatchPoPicker({
   disabled,
   selectItem = true,
+  refreshKey = 0,
   onChange,
 }: Props) {
   const field = React.useId();
+  const [scope, setScope] = React.useState<RedBatchPoScope>(
+    selectItem ? "pending" : "all",
+  );
   const [search, setSearch] = React.useState("");
   const [offset, setOffset] = React.useState(0);
   const [pos, setPos] = React.useState<RedBatchPo[]>([]);
@@ -40,12 +49,19 @@ export default function RedBatchPoPicker({
   const [error, setError] = React.useState("");
   const [itemsError, setItemsError] = React.useState("");
   React.useEffect(() => {
+    setPo(null);
+    setLines([]);
+    setLineId("");
+    setOffset(0);
+    setItemsError("");
+  }, [refreshKey]);
+  React.useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError("");
     const timer = setTimeout(() => {
       void getOptions(
-        new URLSearchParams({ q: search, offset: String(offset) }),
+        new URLSearchParams({ q: search, offset: String(offset), scope }),
         controller.signal,
       )
         .then((data) => {
@@ -69,7 +85,7 @@ export default function RedBatchPoPicker({
       clearTimeout(timer);
       controller.abort();
     };
-  }, [search, offset]);
+  }, [search, offset, scope, refreshKey]);
   React.useEffect(() => {
     if (!po || !selectItem) {
       setLines([]);
@@ -79,7 +95,10 @@ export default function RedBatchPoPicker({
     const controller = new AbortController();
     setItemsLoading(true);
     setItemsError("");
-    void getOptions(new URLSearchParams({ po_id: po.id }), controller.signal)
+    void getOptions(
+      new URLSearchParams({ po_id: po.id, scope }),
+      controller.signal,
+    )
       .then((data) => {
         if (!controller.signal.aborted) setLines(data.rows || []);
       })
@@ -93,12 +112,36 @@ export default function RedBatchPoPicker({
         if (!controller.signal.aborted) setItemsLoading(false);
       });
     return () => controller.abort();
-  }, [po?.id, selectItem]);
+  }, [po?.id, selectItem, scope]);
   const choices =
     po && !pos.some((item) => item.id === po.id) ? [po, ...pos] : pos;
   const selected = lines.find((item) => item.id === lineId);
   return (
     <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
+      <div>
+        <label htmlFor={field + "-scope"} className="mb-1 block text-sm">
+          표시할 RED PO
+        </label>
+        <select
+          id={field + "-scope"}
+          className={control}
+          value={scope}
+          disabled={disabled}
+          onChange={(e) => {
+            setScope(e.target.value as RedBatchPoScope);
+            setOffset(0);
+            setPo(null);
+            setLines([]);
+            setLineId("");
+            setItemsError("");
+            onChange(null, null);
+          }}
+        >
+          <option value="pending">Pending RED PO · 미선적 잔량</option>
+          <option value="unbatched">Pending · 4.0 BATCH 미등록 품목</option>
+          <option value="all">전체 RED PO · 완료 건 포함</option>
+        </select>
+      </div>
       <div className="grid gap-3 md:grid-cols-2">
         <div>
           <label htmlFor={field + "-search"} className="mb-1 block text-sm">
@@ -146,7 +189,13 @@ export default function RedBatchPoPicker({
                 {item.po_no} ·{" "}
                 {redBatchManufacturer(item.manufacturing_origin)?.label ||
                   "제조지 미등록"}{" "}
-                · {item.status || "—"}
+                · 잔량 {Number(item.pending_qty || 0).toLocaleString()}
+                {item.unbatched_pending_line_count !== undefined
+                  ? " · 4.0 미등록 " +
+                    item.unbatched_pending_line_count +
+                    "품목"
+                  : ""}
+                {item.has_legacy_batch ? " · 기존 배치 있음" : ""}
               </option>
             ))}
           </select>
@@ -177,6 +226,10 @@ export default function RedBatchPoPicker({
           </Button>
         </div>
       )}
+      <p className="text-xs text-muted-foreground">
+        미등록 여부는 PO별 품목의 4.0 배치를 기준으로 확인합니다. 추가 생산·과거
+        자료는 전체 RED PO에서 찾을 수 있습니다.
+      </p>
       {error && (
         <p role="alert" className="text-sm text-red-700">
           {error}
@@ -212,6 +265,10 @@ export default function RedBatchPoPicker({
                   item.color,
                   item.size,
                   item.description,
+                  item.pending_qty !== undefined
+                    ? "잔량 " + Number(item.pending_qty).toLocaleString()
+                    : null,
+                  item.has_batch === true ? "4.0 등록됨" : null,
                 ]
                   .filter(Boolean)
                   .join(" · ")}
