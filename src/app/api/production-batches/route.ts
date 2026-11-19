@@ -11,6 +11,11 @@ import {
   listRedBatchPoLines,
 } from "@/lib/redBatchOrders";
 
+import {
+  redBatchManufacturer,
+  redBatchManufacturerFromPo,
+} from "@/lib/redBatchVendors";
+
 export const dynamic = "force-dynamic";
 class BatchError extends Error {
   constructor(
@@ -144,12 +149,7 @@ export async function POST(req: Request) {
       true,
     ).toUpperCase();
     const date = text(body.mfg_date, "생산 시작일", 10, true);
-    const vendor = text(
-      body.vendor_initial ?? "J",
-      "업체코드",
-      1,
-      true,
-    ).toUpperCase();
+    const vendor = text(body.vendor_initial, "업체코드", 1, true).toUpperCase();
     const type = text(body.label_type, "V/M 유형", 1, true).toUpperCase();
     const run = body.run_no ?? 1,
       version = body.version ?? 0;
@@ -159,6 +159,13 @@ export async function POST(req: Request) {
       (typeof source !== "string" || !RED_BATCH_UUID.test(source))
     )
       throw new BatchError("원본 배치를 확인해 주세요.");
+    const manufacturer = redBatchManufacturer(body.manufacturing_origin);
+    if (!source && (!manufacturer || !manufacturer.vendorInitial))
+      throw new BatchError("제조국과 KISS 지정 벤더 기호를 확인해 주세요.");
+    if (!source && manufacturer?.vendorInitial !== vendor)
+      throw new BatchError(
+        "선택한 제조국의 KISS 벤더 기호가 일치하지 않습니다.",
+      );
     if (!source && version !== 0)
       throw new BatchError("새 생산 배치는 라벨 버전 0으로 등록해 주세요.");
     try {
@@ -189,6 +196,17 @@ export async function POST(req: Request) {
           "PO 또는 품목 정보가 변경되었습니다. 다시 선택해 주세요.",
           409,
         );
+      if (!source) {
+        const expectedManufacturer = redBatchManufacturerFromPo(selection.po);
+        if (
+          expectedManufacturer &&
+          expectedManufacturer.origin !== manufacturer?.origin
+        )
+          throw new BatchError(
+            "PO 제조지가 변경되었습니다. PO와 품목을 다시 선택해 주세요.",
+            409,
+          );
+      }
       po = selection.po.po_no;
     }
     const result = check(

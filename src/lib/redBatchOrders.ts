@@ -1,4 +1,5 @@
 import { supabaseAdmin as db } from "@/lib/supabaseAdmin";
+import { redBatchManufacturerFromPo } from "@/lib/redBatchVendors";
 
 export type RedBatchPo = {
   id: string;
@@ -7,6 +8,9 @@ export type RedBatchPo = {
   buyer_name: string | null;
   status: string | null;
   is_deleted?: boolean | null;
+  shipping_origin_code?: string | null;
+  origin_code?: string | null;
+  manufacturing_origin?: string | null;
 };
 export type RedBatchPoLine = {
   id: string;
@@ -58,21 +62,28 @@ export async function loadRedBatchPo(id: string): Promise<RedBatchPo> {
     redBuyerIds(),
     db
       .from("po_headers")
-      .select("id,po_no,buyer_id,buyer_name,status,is_deleted")
+      .select(
+        "id,po_no,buyer_id,buyer_name,status,is_deleted,shipping_origin_code,origin_code",
+      )
       .eq("id", id)
       .maybeSingle(),
   ]);
   const po = checked(result);
   if (!po || po.is_deleted || !ids.includes(po.buyer_id))
     throw new OrderError("선택한 RED PO가 없거나 삭제되었습니다.", 404);
-  return po;
+  return {
+    ...po,
+    manufacturing_origin: redBatchManufacturerFromPo(po)?.origin || null,
+  };
 }
 export async function listRedBatchPos(search: string, offset: number) {
   const ids = await redBuyerIds();
   if (!ids.length) return { rows: [], hasMore: false };
   let query = db
     .from("po_headers")
-    .select("id,po_no,buyer_id,buyer_name,status,is_deleted")
+    .select(
+      "id,po_no,buyer_id,buyer_name,status,is_deleted,shipping_origin_code,origin_code",
+    )
     .in("buyer_id", ids)
     .or("is_deleted.is.null,is_deleted.eq.false");
   if (search)
@@ -84,7 +95,15 @@ export async function listRedBatchPos(search: string, offset: number) {
         .order("id", { ascending: false })
         .range(offset, offset + 50),
     ) || [];
-  return { rows: rows.slice(0, 50), hasMore: rows.length > 50 };
+  return {
+    rows: rows
+      .slice(0, 50)
+      .map((po: RedBatchPo) => ({
+        ...po,
+        manufacturing_origin: redBatchManufacturerFromPo(po)?.origin || null,
+      })),
+    hasMore: rows.length > 50,
+  };
 }
 const lineFields =
   "id,po_header_id,line_no,buyer_style_no,buyer_style_code,upc,color,size,description,is_deleted";

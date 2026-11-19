@@ -19,6 +19,7 @@ function load(file, mocks = {}) {
   return m.exports;
 }
 const rules = load("src/lib/redBatchCode.ts");
+const vendors = load("src/lib/redBatchVendors.ts");
 const make = (date, extra = {}) =>
   rules.makeRedBatchCode({ mfgDate: date, labelType: "V", ...extra });
 test("ISO week-year and 53rd week match the new guideline across year boundaries", () => {
@@ -187,6 +188,7 @@ const db = {
 };
 const orders = load("src/lib/redBatchOrders.ts", {
   "@/lib/supabaseAdmin": { supabaseAdmin: db },
+  "@/lib/redBatchVendors": vendors,
 });
 const route = load("src/app/api/production-batches/route.ts", {
   "next/server": {
@@ -208,11 +210,13 @@ const route = load("src/app/api/production-batches/route.ts", {
   "@/lib/supabaseAdmin": { supabaseAdmin: db },
   "@/lib/redBatchCode": rules,
   "@/lib/redBatchOrders": orders,
+  "@/lib/redBatchVendors": vendors,
 });
 const payload = (overrides = {}) => ({
   sku_code: " abc-100 ",
   mfg_date: "2026-11-19",
-  vendor_initial: "J",
+  vendor_initial: vendors.redBatchManufacturer("CN").vendorInitial,
+  manufacturing_origin: "CN",
   run_no: 1,
   label_type: "M",
   version: 0,
@@ -504,4 +508,76 @@ test("changing a saved batch PO validates that the new order contains its SKU", 
     calls.some((call) => call.action === "update"),
     false,
   );
+});
+test("PO manufacturing country resolves to the corresponding manufacturer", () => {
+  assert.equal(
+    vendors.redBatchManufacturerFromPo({ shipping_origin_code: "CN_QINGDAO" })
+      ?.origin,
+    "CN",
+  );
+  assert.equal(
+    vendors.redBatchManufacturerFromPo({ shipping_origin_code: "VN_BACNINH" })
+      ?.origin,
+    "VN",
+  );
+  assert.equal(
+    vendors.redBatchManufacturerFromPo({ origin_code: "CN_JIAOZHOU" })?.origin,
+    "CN",
+  );
+  assert.equal(
+    vendors.redBatchManufacturerFromPo({ shipping_origin_code: "KR_SEOUL" }),
+    null,
+  );
+});
+test("a PO manufacturing origin mismatch cannot save a batch with a different vendor", async () => {
+  fixture();
+  tables.po_headers[0].shipping_origin_code = "VN_BACNINH";
+  const r = await route.POST(
+    req(payload({ po_no: "PO-1", po_id: Q, po_line_id: U })),
+  );
+  assert.equal(r.status, 409);
+  assert.equal(
+    calls.some((call) => call.name === "create_kiss_batch_v4"),
+    false,
+  );
+});
+test("new batches require an explicit manufacturing choice and its assigned vendor", async () => {
+  fixture();
+  for (const extra of [
+    { manufacturing_origin: "" },
+    { manufacturing_origin: "CN", vendor_initial: "X" },
+    { manufacturing_origin: "VN", vendor_initial: "Q" },
+  ])
+    assert.equal((await route.POST(req(payload(extra)))).status, 400);
+  assert.equal(
+    calls.some((call) => call.name === "create_kiss_batch_v4"),
+    false,
+  );
+});
+test("confirmed China Q and Vietnam J assignments are applied to saved batches", async () => {
+  assert.equal(vendors.redBatchManufacturer("CN").vendorInitial, "Q");
+  assert.equal(vendors.redBatchManufacturer("VN").vendorInitial, "J");
+  for (const [origin, vendor, poOrigin] of [
+    ["CN", "Q", "CN_QINGDAO"],
+    ["VN", "J", "VN_BACNINH"],
+  ]) {
+    fixture();
+    tables.po_headers[0].shipping_origin_code = poOrigin;
+    const r = await route.POST(
+      req(
+        payload({
+          po_no: "PO-1",
+          po_id: Q,
+          po_line_id: U,
+          manufacturing_origin: origin,
+          vendor_initial: vendor,
+        }),
+      ),
+    );
+    assert.equal(r.status, 200);
+    assert.equal(
+      calls.find((call) => call.name === "create_kiss_batch_v4").args.p_vendor,
+      vendor,
+    );
+  }
 });

@@ -2,6 +2,7 @@
 import * as React from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { redBatchManufacturer } from "@/lib/redBatchVendors";
 import type { RedBatchPo, RedBatchPoLine } from "@/lib/redBatchOrders";
 
 type Props = {
@@ -142,7 +143,10 @@ export default function RedBatchPoPicker({
             </option>
             {choices.map((item) => (
               <option key={item.id} value={item.id}>
-                {item.po_no} · {item.status || "—"}
+                {item.po_no} ·{" "}
+                {redBatchManufacturer(item.manufacturing_origin)?.label ||
+                  "제조지 미등록"}{" "}
+                · {item.status || "—"}
               </option>
             ))}
           </select>

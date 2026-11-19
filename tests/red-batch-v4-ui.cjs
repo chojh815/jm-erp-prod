@@ -42,7 +42,9 @@ function load(file) {
               ? load("src/lib/redBatchCode.ts")
               : s === "@/components/production/RedBatchPoPicker"
                 ? load("src/components/production/RedBatchPoPicker.tsx")
-                : require(s),
+                : s === "@/lib/redBatchVendors"
+                  ? load("src/lib/redBatchVendors.ts")
+                  : require(s),
     m,
     m.exports,
   );
@@ -101,11 +103,12 @@ test("new batch form previews ISO week 53, run 2 and saves label version zero", 
   await act(async () =>
     input(r, "manual-entry").props.onChange({ target: { checked: true } }),
   );
+  await change(r, "manufacturing-origin", "CN");
   await change(r, "sku", "ASSORT-1");
   await change(r, "start-date", "2027-01-01");
   await change(r, "label-type", "M");
   await change(r, "run", "2");
-  assert.ok(JSON.stringify(r.toJSON()).includes("JZ53NM0"));
+  assert.ok(JSON.stringify(r.toJSON()).includes("QZ53NM0"));
   await act(async () => r.root.findAllByType("form")[0].props.onSubmit(event));
   assert.equal(posts.length, 1);
   assert.equal(posts[0].run_no, 2);
@@ -125,7 +128,7 @@ test("revision action locks production identity and saves a source-linked label 
   assert.equal(posts[0].source_id, Q);
   assert.equal(posts[0].version, 1);
   assert.equal(posts[0].run_no, 1);
-  r.unmount();
+  await act(async () => r.unmount());
 });
 test("missing schema disables saving while old batch history stays visible", async () => {
   network([{ ...row, guideline_version: "legacy", sku_code: undefined }], true);
@@ -176,7 +179,14 @@ test("selecting a PO and item auto fills SKU and PO, and sends selection ids on 
             ],
           })
         : response({
-            rows: [{ id: PO, po_no: "4500162462", status: "CONFIRMED" }],
+            rows: [
+              {
+                id: PO,
+                po_no: "4500162462",
+                manufacturing_origin: "CN",
+                status: "CONFIRMED",
+              },
+            ],
             hasMore: false,
           });
     }
@@ -194,6 +204,9 @@ test("selecting a PO and item auto fills SKU and PO, and sends selection ids on 
   assert.equal(input(r, "sku").props.value, "649674165419");
   assert.equal(input(r, "po").props.value, "4500162462");
   assert.ok(input(r, "sku").props.readOnly);
+  assert.equal(input(r, "vendor").props.value, "Q");
+  assert.ok(input(r, "vendor").props.readOnly);
+  assert.ok(input(r, "manufacturing-origin").props.disabled);
   await change(r, "start-date", "2026-11-19");
   await change(r, "label-type", "M");
   await act(async () => r.root.findAllByType("form")[0].props.onSubmit(event));
@@ -250,5 +263,51 @@ test("changing PO clears the previous SKU and ignores an older in-flight item re
   );
   assert.equal(input(r, "sku").props.value, "NEW");
   assert.equal(input(r, "po").props.value, "PO-2");
+  await act(async () => r.unmount());
+});
+test("manual manufacturing selection changes the first letter from China Q to Vietnam J", async () => {
+  network();
+  const r = await mount();
+  await act(async () =>
+    input(r, "manual-entry").props.onChange({ target: { checked: true } }),
+  );
+  await change(r, "sku", "ASSORT-1");
+  await change(r, "start-date", "2026-11-19");
+  await change(r, "label-type", "M");
+  await change(r, "manufacturing-origin", "CN");
+  assert.equal(input(r, "vendor").props.value, "Q");
+  assert.ok(JSON.stringify(r.toJSON()).includes("QZ47DM0"));
+  await change(r, "manufacturing-origin", "VN");
+  assert.equal(input(r, "vendor").props.value, "J");
+  assert.ok(JSON.stringify(r.toJSON()).includes("JZ47DM0"));
+  await act(async () => r.unmount());
+});
+test("Vietnam PO automatically selects JM Vietnam and vendor J", async () => {
+  global.fetch = async (url) => {
+    if (!url.includes("/options?")) return response({ rows: [] });
+    if (new URL(url, "http://test").searchParams.has("po_id"))
+      return response({
+        rows: [{ id: LINE, sku_code: "VN-STYLE", buyer_style_no: "VN-STYLE" }],
+      });
+    return response({
+      rows: [
+        {
+          id: PO,
+          po_no: "VN-PO-1",
+          manufacturing_origin: "VN",
+          status: "CONFIRMED",
+        },
+      ],
+      hasMore: false,
+    });
+  };
+  const r = await mount();
+  await waitPicker();
+  await act(async () =>
+    findSelect(r, "-po").props.onChange({ target: { value: PO } }),
+  );
+  assert.equal(input(r, "manufacturing-origin").props.value, "VN");
+  assert.ok(input(r, "manufacturing-origin").props.disabled);
+  assert.equal(input(r, "vendor").props.value, "J");
   await act(async () => r.unmount());
 });

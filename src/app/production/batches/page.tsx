@@ -1,6 +1,11 @@
 "use client";
 
 import * as React from "react";
+import {
+  RED_BATCH_MANUFACTURERS,
+  redBatchManufacturer,
+  redBatchManufacturerFromPo,
+} from "@/lib/redBatchVendors";
 import RedBatchPoPicker from "@/components/production/RedBatchPoPicker";
 import { redBatchDetails } from "@/lib/redBatchCode";
 import { Button } from "@/components/ui/button";
@@ -37,7 +42,9 @@ const control =
 export default function ProductionBatchesPage() {
   const [sku, setSku] = React.useState("");
   const [date, setDate] = React.useState(today);
-  const [vendor, setVendor] = React.useState("J");
+  const [vendor, setVendor] = React.useState("");
+  const [manufacturingOrigin, setManufacturingOrigin] = React.useState("");
+  const [poManufacturingOrigin, setPoManufacturingOrigin] = React.useState("");
   const [run, setRun] = React.useState(1);
   const [type, setType] = React.useState("");
   const [po, setPo] = React.useState("");
@@ -106,7 +113,13 @@ export default function ProductionBatchesPage() {
     setLineId(null);
     setSku(row.sku_code || "");
     setDate(row.mfg_date);
-    setVendor(row.vendor_initial || "J");
+    setVendor(row.vendor_initial || "");
+    setManufacturingOrigin(
+      RED_BATCH_MANUFACTURERS.find(
+        (item) => item.vendorInitial === row.vendor_initial,
+      )?.origin || "",
+    );
+    setPoManufacturingOrigin("");
     setRun(row.run_no || 1);
     setType(row.label_type);
     setPo(row.po_no || "");
@@ -135,6 +148,7 @@ export default function ProductionBatchesPage() {
           sku_code: sku,
           mfg_date: date,
           vendor_initial: vendor,
+          manufacturing_origin: manufacturingOrigin,
           run_no: run,
           label_type: type,
           version,
@@ -251,6 +265,9 @@ export default function ProductionBatchesPage() {
                 setPoId(null);
                 setLineId(null);
                 if (!manual) {
+                  setManufacturingOrigin("");
+                  setPoManufacturingOrigin("");
+                  setVendor("");
                   setSku("");
                   setPo("");
                 }
@@ -278,9 +295,13 @@ export default function ProductionBatchesPage() {
                 disabled={busy}
                 onChange={(e) => {
                   setManual(e.target.checked);
+                  setPoManufacturingOrigin("");
                   setPoId(null);
                   setLineId(null);
                   if (!e.target.checked) {
+                    setManufacturingOrigin("");
+                    setPoManufacturingOrigin("");
+                    setVendor("");
                     setSku("");
                     setPo("");
                   }
@@ -292,6 +313,17 @@ export default function ProductionBatchesPage() {
               <RedBatchPoPicker
                 disabled={busy}
                 onChange={(selectedPo, line) => {
+                  const origin =
+                    selectedPo?.manufacturing_origin ||
+                    redBatchManufacturerFromPo(selectedPo || {})?.origin ||
+                    "";
+                  setPoManufacturingOrigin(origin);
+                  if (selectedPo?.id !== poId || origin) {
+                    setManufacturingOrigin(origin);
+                    setVendor(
+                      redBatchManufacturer(origin)?.vendorInitial || "",
+                    );
+                  }
                   setPo(selectedPo?.po_no || "");
                   setPoId(selectedPo?.id || null);
                   setSku(line?.sku_code || "");
@@ -303,6 +335,44 @@ export default function ProductionBatchesPage() {
           </>
         )}
         <div className="grid gap-4 md:grid-cols-3">
+          <div>
+            <label
+              htmlFor="manufacturing-origin"
+              className="mb-1 block text-sm"
+            >
+              제조국 / 제조업체
+            </label>
+            <select
+              id="manufacturing-origin"
+              className={control}
+              value={manufacturingOrigin}
+              disabled={busy || !!source || !!poManufacturingOrigin}
+              required={!source}
+              onChange={(e) => {
+                setManufacturingOrigin(e.target.value);
+                setVendor(
+                  redBatchManufacturer(e.target.value)?.vendorInitial || "",
+                );
+              }}
+            >
+              <option value="">제조국을 선택해 주세요</option>
+              {RED_BATCH_MANUFACTURERS.map((item) => (
+                <option key={item.origin} value={item.origin}>
+                  {item.label} · {item.vendorInitial || "벤더 기호 확인 필요"}
+                </option>
+              ))}
+            </select>
+            {poManufacturingOrigin && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                선택한 PO의 제조지를 자동 적용했습니다.
+              </p>
+            )}
+            {!source && manufacturingOrigin && !vendor && (
+              <p role="alert" className="mt-1 text-sm text-red-700">
+                이 제조업체의 KISS 지정 벤더 기호 확인이 필요합니다.
+              </p>
+            )}
+          </div>
           <div>
             <label htmlFor="sku" className="mb-1 block text-sm">
               SKU / 바이어 스타일 번호
@@ -343,9 +413,9 @@ export default function ProductionBatchesPage() {
               id="vendor"
               value={vendor}
               maxLength={1}
+              readOnly
               required
               disabled={busy || !!source}
-              onChange={(e) => setVendor(e.target.value.toUpperCase())}
             />
           </div>
           <div>
