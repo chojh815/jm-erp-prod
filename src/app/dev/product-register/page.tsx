@@ -23,7 +23,12 @@ import {
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import ExcelJS from "exceljs";
-import { isValidStyleNo } from "@/lib/styleNo";
+import { getStylePrefix, isValidStyleNo, type StyleCategoryCode } from "@/lib/styleNo";
+import {
+  garmentSubcategories,
+  isGarmentSubcategory,
+  type GarmentSubcategory,
+} from "@/lib/garmentSubcategories";
 
 type DevRole = AppRole;
 
@@ -44,17 +49,6 @@ type OperationRow = {
   supplier: string;
 };
 
-type ProductCategoryCode =
-  | "N"
-  | "E"
-  | "B"
-  | "K"
-  | "A"
-  | "R"
-  | "H"
-  | "S"
-  | "O";
-
 type CompanyOption = {
   id: string;
   name: string;
@@ -66,6 +60,7 @@ type SearchResultRow = {
   styleNo: string;
   productName: string | null;
   productType: string | null;
+  productSubcategory: GarmentSubcategory | null;
   devDate: string | null;
   currency: string | null;
 };
@@ -102,7 +97,10 @@ export default function ProductRegisterPage() {
   const [legacyStyleMode, setLegacyStyleMode] = React.useState(false);
 
   const [productCategory, setProductCategory] =
-    React.useState<ProductCategoryCode | "">("");
+    React.useState<StyleCategoryCode | "">("");
+  const [productSubcategory, setProductSubcategory] =
+    React.useState<GarmentSubcategory | "">("");
+  const [loadedUnclassifiedGarment, setLoadedUnclassifiedGarment] = React.useState(false);
   const [productType, setProductType] = React.useState("");
   const [weight, setWeight] = React.useState<string>("");
   const [size, setSize] = React.useState("");
@@ -136,6 +134,7 @@ export default function ProductRegisterPage() {
   // Search popup state
   const [searchOpen, setSearchOpen] = React.useState(false);
   const [searchKeyword, setSearchKeyword] = React.useState("");
+  const [searchSubcategory, setSearchSubcategory] = React.useState<GarmentSubcategory | "">("");
   const [searchResults, setSearchResults] = React.useState<SearchResultRow[]>([]);
   const [searchLoading, setSearchLoading] = React.useState(false);
   const [searchError, setSearchError] = React.useState<string | null>(null);
@@ -513,6 +512,8 @@ export default function ProductRegisterPage() {
     setStyleError(null);
     setLegacyStyleMode(false);
     setProductCategory("");
+    setProductSubcategory("");
+    setLoadedUnclassifiedGarment(false);
     setProductType("");
     setWeight("");
     setSize("");
@@ -754,7 +755,9 @@ export default function ProductRegisterPage() {
       mergeValue("A4:B4", "Style No.", labelOptions);
       mergeValue("C4:D4", styleNo, { bold: true, size: 12 });
       mergeValue("E4:F4", "Product Category", labelOptions);
-      sheet.getCell("G4").value = productCategory || "-";
+      sheet.getCell("G4").value = productCategory === "G" && productSubcategory
+        ? `G / ${garmentSubcategories[productSubcategory]}`
+        : productCategory || "-";
 
       mergeValue("A5:B5", "Product Name", labelOptions);
       mergeValue("C5:G5", productType || "-");
@@ -1031,7 +1034,11 @@ export default function ProductRegisterPage() {
       }
     }
 
-    setProductCategory((header.product_category ?? "") as ProductCategoryCode | "");
+    setProductCategory((header.product_category ?? "") as StyleCategoryCode | "");
+    const subcategory = header.product_category === "G" && isGarmentSubcategory(header.product_subcategory)
+      ? header.product_subcategory : "";
+    setProductSubcategory(subcategory);
+    setLoadedUnclassifiedGarment(header.product_category === "G" && !subcategory);
     setProductType(String(header.product_type ?? ""));
     setWeight(String(header.weight ?? header.weight_g ?? ""));
     setSize(String(header.size ?? header.size_text ?? ""));
@@ -1181,6 +1188,12 @@ export default function ProductRegisterPage() {
       return;
     }
 
+    if (productCategory === "G" && !productSubcategory &&
+        !(loadedUnclassifiedGarment && loadedStyleNo === trimmed)) {
+      alert("Garment subcategory is required.");
+      return;
+    }
+
     // 4) 실제 저장 전, 존재여부 확인 + 덮어쓰기 경고
     let exists = false;
 
@@ -1270,6 +1283,14 @@ export default function ProductRegisterPage() {
     }
 
     // 포맷 통일
+    if (!exists && !legacyStyleMode && (productCategory === "G" || productCategory === "C" || productCategory === "P")) {
+      const prefix = getStylePrefix(productCategory);
+      if (!trimmed.startsWith(prefix)) {
+        alert(`This category requires a style number starting with ${prefix}. Use Auto Generate.`);
+        return;
+      }
+    }
+
     if (trimmed !== styleNo) {
       setStyleNo(trimmed);
     }
@@ -1281,6 +1302,7 @@ export default function ProductRegisterPage() {
     const payload = {
       styleNo: trimmed,
       productCategory: productCategory || null,
+      productSubcategory: productCategory === "G" ? productSubcategory || null : null,
       productType: productType.trim() || null,
       weight: weightNum,
       size: size.trim() || null,
@@ -1334,6 +1356,7 @@ export default function ProductRegisterPage() {
         : "새 스타일이 성공적으로 저장되었습니다.";
 
       setLoadedStyleNo(trimmed);
+      setLoadedUnclassifiedGarment(productCategory === "G" && !productSubcategory);
       setDuplicateSourceStyleNo(null);
 
       // ===== 이미지가 선택된 경우 → 추가 업로드 =====
@@ -1418,6 +1441,14 @@ export default function ProductRegisterPage() {
       setStyleNo(newStyleNo);
       setStyleError(null);
 
+      const baseCategory = data.header?.product_category;
+      if (baseCategory === "G" || baseCategory === "C" || baseCategory === "P") {
+        setProductCategory(baseCategory);
+        const baseSubcategory = data.header?.product_subcategory;
+        setProductSubcategory(baseCategory === "G" && isGarmentSubcategory(baseSubcategory)
+          ? baseSubcategory : "");
+      }
+
       // Copy materials & operations from base style
       const matRows: MaterialRow[] =
         (data.materials as any[] | null)?.map((m, idx) => ({
@@ -1460,10 +1491,8 @@ export default function ProductRegisterPage() {
   const handleSearch = async () => {
     const kw = searchKeyword.trim().toUpperCase();
 
-    if (kw.length < 2) {
-      setSearchError(
-        "Please enter at least 6 characters of the style no. (e.g. JN2500)."
-      );
+    if ((!searchSubcategory || kw) && kw.length < 2) {
+      setSearchError("Enter at least 2 style number characters or select a garment subcategory.");
       setSearchResults([]);
       setSearchHasMore(false);
       return;
@@ -1476,6 +1505,7 @@ export default function ProductRegisterPage() {
       setSearchHasMore(false);
 
       const params = new URLSearchParams({ keyword: kw });
+      if (searchSubcategory) params.set("subcategory", searchSubcategory);
       const res = await fetch(`/api/dev/products/search?${params.toString()}`, {
         method: "GET",
       });
@@ -1503,6 +1533,7 @@ export default function ProductRegisterPage() {
           (p.product_type as string | null | undefined) ??
           (p.productType as string | null | undefined) ??
           null,
+        productSubcategory: isGarmentSubcategory(p.productSubcategory) ? p.productSubcategory : null,
         devDate: (p.dev_date as string | null | undefined) ?? null,
         currency: (p.currency as string | null | undefined) ?? null,
       }));
@@ -1625,6 +1656,8 @@ export default function ProductRegisterPage() {
   }
 
   // ================= UI =================
+  const historySubcategory: unknown = selectedHistory?.snapshot.header?.product_subcategory;
+
   return (
     <AppShell
       role={role}
@@ -1645,6 +1678,7 @@ export default function ProductRegisterPage() {
                 onClick={() => {
                   setSearchOpen(true);
                   setSearchKeyword("");
+                  setSearchSubcategory("");
                   setSearchResults([]);
                   setSearchError(null);
                   setSearchHasMore(false);
@@ -1798,9 +1832,10 @@ export default function ProductRegisterPage() {
                     ) : (
                       <Select
                         value={productCategory || ""}
-                        onValueChange={(v) =>
-                          setProductCategory(v as ProductCategoryCode)
-                        }
+                        onValueChange={(v) => {
+                          setProductCategory(v as StyleCategoryCode);
+                          if (v !== "G") setProductSubcategory("");
+                        }}
                       >
                         <SelectTrigger className="h-9">
                           <SelectValue placeholder="Select" />
@@ -1814,7 +1849,10 @@ export default function ProductRegisterPage() {
                           <SelectItem value="K">Keyring (JK)</SelectItem>
                           <SelectItem value="A">Anklet (JA)</SelectItem>
                           <SelectItem value="S">Set (JS)</SelectItem>
-                          <SelectItem value="P">Pin (JP)</SelectItem>
+                          <SelectItem value="P">Pet Supplies (JP)</SelectItem>
+                          <SelectItem value="T">Toy (JT)</SelectItem>
+                          <SelectItem value="G">Garment (JG)</SelectItem>
+                          <SelectItem value="C">Bags (JC)</SelectItem>
                           <SelectItem value="O">Other (JO)</SelectItem>
                         </SelectContent>
                       </Select>
@@ -1867,6 +1905,30 @@ export default function ProductRegisterPage() {
                     )}
                   </div>
                 </div>
+
+                {productCategory === "G" && (
+                  <div className="max-w-xs">
+                    <Label className="mb-2 block" htmlFor="garment-subcategory">Subcategory</Label>
+                    {isPrintMode ? (
+                      <div className="min-h-[34px] flex items-center justify-center px-3 border rounded-md bg-white text-xs">
+                        {productSubcategory ? garmentSubcategories[productSubcategory] : "-"}
+                      </div>
+                    ) : (
+                      <Select value={productSubcategory} onValueChange={(value) => {
+                        if (isGarmentSubcategory(value)) setProductSubcategory(value);
+                      }}>
+                        <SelectTrigger id="garment-subcategory" className="h-9">
+                          <SelectValue placeholder="Select a garment subcategory" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Object.entries(garmentSubcategories).map(([value, label]) => (
+                            <SelectItem key={value} value={value}>{label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -2598,6 +2660,24 @@ export default function ProductRegisterPage() {
               </Button>
             </div>
 
+            <Label htmlFor="search-garment-subcategory" className="mb-1 block">
+              Garment subcategory
+            </Label>
+            <select
+              id="search-garment-subcategory"
+              className="mb-2 h-9 w-full rounded-md border bg-background px-3 text-sm"
+              value={searchSubcategory}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSearchSubcategory(isGarmentSubcategory(value) ? value : "");
+              }}
+            >
+              <option value="">All styles</option>
+              {Object.entries(garmentSubcategories).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+
             {searchError && (
               <p className="text-[11px] text-red-500 mb-1">{searchError}</p>
             )}
@@ -2622,6 +2702,7 @@ export default function ProductRegisterPage() {
                     </div>
                     <div className="text-slate-500">
                       {row.productType || "-"}
+                      {row.productSubcategory ? ` | ${garmentSubcategories[row.productSubcategory]}` : ""}
                       {row.devDate ? ` | ${row.devDate}` : ""}
                       {row.currency ? ` | ${row.currency}` : ""}
                     </div>
@@ -2734,6 +2815,8 @@ export default function ProductRegisterPage() {
                       <div>
                         <span className="font-semibold">Category:</span>{" "}
                         {selectedHistory.snapshot?.header?.product_category || "-"}
+                        {isGarmentSubcategory(historySubcategory) &&
+                          ` / ${garmentSubcategories[historySubcategory]}`}
                       </div>
                       <div>
                         <span className="font-semibold">Dev Date:</span>{" "}

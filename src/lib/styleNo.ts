@@ -9,7 +9,11 @@ export type StyleCategoryCode =
   | "R"
   | "H"
   | "S"
-  | "O";
+  | "O"
+  | "T"
+  | "G"
+  | "C"
+  | "P";
 
 /** 카테고리에서 프리픽스(JN, JE, ...) 생성 */
 export function getStylePrefix(category: StyleCategoryCode): string {
@@ -37,13 +41,13 @@ export function isValidStyleNo(styleNo: string): boolean {
   if (!styleNo) return false;
   const s = styleNo.trim().toUpperCase();
   // J + 카테고리 + YY + 4자리 + 선택 1글자 suffix
-  return /^J[NEBRHKASO][0-9]{2}[0-9]{4}[A-Z]?$/.test(s);
+  return /^J[NEBRHKASOTGCP][0-9]{2}[0-9]{4}[A-Z]?$/.test(s);
 }
 
 /** (필요하면) 파싱용 */
 export function parseStyleNo(styleNo: string) {
   const s = styleNo.trim().toUpperCase();
-  if (!/^J[NEBRHKASO][0-9]{2}[0-9]{4}[A-Z]?$/.test(s)) return null;
+  if (!/^J[NEBRHKASOTGCP][0-9]{2}[0-9]{4}[A-Z]?$/.test(s)) return null;
   const category = s[1] as StyleCategoryCode;
   const yearYY = s.slice(2, 4);
   const seq = Number(s.slice(4, 8));

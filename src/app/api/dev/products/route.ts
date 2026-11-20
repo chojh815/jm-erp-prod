@@ -1,6 +1,7 @@
 // src/app/api/dev/products/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { isGarmentSubcategory } from "@/lib/garmentSubcategories";
 
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
@@ -189,6 +190,7 @@ export async function GET(req: NextRequest) {
         style_no: r.style_no,
         styleNo: r.style_no,
         product_category: r.product_category ?? null,
+        product_subcategory: r.product_subcategory ?? null,
         product_type: r.product_type ?? null,
         dev_date: r.dev_date ?? null,
         developer: r.developer ?? null,
@@ -217,19 +219,39 @@ export async function POST(req: NextRequest) {
     if (!styleNo) return bad("Style No. is required.", 400);
     const createOnly = body.createOnly === true;
 
-    if (createOnly) {
+    const productCategory = body.productCategory ?? body.product_category ?? null;
+    const suppliedSubcategory = body.productSubcategory !== undefined
+      ? body.productSubcategory
+      : body.product_subcategory;
+    let productSubcategory = null;
+
+    if (suppliedSubcategory != null &&
+        (productCategory !== "G" || !isGarmentSubcategory(suppliedSubcategory))) {
+      return bad("Select a valid garment subcategory.", 400);
+    }
+
+    if (createOnly || (productCategory === "G" && suppliedSubcategory == null)) {
       const existing = await getHeaderByStyleNo(styleNo);
       if (existing.error) {
-        return bad("Failed to check the new style number.", 500, {
-          detail: existing.error?.message,
+        return bad("Failed to check the existing style.", 500, {
+          detail: existing.error.message,
         });
       }
-      if (existing.data?.id) {
+      if (createOnly && existing.data?.id) {
         return bad("This style number already exists. Enter a new style number.", 409);
+      }
+      if (productCategory === "G" && suppliedSubcategory == null) {
+        if (createOnly || existing.data?.product_category !== "G" ||
+            (suppliedSubcategory === null && existing.data.product_subcategory != null)) {
+          return bad("Garment subcategory is required.", 400);
+        }
+        productSubcategory = existing.data.product_subcategory ?? null;
       }
     }
 
-    const productCategory = body.productCategory ?? body.product_category ?? null;
+    if (isGarmentSubcategory(suppliedSubcategory)) {
+      productSubcategory = suppliedSubcategory;
+    }
     const productType = body.productType ?? body.product_type ?? null;
 
     const weightG = safeNumber(body.weight_g ?? body.weightG ?? body.weight ?? 0, 0);
@@ -250,6 +272,7 @@ export async function POST(req: NextRequest) {
     const headerPayload: any = {
       style_no: styleNo,
       product_category: productCategory,
+      product_subcategory: productSubcategory,
       product_type: productType,
       weight_g: weightG,
       size_text: sizeText,

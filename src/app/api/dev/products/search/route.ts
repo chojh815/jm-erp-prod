@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { isGarmentSubcategory } from "@/lib/garmentSubcategories";
 
 function ok(data: any = {}) {
   return NextResponse.json({ success: true, ...data });
@@ -13,29 +14,40 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const keywordRaw = (url.searchParams.get("keyword") || "").toString().trim();
     const keyword = keywordRaw.toUpperCase();
-    if (!keyword) return ok({ items: [], hasMore: false });
+    const subcategory = url.searchParams.get("subcategory");
+    if (subcategory !== null && !isGarmentSubcategory(subcategory)) {
+      return bad("Invalid garment subcategory.");
+    }
+    if (!keyword && !subcategory) return ok({ items: [], hasMore: false });
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from("product_development_headers")
-      .select("id, style_no, product_type, product_category, dev_date, updated_at")
-      .eq("is_deleted", false)
-      .ilike("style_no", `%${keyword}%`)
+      .select("id, style_no, product_type, product_category, product_subcategory, dev_date")
+      .eq("is_deleted", false);
+    if (keyword) query = query.ilike("style_no", `%${keyword}%`);
+    if (subcategory) {
+      query = query.eq("product_category", "G").eq("product_subcategory", subcategory);
+    }
+
+    const { data, error } = await query
       .order("updated_at", { ascending: false })
-      .limit(50);
+      .order("style_no")
+      .limit(51);
 
     if (error) return bad("Failed to search products.", 500, { detail: error.message });
 
-    const items = (data ?? []).map((r: any) => ({
+    const items = (data ?? []).slice(0, 50).map((r: any) => ({
       id: r.id,
       styleNo: r.style_no,
       style_no: r.style_no,
       productType: r.product_type ?? null,
       productCategory: r.product_category ?? null,
+      productSubcategory: r.product_subcategory ?? null,
       devDate: r.dev_date ?? null,
       dev_date: r.dev_date ?? null,
     }));
 
-    return ok({ items, hasMore: false });
+    return ok({ items, hasMore: (data?.length ?? 0) > 50 });
   } catch (e: any) {
     return bad("Unexpected error.", 500, { detail: e?.message });
   }
