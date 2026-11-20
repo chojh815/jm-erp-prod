@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node --test tests/performance-invoice-deletion.test.cjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

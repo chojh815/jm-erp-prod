@@ -236,14 +236,18 @@ export async function GET(req: Request) {
     let iq = supabase
       .from("invoice_headers")
       .select(`*`)
-      .not("invoice_date", "is", null);
+      .not("invoice_date", "is", null)
+      .not("is_deleted", "is", true);
 
     if (start) iq = iq.gte("invoice_date", start);
     if (end) iq = iq.lte("invoice_date", end);
     if (buyerIds?.length) iq = iq.in("buyer_id", buyerIds);
 
-    const { data: invRows, error: ie } = await iq;
+    const { data: invoiceHeaders, error: ie } = await iq;
     if (ie) throw ie;
+    const invRows = (invoiceHeaders ?? []).filter(
+      (invoice) => String(invoice.status ?? "").trim().toUpperCase() !== "DELETED"
+    );
 
     const invoiceIds = (invRows || []).map((x: any) => x?.id).filter(Boolean);
 
@@ -252,7 +256,8 @@ export async function GET(req: Request) {
       const { data: ilRows, error: ile } = await supabase
         .from("invoice_lines")
         .select(`invoice_id, po_line_id, *`)
-        .in("invoice_id", invoiceIds);
+        .in("invoice_id", invoiceIds)
+        .not("is_deleted", "is", true);
 
       if (ile) throw ile;
 
