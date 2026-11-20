@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { isCompletedDashboardShipment, shipmentIdsByInvoice } from "@/lib/dashboardShipping";
+import { calculatePoLineAmounts } from "@/lib/poAmounts";
 
 export const dynamic = "force-dynamic";
 
@@ -293,13 +295,15 @@ export async function GET(req: Request) {
     const { start, end } = rangeFromPreset(preset, url.searchParams.get("start"), url.searchParams.get("end"));
     const supabase = supabaseAdmin;
 
-    const [poRes, poLinesRes, wsLinesRes, wsHdrRes, invRes, shipRes, rchRes, rcaRes, rclRes, sampleRes, companiesRes] = await Promise.all([
+    const [poRes, poLinesRes, wsLinesRes, wsHdrRes, invRes, shipRes, shipLineRes, invShipRes, rchRes, rcaRes, rclRes, sampleRes, companiesRes] = await Promise.all([
       supabase.from("po_headers").select("*"),
       supabase.from("po_lines").select("*"),
       supabase.from("work_sheet_lines").select("po_line_id, work_sheet_id"),
       supabase.from("work_sheet_headers").select("id, status"),
       supabase.from("invoice_headers").select("*"),
       supabase.from("shipments").select("*"),
+      supabase.from("shipment_lines").select("po_line_id, shipment_id, shipped_qty, is_deleted"),
+      supabase.from("invoice_shipments").select("invoice_id, shipment_id, is_deleted"),
       supabase.from("receipt_headers").select("*"),
       supabase.from("receipt_applications").select("*"),
       supabase.from("receipt_lines").select("*"),
@@ -307,7 +311,11 @@ export async function GET(req: Request) {
       supabase.from("companies").select("*"),
     ]);
 
-    const pos = poRes.error ? [] : (poRes.data || []);
+    for (const source of [poRes, poLinesRes, invRes, shipRes, shipLineRes, invShipRes]) {
+      if (source.error) throw source.error;
+    }
+
+    const pos = poRes.data ?? [];
     const poLines = poLinesRes.error ? [] : (poLinesRes.data || []);
     const workSheetLines = wsLinesRes.error ? [] : (wsLinesRes.data || []);
     const workSheetHeaders = wsHdrRes.error ? [] : (wsHdrRes.data || []);
@@ -349,7 +357,8 @@ export async function GET(req: Request) {
     const posF = posBaseF.filter(dateOk);
     const invPeriodF = invoices.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
     const invAsOfF = invoices.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(asOfOk);
-    const shipF = shipments.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
+    const completedShipments = shipments.filter(isCompletedDashboardShipment);
+    const completedShipmentIds = new Set(completedShipments.map((row) => row.id));
     const sampleF = samples.filter(notDeleted).filter(buyerOk).filter(sampleDateOk);
 
     const rchF = receiptHeaders.filter(notDeleted).filter(buyerOk).filter(siteOk).filter(dateOk);
@@ -381,14 +390,33 @@ export async function GET(req: Request) {
     });
 
     const poHeaderIdSet = new Set(posBaseF.map((h: any) => pickPoHeaderId(h)).filter(Boolean));
+    const shippedQtyByPoLine = new Map<string, number>();
+    for (const line of (shipLineRes.data ?? []).filter(notDeleted)) {
+      if (!line.po_line_id || !completedShipmentIds.has(line.shipment_id)) continue;
+      const qty = Number(line.shipped_qty);
+      if (Number.isFinite(qty) && qty > 0) {
+        shippedQtyByPoLine.set(line.po_line_id, (shippedQtyByPoLine.get(line.po_line_id) ?? 0) + qty);
+      }
+    }
+
     const poLineSumByHeader = new Map<string, number>();
+    const pendingUsdByHeader = new Map<string, number>();
+    const pendingQtyByHeader = new Map<string, number>();
+    const pendingByLine = new Map<string, ReturnType<typeof calculatePoLineAmounts>>();
     for (const ln of poLines.filter(notDeleted)) {
       const hid = pickPoHeaderIdFromLine(ln);
       if (!hid) continue;
       if (poHeaderIdSet.size && !poHeaderIdSet.has(hid)) continue;
       const amt = pickLineAmountUSD(ln);
-      if (!amt) continue;
       poLineSumByHeader.set(hid, (poLineSumByHeader.get(hid) || 0) + amt);
+
+      const pending = calculatePoLineAmounts(
+        { ...ln, amount: amt },
+        shippedQtyByPoLine.get(ln.id) ?? 0,
+      );
+      pendingByLine.set(ln.id, pending);
+      pendingUsdByHeader.set(hid, (pendingUsdByHeader.get(hid) ?? 0) + pending.amounts.pending);
+      pendingQtyByHeader.set(hid, (pendingQtyByHeader.get(hid) ?? 0) + pending.totals.pendingQty);
     }
 
     const amountForPoHeader = (h: any) => {
@@ -428,15 +456,18 @@ export async function GET(req: Request) {
       .map((ln: any) => {
         const headerId = pickPoHeaderIdFromLine(ln);
         const header = headerId ? posById.get(headerId) : undefined;
-        const scopeRow = header ?? ln;
+        if (!header) return null;
+        const scopeRow = header;
         const poLineId = String(ln?.id ?? "").trim();
+        const pending = pendingByLine.get(poLineId);
+        if (!pending || pending.totals.pendingQty <= 0) return null;
         const wsId = poLineId ? (wsIdByPoLineId.get(poLineId) ?? null) : null;
         const wsStatus = wsId ? (wsStatusById.get(wsId) ?? "DRAFT") : null;
         return {
           po_line_id: poLineId,
           po_no: pickPoNo(scopeRow),
           req_ship_date: pickReqShipDate(scopeRow),
-          amount_usd: Number(pickLineAmountUSD(ln).toFixed(2)),
+          amount_usd: pending.amounts.pending,
           fulfillment_status: pickFulfillmentStatus(scopeRow),
           scope_row: scopeRow,
           has_work_sheet: poLineId ? wsPoLineIdSet.has(poLineId) : false,
@@ -445,13 +476,15 @@ export async function GET(req: Request) {
         };
       })
       .filter((row) =>
+        row !== null &&
         row.has_work_sheet &&
         !!row.po_no &&
         !!row.req_ship_date &&
         buyerOk(row.scope_row) &&
         siteOk(row.scope_row) &&
         isShipmentPending({ fulfillment_status: row.fulfillment_status })
-      );
+      )
+      .filter((row): row is NonNullable<typeof row> => row !== null);
 
     const readyRows = productionRows.filter((r) => r.ready_to_ship);
     const readyUsd = readyRows.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0);
@@ -460,7 +493,8 @@ export async function GET(req: Request) {
     const scheduleRows = posBaseF
       .filter((r: any) => {
         const reqShipDate = pickReqShipDate(r);
-        return !!pickPoNo(r) && !!reqShipDate && isShipmentPending(r);
+        const id = pickPoHeaderId(r) ?? "";
+        return !!pickPoNo(r) && !!reqShipDate && isShipmentPending(r) && (pendingQtyByHeader.get(id) ?? 0) > 0;
       })
       .map((r: any) => {
         return {
@@ -469,7 +503,7 @@ export async function GET(req: Request) {
           brand: pickBrand(r),
           req_ship_date: pickReqShipDate(r),
           ship_mode: pickShipMode(r),
-          amount_usd: Number(amountForPoHeader(r).toFixed(2)),
+          amount_usd: Number((pendingUsdByHeader.get(pickPoHeaderId(r) ?? "") ?? 0).toFixed(2)),
           stage: pickFulfillmentStatus(r) || null,
         };
       });
@@ -506,17 +540,25 @@ export async function GET(req: Request) {
     const ordersUsd = posF.reduce((s, r) => s + amountForPoHeader(r), 0);
     const poCount = new Set(posF.map((r: any) => r.id ?? pickPoNo(r)).filter(Boolean)).size;
 
-    const shipmentIds = new Set(shipF.map((r: any) => r?.id).filter(Boolean));
-    const shippedInvoices = invoices.filter(notDeleted).filter((r: any) => (shipmentIds.size ? shipmentIds.has(r?.shipment_id) : false));
-    const shippedUsd = shippedInvoices.reduce((s: number, r: any) => s + pickAmountUSD(r), 0);
-    const shipCount = shipmentIds.size;
-    const shippedPoCount = new Set(shippedInvoices.map((r: any) => pickPoNo(r)).filter(Boolean)).size;
-
-    const pendingOrderRows = posBaseF.filter((r: any) => {
-      const total = amountForPoHeader(r);
-      return total > 0.0001 && isShipmentPending(r);
+    // Match Performance and Order Dashboard: financial shipping is grouped by invoice date.
+    const eligibleShipmentIds = new Set(completedShipments.filter(buyerOk).filter(siteOk).map((row) => row.id));
+    const invoiceShipmentIds = shipmentIdsByInvoice(invoices, invShipRes.data ?? []);
+    const countedShipmentIds = new Set<string>();
+    const shippedInvoices = invoices.filter(buyerOk).filter((invoice) => {
+      if (!inRangeISO(invoice.invoice_date, start, end)) return false;
+      const matching = [...(invoiceShipmentIds.get(invoice.id) ?? [])].filter((id) => eligibleShipmentIds.has(id));
+      for (const id of matching) countedShipmentIds.add(id);
+      return matching.length > 0;
     });
-    const pendingOrdersUsd = pendingOrderRows.reduce((sum, row) => sum + amountForPoHeader(row), 0);
+    const shippedUsd = shippedInvoices.reduce((sum, invoice) => sum + pickAmountUSD(invoice), 0);
+    const shipCount = countedShipmentIds.size;
+
+    const pendingOrderRows = posBaseF.filter((row) =>
+      isShipmentPending(row) && (pendingQtyByHeader.get(pickPoHeaderId(row) ?? "") ?? 0) > 0
+    );
+    const pendingOrdersUsd = Number(pendingOrderRows.reduce(
+      (sum, row) => sum + (pendingUsdByHeader.get(pickPoHeaderId(row) ?? "") ?? 0), 0
+    ).toFixed(2));
     const pendingPoCount = new Set(pendingOrderRows.map((r: any) => pickPoHeaderId(r) ?? pickPoNo(r)).filter(Boolean)).size;
 
     const productionRowsActive = productionRows.filter((r) => !r.ready_to_ship);
@@ -697,7 +739,7 @@ export async function GET(req: Request) {
       if (!d) continue;
       ensureTrend(ymOf(d)).orders_usd += amountForPoHeader(r);
     }
-    for (const r of shippedInvoices.filter((x: any) => dateOk(x)).filter(buyerOk).filter(siteOk)) {
+    for (const r of shippedInvoices) {
       const d = (r?.invoice_date ?? r?.date ?? "").slice(0, 10);
       if (!d) continue;
       ensureTrend(ymOf(d)).shipped_usd += pickAmountUSD(r);

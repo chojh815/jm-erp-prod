@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import {
+  belongsOnlyToInactiveOrders,
+  isActiveShippingRecord,
+  shipmentIdsByInvoice,
+} from "@/lib/dashboardShipping";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -150,8 +155,6 @@ function pickShipDate(row: any): string | null {
     toISO(row?.shipped_date) ??
     toISO(row?.etd) ??
     toISO(row?.shipment_date) ??
-    toISO(row?.updated_at) ??
-    toISO(row?.created_at) ??
     null
   );
 }
@@ -287,9 +290,7 @@ export async function GET(req: NextRequest) {
       .limit(limit * 5);
     if (shipErr) throw shipErr;
 
-    const shipmentsBase = (shipmentsRaw || []).filter((row: any) =>
-      dateInRange(pickShipDate(row), start, end)
-    );
+    const shipmentsBase = (shipmentsRaw ?? []).filter(isActiveShippingRecord);
     if (!shipmentsBase.length) {
       return NextResponse.json({
         ok: true,
@@ -312,7 +313,7 @@ export async function GET(req: NextRequest) {
 
     const shipmentIds = shipmentsBase.map((x: any) => x.id).filter(Boolean);
 
-    const [shipmentLinesRes, invoicesRes, shipmentPosRes] = await Promise.all([
+    const [shipmentLinesRes, invoicesRes, shipmentPosRes, invoiceLinksRes] = await Promise.all([
       supabaseAdmin
         .from("shipment_lines")
         .select("*")
@@ -320,22 +321,39 @@ export async function GET(req: NextRequest) {
         .eq("is_deleted", false),
       supabaseAdmin
         .from("invoice_headers")
-        .select("id, shipment_id, invoice_no, invoice_date, total_amount")
+        .select("id, shipment_id, invoice_no, invoice_date, total_amount, status, is_deleted")
         .in("shipment_id", shipmentIds)
         .eq("is_deleted", false),
       supabaseAdmin
         .from("shipment_pos")
         .select("*")
-        .in("shipment_id", shipmentIds)
-        .eq("is_deleted", false),
+        .in("shipment_id", shipmentIds),
+      supabaseAdmin
+        .from("invoice_shipments")
+        .select("invoice_id, shipment_id, is_deleted")
+        .in("shipment_id", shipmentIds),
     ]);
 
     if (shipmentLinesRes.error) throw shipmentLinesRes.error;
     if (invoicesRes.error) throw invoicesRes.error;
-    const shipmentPosRows = shipmentPosRes.error ? [] : shipmentPosRes.data || [];
+    if (shipmentPosRes.error) throw shipmentPosRes.error;
+    const shipmentPosRows = (shipmentPosRes.data ?? []).filter(isActiveShippingRecord);
 
     const shipmentLines = shipmentLinesRes.data || [];
-    const invoiceRows = invoicesRes.data || [];
+    if (invoiceLinksRes.error) throw invoiceLinksRes.error;
+    const invoiceLinks = (invoiceLinksRes.data ?? []).filter(isActiveShippingRecord);
+    const invoiceRows = invoicesRes.data ?? [];
+    const directInvoiceIds = new Set(invoiceRows.map((row) => row.id));
+    const linkedInvoiceIds = [...new Set(invoiceLinks.map((row) => row.invoice_id))]
+      .filter((id) => id && !directInvoiceIds.has(id));
+    if (linkedInvoiceIds.length) {
+      const { data, error } = await supabaseAdmin
+        .from("invoice_headers")
+        .select("id, shipment_id, invoice_no, invoice_date, total_amount, status, is_deleted")
+        .in("id", linkedInvoiceIds);
+      if (error) throw error;
+      invoiceRows.push(...(data ?? []));
+    }
 
     const poLineIds = Array.from(new Set(shipmentLines.map((x: any) => x.po_line_id).filter(Boolean)));
 
@@ -362,6 +380,7 @@ export async function GET(req: NextRequest) {
     const poHeaderIds = Array.from(
       new Set([
         ...poLines.map((x: any) => x.po_header_id).filter(Boolean),
+        ...shipmentLines.map((x: any) => x.po_header_id).filter(Boolean),
         ...shipmentPosRows.map((x: any) => x.po_header_id).filter(Boolean),
       ])
     );
@@ -369,7 +388,7 @@ export async function GET(req: NextRequest) {
     const poHeaderRes = poHeaderIds.length
       ? await supabaseAdmin
           .from("po_headers")
-          .select("id, po_no, buyer_id, buyer_name, buyer_brand_name, site_id")
+          .select("id, po_no, buyer_id, buyer_name, buyer_brand_name, site_id, status, is_deleted")
           .in("id", poHeaderIds)
       : ({ data: [], error: null } as any);
     if (poHeaderRes.error) throw poHeaderRes.error;
@@ -539,8 +558,8 @@ export async function GET(req: NextRequest) {
     const costingMaterials = (costingMaterialRes.data || []) as CostingLineLite[];
     const costingOperations = (costingOperationRes.data || []) as CostingLineLite[];
 
-    const poLineById = new Map(poLines.map((x: any) => [x.id, x]));
-    const poHeaderById = new Map(poHeaders.map((x: any) => [x.id, x]));
+    const poLineById = new Map<string, { po_header_id?: string | null }>(poLines.map((x: any) => [x.id, x]));
+    const poHeaderById = new Map<string, { status?: string | null; is_deleted?: boolean | null }>(poHeaders.map((x: any) => [x.id, x]));
     const wsByPoLineId = new Map(wsLines.map((x: any) => [x.po_line_id, x]));
     const expectedSnapshotByPoLineId = new Map(
       expectedSnapshots.map((x: any) => [x.po_line_id, x])
@@ -596,13 +615,17 @@ export async function GET(req: NextRequest) {
       if (usd > 0) devUnitUsdByStyle.set(styleNo, usd);
     }
 
-    const invoiceByShipmentId = new Map<string, any[]>();
+    const invoiceByShipmentId = new Map<string, typeof invoiceRows>();
+    const shipmentIdsForInvoice = shipmentIdsByInvoice(invoiceRows, invoiceLinks);
     for (const row of invoiceRows) {
-      const key = s((row as any).shipment_id);
-      if (!key) continue;
-      const list = invoiceByShipmentId.get(key) || [];
-      list.push(row);
-      invoiceByShipmentId.set(key, list);
+      for (const id of shipmentIdsForInvoice.get(row.id) ?? []) {
+        const list = invoiceByShipmentId.get(id) ?? [];
+        list.push(row);
+        invoiceByShipmentId.set(id, list);
+      }
+    }
+    for (const rows of invoiceByShipmentId.values()) {
+      rows.sort((a, b) => (a.invoice_date ?? "9999-12-31").localeCompare(b.invoice_date ?? "9999-12-31"));
     }
 
     const poRevenueBaseByHeaderId = new Map<string, number>();
@@ -629,6 +652,18 @@ export async function GET(req: NextRequest) {
       const shipmentInvoiceNo = invoicesForShipment[0]?.invoice_no ?? null;
       const shipmentInvoiceDate = invoicesForShipment[0]?.invoice_date ?? null;
       const shipmentShipDate = pickShipDate(shipment);
+      const reportDate = shipmentShipDate ?? toISO(shipmentInvoiceDate);
+      if (!dateInRange(reportDate, start, end) && (reportDate || searchParams.has("start") || searchParams.has("end"))) continue;
+
+      // Reissued orders leave the old shipment in history. Keep invoiced shipments
+      // and shipments with any live or unresolved PO reference.
+      const sourceOrderIds = linesForShipment.map((line) =>
+        poLineById.get(line.po_line_id)?.po_header_id || line.po_header_id || null
+      );
+      for (const link of shipmentPosRows) {
+        if (link.shipment_id === shipmentId) sourceOrderIds.push(link.po_header_id ?? null);
+      }
+      if (!invoicesForShipment.length && belongsOnlyToInactiveOrders(sourceOrderIds, poHeaderById)) continue;
 
       let shipmentSummary = shipmentMap.get(shipmentId);
       if (!shipmentSummary) {
