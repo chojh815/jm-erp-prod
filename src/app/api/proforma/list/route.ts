@@ -38,7 +38,7 @@ export async function GET(req: Request) {
     if (history) {
       const actor = await getApiIdentity();
       if (actor.role !== "admin" && !actor.permissions.includes("proforma.delete")) {
-        return errorResponse("PI 처리 이력 조회 권한이 없습니다.", 403);
+        return errorResponse("You do not have permission to view PI history.", 403);
       }
     }
     let headerQuery = supabaseAdmin

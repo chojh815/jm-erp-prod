@@ -184,13 +184,13 @@ export default function ProformaListPage() {
         body: JSON.stringify({ action, reason }),
       });
       const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) throw new Error(data?.error || "PI를 처리하지 못했습니다.");
+      if (!res.ok || !data?.success) throw new Error(data?.error || "Could not update the PI.");
       setRetiring(null);
-      setRetirementNotice(`${retiring.invoiceNo} ${action === "void" ? "폐기" : "삭제"}를 완료했습니다.`);
+      setRetirementNotice(`${retiring.invoiceNo} was ${action === "void" ? "voided" : "deleted"}.`);
       if (page > 1 && items.length === 1) setPage(page - 1);
       else await load();
     } catch (error) {
-      setRetirementError(error instanceof Error ? error.message : "PI를 처리하지 못했습니다.");
+      setRetirementError(error instanceof Error ? error.message : "Could not update the PI.");
     } finally {
       setSavingRetirement(false);
     }
@@ -525,8 +525,9 @@ export default function ProformaListPage() {
           </CardHeader>
 
           <CardContent className="space-y-3">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex flex-wrap items-center gap-2">
               <Input
+                className="min-w-0 flex-[1_1_16rem]"
                 value={q}
                 onChange={(e) => {
                   setQ(e.target.value);
@@ -537,7 +538,7 @@ export default function ProformaListPage() {
                   if (e.key === "Enter") onSearch();
                 }}
               />
-              <div className="flex gap-2">
+              <div className="flex flex-wrap items-center gap-2 whitespace-nowrap">
                 <Button onClick={onSearch} disabled={loading}>
                   Search
                 </Button>
@@ -549,7 +550,7 @@ export default function ProformaListPage() {
                     setHistory(!showHistory);
                     setPage(1);
                   }}>
-                    {showHistory ? "유효 PI 보기" : "삭제·폐기 이력"}
+                    {showHistory ? "Active PIs" : "History"}
                   </Button>
                 )}
               </div>
@@ -582,7 +583,7 @@ export default function ProformaListPage() {
                   ) : items.length === 0 ? (
                     <tr>
                       <td className="p-3 text-muted-foreground" colSpan={6}>
-                        {showHistory ? "삭제·폐기 이력이 없습니다." : "No Proforma Invoice found."}
+                        {showHistory ? "No deleted or voided PIs found." : "No Proforma Invoice found."}
                       </td>
                     </tr>
                   ) : (
@@ -598,7 +599,7 @@ export default function ProformaListPage() {
                         <td className="p-3 text-right whitespace-nowrap">
                           {showHistory ? (
                             <div className="whitespace-normal break-words">
-                              <div className="font-medium">{it.status === "voided" ? "폐기" : "삭제"}</div>
+                              <div className="font-medium">{it.status === "voided" ? "Voided" : "Deleted"}</div>
                               <div className="text-muted-foreground">{fmtDate(it.retiredAt)}</div>
                               {it.voidReason && <div className="mt-1">{it.voidReason}</div>}
                             </div>
@@ -625,7 +626,7 @@ export default function ProformaListPage() {
                               </Button>
                               {canRetire && (
                                 <Button size="sm" variant="outline" className="text-red-700" onClick={() => beginRetirement(it)}>
-                                  삭제 / 폐기
+                                  Delete / Void
                                 </Button>
                               )}
                             </div>
@@ -640,11 +641,11 @@ export default function ProformaListPage() {
             {total > pageSize && (
               <div className="flex items-center justify-end gap-2 text-sm">
                 <Button variant="outline" size="sm" disabled={loading || page <= 1} onClick={() => setPage(page - 1)}>
-                  이전
+                  Previous
                 </Button>
                 <span>{page} / {Math.ceil(total / pageSize)}</span>
                 <Button variant="outline" size="sm" disabled={loading || page * pageSize >= total} onClick={() => setPage(page + 1)}>
-                  다음
+                  Next
                 </Button>
               </div>
             )}
@@ -656,29 +657,29 @@ export default function ProformaListPage() {
         }}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Proforma Invoice 삭제 / 폐기</DialogTitle>
+              <DialogTitle>Delete or Void Proforma Invoice</DialogTitle>
               <DialogDescription>
-                PI {retiring?.invoiceNo} · PO {retiring?.poNo || "미연결"}
+                PI {retiring?.invoiceNo} · PO {retiring?.poNo || "Not linked"}
               </DialogDescription>
             </DialogHeader>
             <form onSubmit={retire} className="space-y-4">
               <p className="rounded-md bg-red-50 p-3 text-sm text-red-800">
-                처리 후 이 PI는 유효 목록에서 사라지며 PDF와 Excel을 다시 출력할 수 없습니다.
-                원본 PO는 보존됩니다. 같은 PO에서 PI를 다시 발급하면 새 번호가 부여됩니다.
+                This PI will be removed from the active list and PDF and Excel exports will be disabled.
+                The original PO will be kept. Reissuing a PI for the same PO will assign a new number.
               </p>
               <fieldset className="space-y-2" disabled={savingRetirement}>
-                <legend className="mb-2 text-sm font-medium">바이어 발송 여부</legend>
+                <legend className="mb-2 text-sm font-medium">Was this PI sent to the buyer?</legend>
                 <label className="flex items-center gap-2 text-sm">
                   <input type="radio" name="retirement-action" checked={action === "delete"} onChange={() => setAction("delete")} />
-                  발송 전 PI 삭제
+                  No, delete the unsent PI
                 </label>
                 <label className="flex items-center gap-2 text-sm">
                   <input type="radio" name="retirement-action" checked={action === "void"} onChange={() => setAction("void")} />
-                  발송한 PI 폐기
+                  Yes, void the sent PI
                 </label>
                 {action === "void" && (
                   <label className="block space-y-1 text-sm">
-                    <span>폐기 사유</span>
+                    <span>Reason for voiding</span>
                     <Input value={reason} onChange={(event) => setReason(event.target.value)} maxLength={500} required />
                   </label>
                 )}
@@ -686,10 +687,10 @@ export default function ProformaListPage() {
               {retirementError && <p role="alert" className="text-sm text-red-700">{retirementError}</p>}
               <DialogFooter>
                 <Button type="button" variant="outline" disabled={savingRetirement} onClick={() => setRetiring(null)}>
-                  취소
+                  Cancel
                 </Button>
                 <Button type="submit" variant="destructive" disabled={savingRetirement || !action || (action === "void" && !reason.trim())}>
-                  {savingRetirement ? "처리 중…" : action === "delete" ? "PI 삭제" : action === "void" ? "PI 폐기" : "확인"}
+                  {savingRetirement ? "Processing…" : action === "delete" ? "Delete PI" : action === "void" ? "Void PI" : "Confirm"}
                 </Button>
               </DialogFooter>
             </form>
