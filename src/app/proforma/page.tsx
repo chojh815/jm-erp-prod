@@ -9,6 +9,10 @@ import type { AppRole } from "@/config/menuConfig";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { usePermissions } from "@/components/auth/PermissionsProvider";
 import ExcelJS from "exceljs";
 import { getCompanyStampByOrigin } from "@/lib/companyStamp";
 import { createSupabaseBrowserClient } from "@/lib/supabaseClient";
@@ -23,6 +27,9 @@ type ProformaListItem = {
   currency?: string | null;
   createdAt?: string | null;
   subtotal?: number | null;
+  status: "active" | "deleted" | "voided";
+  retiredAt?: string | null;
+  voidReason?: string | null;
 };
 
 function fmtMoney(currency: string | null | undefined, v: number | null | undefined) {
@@ -95,6 +102,8 @@ async function fetchJSON(url: string) {
 export default function ProformaListPage() {
   const router = useRouter();
   const supabase = React.useMemo(() => createSupabaseBrowserClient(), []);
+  const { has } = usePermissions();
+  const canRetire = has("proforma.delete");
   const role = "admin" as Role; // AppShell 내부에서 role 활용(현재 프로젝트 방식 유지)
 
   const [q, setQ] = React.useState("");
@@ -103,23 +112,42 @@ export default function ProformaListPage() {
   const [error, setError] = React.useState<string | null>(null);
   const [exportingId, setExportingId] = React.useState<string | null>(null);
 
+  const [history, setHistory] = React.useState(false);
+  const [page, setPage] = React.useState(1);
+  const [total, setTotal] = React.useState(0);
+  const [retiring, setRetiring] = React.useState<ProformaListItem | null>(null);
+  const [action, setAction] = React.useState<"" | "delete" | "void">("");
+  const [reason, setReason] = React.useState("");
+  const [retirementError, setRetirementError] = React.useState("");
+  const [retirementNotice, setRetirementNotice] = React.useState("");
+  const [savingRetirement, setSavingRetirement] = React.useState(false);
+  const requestId = React.useRef(0);
+  const pageSize = 20;
+  const showHistory = history && canRetire;
+
   const load = React.useCallback(async () => {
+    const currentRequest = ++requestId.current;
     setLoading(true);
     setError(null);
     try {
-      const qs = new URLSearchParams();
+      const qs = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (showHistory) qs.set("history", "1");
       if (q.trim()) qs.set("q", q.trim());
       const url = `/api/proforma/list?${qs.toString()}`;
       const json = await fetchJSON(url);
       const list: ProformaListItem[] = Array.isArray(json?.items) ? json.items : [];
+      if (currentRequest !== requestId.current) return;
       setItems(list);
+      setTotal(Number(json.total ?? list.length));
     } catch (e: any) {
+      if (currentRequest !== requestId.current) return;
       setItems([]);
+      setTotal(0);
       setError(e?.message || "Failed to load proforma list");
     } finally {
-      setLoading(false);
+      if (currentRequest === requestId.current) setLoading(false);
     }
-  }, [q]);
+  }, [q, page, showHistory]);
 
   React.useEffect(() => {
     // 첫 진입 시 자동 로드
@@ -130,11 +158,43 @@ export default function ProformaListPage() {
     load();
   }, [load]);
 
-  const onReset = React.useCallback(() => {
+  const onReset = () => {
+    if (!q && page === 1) void load();
     setQ("");
-    // reset 후 즉시 전체 로드
-    setTimeout(() => load(), 0);
-  }, [load]);
+    setPage(1);
+  };
+
+  const beginRetirement = (item: ProformaListItem) => {
+    setAction("");
+    setReason("");
+    setRetirementError("");
+    setRetirementNotice("");
+    setRetiring(item);
+  };
+
+  const retire = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!retiring || !action || savingRetirement || (action === "void" && !reason.trim())) return;
+    setSavingRetirement(true);
+    setRetirementError("");
+    try {
+      const res = await fetch(`/api/proforma/${encodeURIComponent(retiring.id)}/retire`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, reason }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) throw new Error(data?.error || "PI를 처리하지 못했습니다.");
+      setRetiring(null);
+      setRetirementNotice(`${retiring.invoiceNo} ${action === "void" ? "폐기" : "삭제"}를 완료했습니다.`);
+      if (page > 1 && items.length === 1) setPage(page - 1);
+      else await load();
+    } catch (error) {
+      setRetirementError(error instanceof Error ? error.message : "PI를 처리하지 못했습니다.");
+    } finally {
+      setSavingRetirement(false);
+    }
+  };
 
   const openPO = (poNo?: string | null) => {
     // ✅ Open PO uses PO No (not UUID). PO Samples route resolves po_no -> header id internally.
@@ -468,7 +528,10 @@ export default function ProformaListPage() {
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <Input
                 value={q}
-                onChange={(e) => setQ(e.target.value)}
+                onChange={(e) => {
+                  setQ(e.target.value);
+                  setPage(1);
+                }}
                 placeholder="Search by Invoice No, PO No, Buyer..."
                 onKeyDown={(e) => {
                   if (e.key === "Enter") onSearch();
@@ -481,9 +544,18 @@ export default function ProformaListPage() {
                 <Button variant="outline" onClick={onReset} disabled={loading}>
                   Reset
                 </Button>
+                {canRetire && (
+                  <Button variant="outline" aria-pressed={showHistory} onClick={() => {
+                    setHistory(!showHistory);
+                    setPage(1);
+                  }}>
+                    {showHistory ? "유효 PI 보기" : "삭제·폐기 이력"}
+                  </Button>
+                )}
               </div>
             </div>
 
+            {retirementNotice && <p role="status" className="text-sm">{retirementNotice}</p>}
             {error ? (
               <div className="text-sm text-red-600">{error}</div>
             ) : null}
@@ -510,7 +582,7 @@ export default function ProformaListPage() {
                   ) : items.length === 0 ? (
                     <tr>
                       <td className="p-3 text-muted-foreground" colSpan={6}>
-                        No Proforma Invoice found.
+                        {showHistory ? "삭제·폐기 이력이 없습니다." : "No Proforma Invoice found."}
                       </td>
                     </tr>
                   ) : (
@@ -524,27 +596,40 @@ export default function ProformaListPage() {
                           {fmtMoney(it.currency, it.subtotal)}
                         </td>
                         <td className="p-3 text-right whitespace-nowrap">
-                          <div className="inline-flex gap-2">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => openPO(it.poNo)}
-                              disabled={!it.poNo}
-                            >
-                              PO (Samples)
-                            </Button>
-                            <Button size="sm" onClick={() => openPDF(it.id)}>
-                              PDF
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => exportExcel(it)}
-                              disabled={exportingId === it.id}
-                            >
-                              {exportingId === it.id ? "Making..." : "Excel"}
-                            </Button>
-                          </div>
+                          {showHistory ? (
+                            <div className="whitespace-normal break-words">
+                              <div className="font-medium">{it.status === "voided" ? "폐기" : "삭제"}</div>
+                              <div className="text-muted-foreground">{fmtDate(it.retiredAt)}</div>
+                              {it.voidReason && <div className="mt-1">{it.voidReason}</div>}
+                            </div>
+                          ) : (
+                            <div className="inline-flex gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => openPO(it.poNo)}
+                                disabled={!it.poNo}
+                              >
+                                PO (Samples)
+                              </Button>
+                              <Button size="sm" onClick={() => openPDF(it.id)}>
+                                PDF
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => exportExcel(it)}
+                                disabled={exportingId === it.id}
+                              >
+                                {exportingId === it.id ? "Making..." : "Excel"}
+                              </Button>
+                              {canRetire && (
+                                <Button size="sm" variant="outline" className="text-red-700" onClick={() => beginRetirement(it)}>
+                                  삭제 / 폐기
+                                </Button>
+                              )}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))
@@ -552,8 +637,64 @@ export default function ProformaListPage() {
                 </tbody>
               </table>
             </div>
+            {total > pageSize && (
+              <div className="flex items-center justify-end gap-2 text-sm">
+                <Button variant="outline" size="sm" disabled={loading || page <= 1} onClick={() => setPage(page - 1)}>
+                  이전
+                </Button>
+                <span>{page} / {Math.ceil(total / pageSize)}</span>
+                <Button variant="outline" size="sm" disabled={loading || page * pageSize >= total} onClick={() => setPage(page + 1)}>
+                  다음
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
+
+        <Dialog open={Boolean(retiring)} onOpenChange={(open) => {
+          if (!open && !savingRetirement) setRetiring(null);
+        }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Proforma Invoice 삭제 / 폐기</DialogTitle>
+              <DialogDescription>
+                PI {retiring?.invoiceNo} · PO {retiring?.poNo || "미연결"}
+              </DialogDescription>
+            </DialogHeader>
+            <form onSubmit={retire} className="space-y-4">
+              <p className="rounded-md bg-red-50 p-3 text-sm text-red-800">
+                처리 후 이 PI는 유효 목록에서 사라지며 PDF와 Excel을 다시 출력할 수 없습니다.
+                원본 PO는 보존됩니다. 같은 PO에서 PI를 다시 발급하면 새 번호가 부여됩니다.
+              </p>
+              <fieldset className="space-y-2" disabled={savingRetirement}>
+                <legend className="mb-2 text-sm font-medium">바이어 발송 여부</legend>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" name="retirement-action" checked={action === "delete"} onChange={() => setAction("delete")} />
+                  발송 전 PI 삭제
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" name="retirement-action" checked={action === "void"} onChange={() => setAction("void")} />
+                  발송한 PI 폐기
+                </label>
+                {action === "void" && (
+                  <label className="block space-y-1 text-sm">
+                    <span>폐기 사유</span>
+                    <Input value={reason} onChange={(event) => setReason(event.target.value)} maxLength={500} required />
+                  </label>
+                )}
+              </fieldset>
+              {retirementError && <p role="alert" className="text-sm text-red-700">{retirementError}</p>}
+              <DialogFooter>
+                <Button type="button" variant="outline" disabled={savingRetirement} onClick={() => setRetiring(null)}>
+                  취소
+                </Button>
+                <Button type="submit" variant="destructive" disabled={savingRetirement || !action || (action === "void" && !reason.trim())}>
+                  {savingRetirement ? "처리 중…" : action === "delete" ? "PI 삭제" : action === "void" ? "PI 폐기" : "확인"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
       </div>
     </AppShell>
   );

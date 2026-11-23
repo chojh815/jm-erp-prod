@@ -42,8 +42,8 @@ function toISODate(v: any): string | null {
 /** ✅ 헤더 방어 로드 */
 async function loadHeaderAny(idOrNo: string): Promise<any | null> {
   const headerTables = [
-    { table: "proforma_invoices", idKey: "id" },
     { table: "proforma_headers", idKey: "id" },
+    { table: "proforma_invoices", idKey: "id" },
     { table: "proforma_invoice", idKey: "id" },
     { table: "proforma", idKey: "id" },
   ];
@@ -282,7 +282,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 
     // 1) 헤더 로드
     const headerRaw = await loadHeaderAny(urlId);
-    if (!headerRaw) {
+    if (!headerRaw || headerRaw.is_deleted || headerRaw.voided_at) {
       return NextResponse.json({ error: "Proforma not found" }, { status: 404 });
     }
 

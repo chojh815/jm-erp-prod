@@ -18,7 +18,7 @@ const testSchema = [
   " po_no text, buyer_id uuid, buyer_name text, currency text not null, payment_term text,",
   " ship_mode text, destination text, incoterm text, created_by uuid, created_by_email text,",
   " created_at timestamptz not null default now(), shipping_origin_code text, origin_code text,",
-  " is_deleted boolean not null default false);",
+  " is_deleted boolean not null default false, deleted_at timestamptz);",
   "create table proforma_lines (",
   " id uuid primary key default gen_random_uuid(), proforma_header_id uuid not null references proforma_headers(id),",
   " line_no integer not null, buyer_style_no text, jm_style_no text, description text,",
@@ -72,7 +72,44 @@ const testSchema = [
     assert.equal((await save("thousand")).invoice_no, "PI-RBK-" + period + "-1000");
     assert.equal((await rows("select has_function_privilege('authenticated','public.save_proforma_with_monthly_number(jsonb,jsonb)','execute') as allowed"))[0].allowed, false);
     assert.equal((await rows("select has_function_privilege('service_role','public.save_proforma_with_monthly_number(jsonb,jsonb)','execute') as allowed"))[0].allowed, true);
-    console.log("PI monthly numbering, existing numbers, permissions and transaction rollback passed.");
+    const retirementMigration = fs.readFileSync(
+      path.join(__dirname, "../supabase/migrations/20261123000200_proforma_retirement.sql"),
+      "utf8",
+    );
+    await db.exec(retirementMigration);
+    await db.exec(retirementMigration);
+    const retire = (item, action, reason = null) =>
+      rows("select retire_proforma($1,$2,$3,$4)", [item.header_id, action, reason, red]);
+    const status = async (item) =>
+      (await rows("select * from proforma_headers where id=$1", [item.header_id]))[0];
+
+    await retire(one, "delete");
+    await retire(one, "delete");
+    assert.equal((await status(one)).is_deleted, true);
+    assert.equal((await status(one)).deleted_by, red);
+    assert.ok((await status(one)).deleted_at);
+    assert.equal((await rows("select qty::int from proforma_lines where proforma_header_id=$1", [one.header_id]))[0].qty, 8);
+    await assert.rejects(retire(one, "void", "wrong action"), { code: "55000" });
+
+    const reissued = await save("one");
+    assert.notEqual(reissued.header_id, one.header_id);
+    assert.equal(reissued.invoice_no, "PI-RBK-" + period + "-1001");
+    assert.equal((await save("one")).invoice_no, reissued.invoice_no);
+
+    await assert.rejects(retire(legacy, "void", "  "), { code: "22023" });
+    assert.equal((await status(legacy)).voided_at, null);
+    await retire(legacy, "void", "  Superseded after buyer review.  ");
+    await retire(legacy, "void", "Retry must preserve the original reason");
+    assert.equal((await status(legacy)).void_reason, "Superseded after buyer review.");
+    assert.equal((await status(legacy)).voided_by, red);
+    assert.ok((await status(legacy)).voided_at);
+    assert.equal((await status(legacy)).is_deleted, false);
+    assert.equal((await save("legacy")).invoice_no, "PI-RBK-" + period + "-1002");
+    assert.equal((await status(legacy)).invoice_no, legacy.invoice_no);
+
+    assert.equal((await rows("select has_function_privilege('authenticated','public.retire_proforma(uuid,text,text,uuid)','execute') as allowed"))[0].allowed, false);
+    assert.equal((await rows("select has_function_privilege('service_role','public.retire_proforma(uuid,text,text,uuid)','execute') as allowed"))[0].allowed, true);
+    console.log("PI monthly numbering, retirement, reissue, permissions and transaction rollback passed.");
   } finally {
     await db.close();
   }

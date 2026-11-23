@@ -38,6 +38,7 @@ export async function GET(req: NextRequest) {
       .select("*")
       .eq("invoice_no", invoiceNo)
       .eq("is_deleted", false)
+      .is("voided_at", null)
       .maybeSingle();
 
     if (headerErr) {

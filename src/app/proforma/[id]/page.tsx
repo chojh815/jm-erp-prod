@@ -94,6 +94,13 @@ export default function PIViewPage({ params }: any) {
         .eq("id", id)
         .maybeSingle();
 
+      if (h?.is_deleted || h?.voided_at) {
+        setHeader(null);
+        setLines([]);
+        setLoading(false);
+        return;
+      }
+
       if (!h) {
         const { data: h2 } = await supabase
           .from("proforma_invoices")

@@ -542,7 +542,8 @@ const hasAnyShipped = React.useMemo(() => {
         .from("proforma_headers")
         .select("id, invoice_no")
         .eq("po_no", po)
-        .eq("is_deleted", false),
+        .eq("is_deleted", false)
+        .is("voided_at", null),
       supabase
         .from("invoice_lines")
         .select("invoice_header_id")

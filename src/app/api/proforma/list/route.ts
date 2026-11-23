@@ -1,6 +1,7 @@
 // src/app/api/proforma/list/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { ApiIdentityError, getApiIdentity } from "@/lib/apiIdentity";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -33,12 +34,21 @@ export async function GET(req: Request) {
     const page = Number(searchParams.get("page") ?? 1) || 1;
     const pageSize = Number(searchParams.get("pageSize") ?? 20) || 20;
 
-    // 1) ✅ headers에서 (삭제 제외) 리스트 조회
+    const history = searchParams.get("history") === "1";
+    if (history) {
+      const actor = await getApiIdentity();
+      if (actor.role !== "admin" && !actor.permissions.includes("proforma.delete")) {
+        return errorResponse("PI 처리 이력 조회 권한이 없습니다.", 403);
+      }
+    }
     let headerQuery = supabaseAdmin
       .from("proforma_headers")
       .select("*", { count: "exact" })
-      .eq("is_deleted", false)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false });
+    headerQuery = history
+      ? headerQuery.or("is_deleted.eq.true,voided_at.not.is.null")
+      : headerQuery.eq("is_deleted", false).is("voided_at", null);
 
     if (q) {
       headerQuery = headerQuery.or(
@@ -106,6 +116,9 @@ export async function GET(req: Request) {
         buyerName: h.buyer_name,
         currency: h.currency,
         createdAt: h.created_at,
+        status: h.voided_at ? "voided" : h.is_deleted ? "deleted" : "active",
+        retiredAt: h.voided_at ?? h.deleted_at,
+        voidReason: h.void_reason,
         subtotal: Number(subtotal.toFixed(2)),
       };
     });
@@ -117,6 +130,7 @@ export async function GET(req: Request) {
       pageSize,
     });
   } catch (err: any) {
+    if (err instanceof ApiIdentityError) return errorResponse(err.message, err.status);
     console.error("GET /proforma/list(unexpected) error:", err);
     return errorResponse(err?.message ?? "Unexpected error in proforma list API.");
   }
