@@ -47,6 +47,7 @@ registerPdfFonts();
 export interface ProformaHeaderPDF {
   buyer_name?: string | null;
   buyer_brand_name?: string | null;
+  buyer_dept_name?: string | null;
   invoice_no?: string | null;
   issue_date?: string | null;
 
@@ -371,6 +372,11 @@ const styles = StyleSheet.create({
    Blocks
 ========================= */
 function HeaderBlock({ header }: { header: ProformaHeaderPDF }) {
+  const brandDept = [header.buyer_brand_name, header.buyer_dept_name]
+    .map((value) => value?.trim())
+    .filter(Boolean)
+    .join(" / ");
+
   return (
     <>
       <Text style={styles.title}>Proforma Invoice</Text>
@@ -383,7 +389,7 @@ function HeaderBlock({ header }: { header: ProformaHeaderPDF }) {
           </Text>
           <Text style={styles.topLine}>
             <Text style={styles.topLabel}>Brand / Dept: </Text>
-            {show(header.buyer_brand_name)}
+            {brandDept}
           </Text>
         </View>
       </View>

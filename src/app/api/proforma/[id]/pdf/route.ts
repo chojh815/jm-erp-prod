@@ -382,17 +382,15 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       if (!bErr) buyerCompany = b;
     }
 
-    // ✅ Brand/Dept fallback
+    // Use the document or PO selection for Brand / Dept.
     const buyerBrandName =
       pickFirst(headerRaw, ["buyer_brand_name", "buyer_brand", "buyerBrandName", "brand_name", "brand"]) ??
       pickFirst(poHeader, ["buyer_brand_name", "buyer_brand_name_text", "buyer_brand", "brand_name", "brand"]) ??
-      pickFirst(buyerCompany, ["buyer_brand_name", "buyer_brand", "default_brand_name", "brand_name", "brand"]) ??
       null;
 
     const buyerDeptName =
       pickFirst(headerRaw, ["buyer_dept_name", "buyer_dept", "buyerDeptName", "dept_name", "dept"]) ??
       pickFirst(poHeader, ["buyer_dept_name", "buyer_dept_name_text", "buyer_dept", "dept_name", "dept"]) ??
-      pickFirst(buyerCompany, ["buyer_dept_name", "buyer_dept", "default_dept_name", "dept_name", "dept"]) ??
       null;
 
     const consigneeText =
