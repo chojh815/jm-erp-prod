@@ -167,7 +167,12 @@ export default function AskERPPage() {
                   <h3 className="font-semibold">{group.title}</h3>
                   {group.docs?.length ? (
                     <div className="overflow-x-auto rounded-md border">
-                      <table className="w-full text-left text-sm">
+                      <table className="w-full table-fixed break-words text-left text-sm">
+                        <colgroup>
+                          <col className="w-1/2" />
+                          <col className="w-1/4" />
+                          <col className="w-1/4" />
+                        </colgroup>
                         <thead className="bg-muted">
                           <tr><th className="px-3 py-2">No.</th><th className="px-3 py-2">{t.status}</th><th className="px-3 py-2">{t.source}</th></tr>
                         </thead>
