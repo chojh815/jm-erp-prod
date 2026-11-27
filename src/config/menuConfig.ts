@@ -34,7 +34,10 @@ export interface MenuSection {
 export const MENU_SECTIONS: MenuSection[] = [
   {
     label: "Home",
-    items: [{ label: "Home", href: "/home", perm: "home.view" }],
+    items: [
+      { label: "Home", href: "/home", perm: "home.view" },
+      { label: "Ask ERP", href: "/ask-erp", perm: "po.view" },
+    ],
   },
 
   {
